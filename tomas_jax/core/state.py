@@ -1,0 +1,83 @@
+"""TOMAS state structures with enforced float64 precision.
+
+This module defines the immutable state container for the simulation.
+It strictly enforces JAX float64 types to prevent numerical instability
+in aerosol microphysics (values spanning 1e-23 to 1e12).
+"""
+import jax
+# Import config FIRST to trigger the x64 update
+from .config import NBINS, ICOMP
+import jax.numpy as jnp
+from typing import NamedTuple, Any
+
+class TomasState(NamedTuple):
+    """Immutable, JIT-compatible state for TOMAS simulation.
+
+    Attributes:
+        Nk: Number concentration [#/grid cell], shape (ibins,)
+        Mk: Mass concentration [kg/grid cell], shape (ibins, icomp)
+        xk: Bin boundaries [kg], shape (ibins+1,)
+        temp: Temperature [K]
+        pres: Pressure [Pa]
+        boxvol: Grid cell volume [cm³]
+    """
+    Nk: jnp.ndarray
+    Mk: jnp.ndarray
+    xk: jnp.ndarray
+    temp: jnp.ndarray  # Scalar array
+    pres: jnp.ndarray  # Scalar array
+    boxvol: jnp.ndarray  # Scalar array
+
+    @classmethod
+    def create(
+        cls, 
+        Nk: Any, 
+        Mk: Any, 
+        xk: Any, 
+        temp: float, 
+        pres: float, 
+        boxvol: float
+    ) -> "TomasState":
+        """Factory method to create a state with strict type enforcement.
+        
+        This is the preferred way to initialize the state. It ensures all
+        inputs are cast to jnp.float64 and validates shapes.
+        """
+        # 1. Cast to JAX Arrays with float64 enforcement
+        Nk_arr = jnp.asarray(Nk, dtype=jnp.float64)
+        Mk_arr = jnp.asarray(Mk, dtype=jnp.float64)
+        xk_arr = jnp.asarray(xk, dtype=jnp.float64)
+        
+        # Convert scalars to 0-dim JAX arrays (prevents JIT recompilation on value change)
+        t_arr = jnp.asarray(temp, dtype=jnp.float64)
+        p_arr = jnp.asarray(pres, dtype=jnp.float64)
+        v_arr = jnp.asarray(boxvol, dtype=jnp.float64)
+
+        # 2. Shape Integrity Checks
+        # Only run these checks outside of JIT compilation (concrete values)
+        # Inside JIT, shapes are static knowns, but values are tracers.
+        if isinstance(Nk_arr, jnp.ndarray):
+            assert Nk_arr.shape[0] == NBINS, f"Expected {NBINS} bins, got {Nk_arr.shape[0]}"
+
+        return cls(
+            Nk=Nk_arr, 
+            Mk=Mk_arr, 
+            xk=xk_arr, 
+            temp=t_arr, 
+            pres=p_arr, 
+            boxvol=v_arr
+        )
+
+    def update(self, **kwargs) -> "TomasState":
+        """Return a new state with updated fields (Functional setter)."""
+        # _replace is a standard NamedTuple method
+        return self._replace(**kwargs)
+
+    def __repr__(self):
+        """Clean string representation for debugging."""
+        return (
+            f"TomasState(nbins={self.Nk.shape[0]}, "
+            f"ncomp={self.Mk.shape[1]}, "
+            f"temp={self.temp:.2f}K, "
+            f"pres={self.pres:.2f}Pa)"
+        )

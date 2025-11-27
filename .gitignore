@@ -1,0 +1,11 @@
+__pycache__/
+
+.venv/
+
+figures/
+
+data/
+
+logs/
+
+.DS_Store

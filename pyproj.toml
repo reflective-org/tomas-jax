@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tomas-jax"
+version = "0.1.0"
+description = "TOMAS Aerosol Microphysics Model in JAX"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Ali Akherati", email = "ali@reflective.org"}
+]
+dependencies = [
+  "jax",
+  "jaxlib",
+  "diffrax",
+  "numpy",
+  "matplotlib"
+]
+
+[tool.setuptools.packages.find]
+include = ["tomas_jax*"]
+
+# Optional: Configure pytest so you can just type 'pytest' to run checks
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
