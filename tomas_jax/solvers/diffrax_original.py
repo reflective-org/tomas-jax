@@ -2,8 +2,6 @@
 
 Optimized for High Performance Computing (HPC) via JAX JIT compilation.
 Implements 'Operator Splitting' for the Coagulation Kernel.
-
-UPDATED: Uses jax.lax.scan instead of fori_loop to support Automatic Differentiation.
 """
 import math
 import jax
@@ -22,6 +20,7 @@ from ..physics.coagulation_rates import calc_coagulation_rates
 from ..core.mnfix_jax import mnfix_jax
 
 # Optimized Argument Container
+# Passing a NamedTuple is more JIT-friendly than a raw tuple
 class CoagArgs(NamedTuple):
     kij: jnp.ndarray
     xk: jnp.ndarray
@@ -38,9 +37,11 @@ def coagulation_rhs(t: float, state: TomasState, args: CoagArgs) -> TomasState:
     # Unpack pre-computed arguments
     kij, xk, icomp_nodiag = args
 
-    # Calculate Rates
+    # Calculate Rates (Matrix Multiplications - Fast on AVX/GPU)
     dNdt, dMdt = calc_coagulation_rates(state.Nk, state.Mk, kij, xk, icomp_nodiag)
 
+    # Return derivatives
+    # Note: Returning zeros for T, P, etc. allows XLA to optimize them out completely.
     return TomasState(
         Nk=dNdt,
         Mk=dMdt,
@@ -60,16 +61,17 @@ def diffrax_step(
     dt: float,
     icomp_nodiag: int = 42,
     mnfix_interval: Optional[float] = None,
-    rtol: float = 1e-4,
+    rtol: float = 1e-4,  # Tuned for aerosol physics (1e-6 is often overkill)
     atol: float = 1e-10
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Integrate coagulation over timestep dt.
     
-    Uses jax.lax.scan for the inner splitting loop to ensure the function
-    is fully differentiable (compatible with jax.grad).
+    This entire function is designed to be JIT-compiled.
+    It fuses the Physics Setup (Kernel) + ODE Solver + MNFIX Correction.
     """
     
     # 1. Physics Setup (The Heavy Lifting)
+    # Calculated ONCE per global timestep.
     Dpk, Dk, ck = calc_particle_properties(Nk, Mk, temp, pres)
     kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
 
@@ -77,22 +79,19 @@ def diffrax_step(
     if mnfix_interval is None:
         mnfix_interval = dt / 10.0
 
-    # CRITICAL CHANGE: Calculate num_intervals as a Python integer.
-    # jax.lax.scan requires a static length argument.
-    # This works because 'dt' is usually passed as a static float/constant in scripts.
-    try:
-        n_substeps = int(max(1, math.ceil(dt / mnfix_interval)))
-    except TypeError:
-        # If dt is a Tracer (dynamic), we default to 10 steps to keep it compilable
-        # This is a safe fallback for AD
-        n_substeps = 10
-        
-    dt_chunk = dt / n_substeps
+    # Determine loop bounds (must be static for JIT, or use lax.scan)
+    # Using python control flow here works if this function is JIT-compiled 
+    # with 'dt' and 'mnfix_interval' as static, OR if we strictly divide time.
+    # For robustness in JAX, we determine steps roughly:
+    num_intervals = jnp.maximum(1, jnp.ceil(dt / mnfix_interval).astype(int))
+    dt_chunk = dt / num_intervals
 
     # Pack static arguments
     args = CoagArgs(kij=kij, xk=xk, icomp_nodiag=icomp_nodiag)
 
     # Solver Definition
+    # Tsit5 is a 5th order Runge-Kutta (standard for non-stiff problems)
+    # If coagulation is extremely fast (stiff), consider diffrax.Kvaerno5()
     solver = diffrax.Tsit5()
     stepsize_controller = diffrax.PIDController(
         rtol=rtol, 
@@ -106,19 +105,20 @@ def diffrax_step(
     state = TomasState(Nk=Nk, Mk=Mk, temp=temp, pres=pres, xk=xk, boxvol=boxvol)
 
     # 3. Integration Loop (Splitting for MNFIX)
-    # REPLACED fori_loop with SCAN
+    # We use jax.lax.fori_loop to keep the loop inside the compiled XLA kernel.
+    # This is much faster than a Python loop for many iterations.
     
-    def scan_body(current_state, _):
-        # We don't use the loop index '_', just the carried state
+    def loop_body(i, current_state):
+        t0 = i * dt_chunk
+        t1 = (i + 1) * dt_chunk
         
-        # Solve ODE for this chunk (from t=0 to t=dt_chunk)
-        # We perform a "local integration" relative to the chunk start
+        # Solve ODE for this chunk
         solution = diffrax.diffeqsolve(
             term,
             solver,
-            t0=0.0,
-            t1=dt_chunk,
-            dt0=dt_chunk / 10.0, 
+            t0=t0,
+            t1=t1,
+            dt0=dt_chunk / 10.0, # Guess for first step
             y0=current_state,
             args=args,
             stepsize_controller=stepsize_controller,
@@ -126,16 +126,18 @@ def diffrax_step(
             max_steps=5000
         )
         
-        # Extract result
+        # Extract result (remove time dimension)
+        # diffrax returns shape (1, ...), we take index 0
         state_sol = jax.tree_util.tree_map(lambda x: x[0], solution.ys)
         
         # Apply MNFIX (Mass-Number Fix)
+        # This MUST be a pure JAX implementation, not NumPy!
         Nk_fixed, Mk_fixed = mnfix_jax(
             state_sol.Nk, state_sol.Mk, xk, icomp_nodiag
         )
         
-        # Repack state for next iteration
-        next_state = TomasState(
+        # Repack state
+        return TomasState(
             Nk=Nk_fixed,
             Mk=Mk_fixed,
             temp=temp,
@@ -143,11 +145,8 @@ def diffrax_step(
             xk=xk,
             boxvol=boxvol
         )
-        
-        # Carry, Output
-        return next_state, None
 
-    # Execute the loop using scan (Differentiable!)
-    final_state, _ = jax.lax.scan(scan_body, state, None, length=n_substeps)
+    # Execute the loop
+    final_state = jax.lax.fori_loop(0, num_intervals, loop_body, state)
 
     return final_state.Nk, final_state.Mk
