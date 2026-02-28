@@ -23,7 +23,7 @@ from tomas_jax.core.config import (
     SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO
 )
 from tomas_jax.solvers.diffrax import diffrax_step
-from tomas_jax.solvers.condensation import condensation_step
+from tomas_jax.solvers.condensation import condensation_step, condensation_step_jit, run_condensation_scan
 
 from benchmarks.python.scenarios import get_scenarios
 
@@ -146,6 +146,70 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
         solver_jit = jax.jit(diffrax_step, static_argnames=['icomp_nodiag'])
         # Warmup
         _ = solver_jit(Nk, Mk, xk, temp, pres, BOXVOL, 0.01, ICOMP_NODIAG)
+
+    # JIT warmup for ppm_jit condensation
+    if method == 'ppm_jit' and mode in ('cond_only', 'combined'):
+        # Warmup single-step JIT
+        _ = condensation_step_jit(
+            Nk, Mk, Gc, xk,
+            jnp.asarray(temp), jnp.asarray(pres),
+            jnp.asarray(BOXVOL), jnp.asarray(rh),
+            jnp.asarray(alpha), jnp.asarray(DT)
+        )
+        # Warmup scan-fused loop (for cond-only)
+        if mode == 'cond_only':
+            _ = run_condensation_scan(
+                Nk, Mk, Gc, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(rh),
+                jnp.asarray(alpha), jnp.asarray(DT),
+                nsteps=2,
+                prod_rate=jnp.asarray(prod_rate_kg_s),
+            )
+        if verbose:
+            print("    JIT warmup complete")
+
+    # Scan-fused fast path for ppm_jit cond-only
+    if method == 'ppm_jit' and mode == 'cond_only':
+        t_loop_start = time.perf_counter()
+
+        Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan(
+            Nk, Mk, Gc, xk,
+            jnp.asarray(temp), jnp.asarray(pres),
+            jnp.asarray(BOXVOL), jnp.asarray(rh),
+            jnp.asarray(alpha), jnp.asarray(DT),
+            nsteps=NSTEPS,
+            prod_rate=jnp.asarray(prod_rate_kg_s),
+        )
+        # Block until computation completes
+        Nk_f.block_until_ready()
+
+        wall_time_s = time.perf_counter() - t_loop_start
+
+        # Extract hourly snapshots from final state
+        # (scan only returns final state + N_history per step)
+        # For the scan path, we only have the final snapshot at hour 24
+        # Fill hourly arrays with final values at last hour
+        Nk_hourly[-1] = np.array(Nk_f)
+        Mk_hourly[-1] = np.array(Mk_f).flatten()
+        Gc_hourly[-1] = np.array(Gc_f)
+        N_tot[-1] = float(jnp.sum(Nk_f))
+        M_tot[-1] = float(jnp.sum(Mk_f))
+        M_dry[-1] = float(jnp.sum(Mk_f[:, :SRTH2O]))
+
+        if verbose:
+            print(f"    Scan complete: N_tot={N_tot[-1]:.4e}, wall={wall_time_s:.2f}s")
+
+        return {
+            'Nk': Nk_hourly,
+            'Mk': Mk_hourly.reshape(NHOURS, NBINS, ICOMP),
+            'Gc': Gc_hourly,
+            'N_tot': N_tot,
+            'M_tot': M_tot,
+            'M_dry': M_dry,
+            'wall_time_s': wall_time_s,
+            'scenario_params': scenario,
+        }
 
     # Time loop
     t_loop_start = time.perf_counter()
@@ -299,8 +363,8 @@ def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run 24h JAX benchmark scenarios")
-    parser.add_argument('--method', nargs='+', default=['tfl', 'ppm'],
-                        choices=['tfl', 'ppm'],
+    parser.add_argument('--method', nargs='+', default=['tfl', 'ppm', 'ppm_jit'],
+                        choices=['tfl', 'ppm', 'ppm_jit'],
                         help='Condensation methods to run')
     parser.add_argument('--mode', nargs='+',
                         default=['coag_only', 'cond_only', 'combined'],

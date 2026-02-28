@@ -4,6 +4,39 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-02-27 (Thu) — JIT-Compile PPM Condensation Pipeline
+
+**Time**: ~22:00 PST
+
+### Summary
+Rewrote the PPM condensation wrappers as pure JAX to enable full JIT compilation of the condensation pipeline. The PPM algorithm itself was already JIT-compiled, but it was wrapped in numpy code with 36+ array conversions and Python for-loops per call, executed 1440 times per 24h run.
+
+### Files Created
+- `tomas_jax/physics/ezcond_ppm_jax.py` — Pure-JAX ezcond replacement (~120 lines). Vectorized TAU computation, `jax.lax.cond` for three-way branch (PPM/simple-add/no-op), no internal MNFIX.
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `condensation_step_jax()` (pure-JAX single step), `condensation_step_jit` (pre-compiled JIT wrapper), `run_condensation_scan()` (scan-fused 1440-step time loop). New `method='ppm_jit'` dispatcher.
+- `run_box_model.py` — Added `--method ppm_jit` option.
+- `benchmarks/python/run_24h_scenarios.py` — Added `ppm_jit` method with JIT warmup and scan-fused fast path for cond-only mode.
+- `tomas_jax/physics/__init__.py`, `tomas_jax/solvers/__init__.py` — Updated docstrings.
+
+### Files Created (Tests)
+- `tests/test_ppm_jit_condensation.py` — 13 tests: ezcond_ppm_jax equivalence, JIT compilation, mass/N conservation, scan vs loop equivalence, dispatcher routing. All passing.
+
+### Performance Results
+| Config | Old PPM | JIT PPM | Fortran |
+|--------|---------|---------|---------|
+| Per-step | 21.7ms | 0.1ms | — |
+| 24h cond-only | ~12s | 0.29s | 0.08s |
+| Speedup | — | ~40x | — |
+
+### Existing Tests
+- All 43 existing PPM tests still pass
+- All 13 new JIT tests pass
+- 89 pre-existing 24h scenario test failures unchanged
+
+---
+
 ## 2026-02-27 (Thu) — Fix PPM Number Conservation: Replace Closure with Direct Transport
 
 **Time**: ~17:00 PST

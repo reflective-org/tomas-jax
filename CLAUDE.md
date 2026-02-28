@@ -26,7 +26,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **config.py is the single source of truth** for dimensions (NBINS=36, ICOMP=44), species indices, and physical constants. Never hardcode these elsewhere.
 - **TomasState is a NamedTuple** with fields: Nk, Mk, xk, temp, pres, boxvol, Gc, rh, alpha. Use `.create()` factory for initialization, `.update()` for modification.
 - **Coagulation is JIT-compiled** via diffrax (Tsit5 solver). The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
-- **Condensation has two methods:** `method='tfl'` (default, sequential Fortran-faithful) or `method='ppm'` (JIT-compatible PPM advection). TFL uses numpy arrays and Python for-loops. PPM uses `jax.lax.fori_loop` and is JIT-compilable.
+- **Condensation has three methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). TFL uses numpy arrays and Python for-loops. PPM uses `jax.lax.fori_loop` internally but has numpy overhead. PPM_JIT is pure JAX throughout — use `run_condensation_scan()` for scan-fused time loops.
 - **Operator splitting:** Each timestep runs coagulation (JIT) then condensation independently.
 
 ## File Layout
@@ -39,18 +39,19 @@ tomas_jax/
   physics/condensation.py     — TFL condensation (dmdt_int + tmcond)
   physics/condensation_ppm.py — PPM condensation (Eulerian advection, JIT)
   physics/ezcond.py           — TFL ezcond driver
-  physics/ezcond_ppm.py       — PPM ezcond driver
+  physics/ezcond_ppm.py       — PPM ezcond driver (numpy wrapper)
+  physics/ezcond_ppm_jax.py   — Pure-JAX PPM ezcond driver (JIT-compilable)
   physics/gas_properties.py   — Gas diffusivity, MFP, Fuchs-Sutugin correction
   physics/condensation_sink.py — Condensation sink CS [s^-1] and per-bin fractions
   physics/nh3_equilibrium.py  — NH3/NH4 stoichiometric equilibrium
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
   solvers/diffrax.py          — Coagulation ODE solver (Tsit5 + MNFIX)
-  solvers/condensation.py     — Condensation operator-split driver (method='tfl'|'ppm')
+  solvers/condensation.py     — Condensation driver (method='tfl'|'ppm'|'ppm_jit') + scan-fused loop
 
 benchmarks/
   fortran/benchmark_24h.f     — Fortran 24h benchmark harness
   python/scenarios.py         — LHC scenario generator (50 scenarios)
-  python/run_24h_scenarios.py — JAX 24h runner (3 modes × 2 methods)
+  python/run_24h_scenarios.py — JAX 24h runner (3 modes × 3 methods)
   python/compare_24h.py       — 3-way comparison (Fortran vs TFL vs PPM)
   python/plot_24h_summary.py  — 8 summary plots
   python/plot_24h_timing.py   — Timing comparison plots
@@ -73,6 +74,7 @@ The condensation modules are direct ports of TOMAS Fortran:
 - `condensation_ppm.py` — PPM advection (new, no Fortran equivalent)
 - `ezcond.py` ← ezcond.f
 - `ezcond_ppm.py` — PPM driver (same interface as ezcond, uses PPM internally)
+- `ezcond_ppm_jax.py` — Pure-JAX PPM driver (JIT-compilable version of ezcond_ppm.py)
 - `nh3_equilibrium.py` ← eznh3eqm.f
 - `water_equilibrium.py` ← waterso4.f, waternacl.f, ezwatereqm.f
 - `gas_properties.py` ← gasdiff.f, getCondSink.f

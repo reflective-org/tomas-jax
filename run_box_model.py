@@ -319,8 +319,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="TOMAS Box Model")
-    parser.add_argument('--method', choices=['tfl', 'ppm'], default='tfl',
-                        help='Condensation method: tfl (default) or ppm')
+    parser.add_argument('--method', choices=['tfl', 'ppm', 'ppm_jit'], default='tfl',
+                        help='Condensation method: tfl (default), ppm, or ppm_jit')
     parser.add_argument('--no-condensation', action='store_true',
                         help='Disable condensation')
     args = parser.parse_args()

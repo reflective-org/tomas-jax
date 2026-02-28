@@ -12,7 +12,8 @@ Condensation:
     condensation        - TFL condensation algorithm (dmdt_int + tmcond)
     condensation_ppm    - PPM condensation algorithm (Eulerian advection, JIT-compatible)
     ezcond              - Simple condensation driver with sub-stepping (TFL)
-    ezcond_ppm          - PPM-aware condensation driver
+    ezcond_ppm          - PPM-aware condensation driver (numpy wrapper)
+    ezcond_ppm_jax      - Pure-JAX PPM condensation driver (JIT-compilable)
 
 Equilibrium:
     nh3_equilibrium     - NH3/NH4 stoichiometric partitioning
