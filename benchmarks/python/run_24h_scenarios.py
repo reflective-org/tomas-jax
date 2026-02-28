@@ -23,7 +23,11 @@ from tomas_jax.core.config import (
     SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO
 )
 from tomas_jax.solvers.diffrax import diffrax_step
-from tomas_jax.solvers.condensation import condensation_step, condensation_step_jit, run_condensation_scan
+from tomas_jax.solvers.condensation import (
+    condensation_step,
+    condensation_step_jit, run_condensation_scan,
+    condensation_step_tfl_jit, run_condensation_scan_tfl,
+)
 
 from benchmarks.python.scenarios import get_scenarios
 
@@ -147,10 +151,12 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
         # Warmup
         _ = solver_jit(Nk, Mk, xk, temp, pres, BOXVOL, 0.01, ICOMP_NODIAG)
 
-    # JIT warmup for ppm_jit condensation
-    if method == 'ppm_jit' and mode in ('cond_only', 'combined'):
+    # JIT warmup for ppm_jit or tfl_jit condensation
+    if method in ('ppm_jit', 'tfl_jit') and mode in ('cond_only', 'combined'):
+        jit_fn = condensation_step_tfl_jit if method == 'tfl_jit' else condensation_step_jit
+        scan_fn = run_condensation_scan_tfl if method == 'tfl_jit' else run_condensation_scan
         # Warmup single-step JIT
-        _ = condensation_step_jit(
+        _ = jit_fn(
             Nk, Mk, Gc, xk,
             jnp.asarray(temp), jnp.asarray(pres),
             jnp.asarray(BOXVOL), jnp.asarray(rh),
@@ -158,7 +164,7 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
         )
         # Warmup scan-fused loop (for cond-only)
         if mode == 'cond_only':
-            _ = run_condensation_scan(
+            _ = scan_fn(
                 Nk, Mk, Gc, xk,
                 jnp.asarray(temp), jnp.asarray(pres),
                 jnp.asarray(BOXVOL), jnp.asarray(rh),
@@ -169,11 +175,12 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
         if verbose:
             print("    JIT warmup complete")
 
-    # Scan-fused fast path for ppm_jit cond-only
-    if method == 'ppm_jit' and mode == 'cond_only':
+    # Scan-fused fast path for ppm_jit/tfl_jit cond-only
+    if method in ('ppm_jit', 'tfl_jit') and mode == 'cond_only':
+        scan_fn = run_condensation_scan_tfl if method == 'tfl_jit' else run_condensation_scan
         t_loop_start = time.perf_counter()
 
-        Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan(
+        Nk_f, Mk_f, Gc_f, N_hist = scan_fn(
             Nk, Mk, Gc, xk,
             jnp.asarray(temp), jnp.asarray(pres),
             jnp.asarray(BOXVOL), jnp.asarray(rh),
@@ -363,8 +370,8 @@ def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run 24h JAX benchmark scenarios")
-    parser.add_argument('--method', nargs='+', default=['tfl', 'ppm', 'ppm_jit'],
-                        choices=['tfl', 'ppm', 'ppm_jit'],
+    parser.add_argument('--method', nargs='+', default=['tfl', 'tfl_jit', 'ppm', 'ppm_jit'],
+                        choices=['tfl', 'tfl_jit', 'ppm', 'ppm_jit'],
                         help='Condensation methods to run')
     parser.add_argument('--mode', nargs='+',
                         default=['coag_only', 'cond_only', 'combined'],

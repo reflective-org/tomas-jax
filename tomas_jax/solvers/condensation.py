@@ -41,6 +41,7 @@ from ..core.config import (
 from ..physics.condensation_sink import calc_condensation_sink
 from ..physics.ezcond import ezcond
 from ..physics.ezcond_ppm_jax import ezcond_ppm_jax
+from ..physics.condensation_tfl_jax import ezcond_tfl_jax
 from ..physics.nh3_equilibrium import eznh3eqm
 from ..physics.water_equilibrium import calc_equilibrium_water
 from ..core.mnfix_jax import mnfix_jax
@@ -88,6 +89,14 @@ def condensation_step(
     # Dispatch to pure-JAX path if requested
     if method == 'ppm_jit':
         return condensation_step_jax(
+            Nk, Mk, Gc, xk,
+            jnp.asarray(temp), jnp.asarray(pres),
+            jnp.asarray(boxvol), jnp.asarray(rh),
+            jnp.asarray(alpha), jnp.asarray(dt)
+        )
+
+    if method == 'tfl_jit':
+        return condensation_step_tfl_jax(
             Nk, Mk, Gc, xk,
             jnp.asarray(temp), jnp.asarray(pres),
             jnp.asarray(boxvol), jnp.asarray(rh),
@@ -251,8 +260,84 @@ def condensation_step_jax(
     return Nk, Mk, Gc
 
 
-# Pre-compiled JIT version
+# Pre-compiled JIT versions
 condensation_step_jit = jax.jit(condensation_step_jax)
+
+
+# =========================================================================
+# Pure-JAX TFL condensation step (JIT-compilable, Fortran-matching)
+# =========================================================================
+
+def condensation_step_tfl_jax(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Pure-JAX condensation step using TFL algorithm — Fortran-matching.
+
+    Same pipeline as condensation_step_jax but uses ezcond_tfl_jax
+    (TFL tmcond) instead of ezcond_ppm_jax (PPM advection).
+
+    Args/Returns: Same as condensation_step_jax.
+    """
+    # 0. MNFIX input
+    Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
+
+    # 1. Condensation sink
+    CS, sinkfrac = calc_condensation_sink(
+        Nk, Mk, temp, pres, boxvol,
+        MW_H2SO4, SV_H2SO4, alpha
+    )
+
+    # 2. H2SO4 condensation
+    gc_so4 = Gc[SRTSO4]
+    mcond_so4 = gc_so4 * (1.0 - jnp.exp(-CS * dt))
+    mcond_so4 = jnp.where((CS > CS_EPS) & (gc_so4 > 0.0), mcond_so4, 0.0)
+
+    Gc_new = Gc.at[SRTSO4].add(-mcond_so4)
+
+    # Dump path
+    dump_N = gc_so4 / jnp.sqrt(xk[0] * xk[1])
+    Nk_dump = Nk.at[0].add(dump_N)
+    Mk_dump = Mk.at[0, SRTSO4].add(gc_so4)
+    Gc_dump = Gc.at[SRTSO4].set(0.0)
+
+    should_dump = (CS <= CS_EPS) & (gc_so4 > 0.0)
+
+    # Condense via TFL
+    Nk_cond, Mk_cond = ezcond_tfl_jax(
+        Nk, Mk, mcond_so4, SRTSO4,
+        xk, temp, pres, boxvol, alpha
+    )
+
+    # Select path
+    has_gas = gc_so4 > 0.0
+    Nk = jnp.where(should_dump, Nk_dump,
+                    jnp.where(has_gas & (CS > CS_EPS), Nk_cond, Nk))
+    Mk = jnp.where(should_dump, Mk_dump,
+                    jnp.where(has_gas & (CS > CS_EPS), Mk_cond, Mk))
+    Gc = jnp.where(should_dump, Gc_dump, Gc_new)
+
+    # 3. NH3 equilibrium
+    Gc, Mk = eznh3eqm(Gc, Mk)
+
+    # 4. Water equilibrium
+    Mk = calc_equilibrium_water(Mk, rh)
+
+    # 5. MNFIX cleanup
+    Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
+
+    return Nk, Mk, Gc
+
+
+condensation_step_tfl_jit = jax.jit(condensation_step_tfl_jax)
 
 
 # =========================================================================
@@ -274,37 +359,48 @@ def run_condensation_scan(
     nsteps: int,
     prod_rate: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Run nsteps condensation steps fused into a single XLA program.
-
-    Eliminates Python dispatch overhead by compiling the entire time loop.
-
-    Args:
-        Nk, Mk, Gc, xk: Initial state arrays
-        temp, pres, boxvol, rh, alpha: Environment parameters
-        dt: Timestep [s]
-        nsteps: Number of steps (static, must be known at compile time)
-        prod_rate: H2SO4 production rate [kg/grid cell/s]
-
-    Returns:
-        Nk_final, Mk_final, Gc_final: Final state
-        N_history: Total number at each step, shape (nsteps,)
-    """
+    """Run nsteps PPM condensation steps fused into a single XLA program."""
     def step_fn(carry, _):
         Nk_c, Mk_c, Gc_c = carry
-
-        # Add H2SO4 production
         Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
-
-        # Condensation step
         Nk_c, Mk_c, Gc_c = condensation_step_jax(
             Nk_c, Mk_c, Gc_c, xk,
             temp, pres, boxvol, rh, alpha, dt
         )
-
         return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
 
     (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
         step_fn, (Nk, Mk, Gc), None, length=nsteps
     )
+    return Nk_f, Mk_f, Gc_f, N_history
 
+
+@partial(jax.jit, static_argnums=(10,))
+def run_condensation_scan_tfl(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    nsteps: int,
+    prod_rate: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Run nsteps TFL condensation steps fused into a single XLA program."""
+    def step_fn(carry, _):
+        Nk_c, Mk_c, Gc_c = carry
+        Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+        Nk_c, Mk_c, Gc_c = condensation_step_tfl_jax(
+            Nk_c, Mk_c, Gc_c, xk,
+            temp, pres, boxvol, rh, alpha, dt
+        )
+        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+
+    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+        step_fn, (Nk, Mk, Gc), None, length=nsteps
+    )
     return Nk_f, Mk_f, Gc_f, N_history

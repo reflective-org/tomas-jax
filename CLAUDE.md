@@ -26,7 +26,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **config.py is the single source of truth** for dimensions (NBINS=36, ICOMP=44), species indices, and physical constants. Never hardcode these elsewhere.
 - **TomasState is a NamedTuple** with fields: Nk, Mk, xk, temp, pres, boxvol, Gc, rh, alpha. Use `.create()` factory for initialization, `.update()` for modification.
 - **Coagulation is JIT-compiled** via diffrax (Tsit5 solver). The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
-- **Condensation has three methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). TFL uses numpy arrays and Python for-loops. PPM uses `jax.lax.fori_loop` internally but has numpy overhead. PPM_JIT is pure JAX throughout — use `run_condensation_scan()` for scan-fused time loops.
+- **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). TFL_JIT is the recommended fast path — matches Fortran output exactly while being 43x faster than sequential TFL. Use `run_condensation_scan_tfl()` for scan-fused time loops. Note: PPM produces overly narrow distributions; TFL matches Fortran.
 - **Operator splitting:** Each timestep runs coagulation (JIT) then condensation independently.
 
 ## File Layout
@@ -41,12 +41,13 @@ tomas_jax/
   physics/ezcond.py           — TFL ezcond driver
   physics/ezcond_ppm.py       — PPM ezcond driver (numpy wrapper)
   physics/ezcond_ppm_jax.py   — Pure-JAX PPM ezcond driver (JIT-compilable)
+  physics/condensation_tfl_jax.py — Pure-JAX TFL condensation (tmcond_jax + ezcond_tfl_jax, JIT)
   physics/gas_properties.py   — Gas diffusivity, MFP, Fuchs-Sutugin correction
   physics/condensation_sink.py — Condensation sink CS [s^-1] and per-bin fractions
   physics/nh3_equilibrium.py  — NH3/NH4 stoichiometric equilibrium
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
   solvers/diffrax.py          — Coagulation ODE solver (Tsit5 + MNFIX)
-  solvers/condensation.py     — Condensation driver (method='tfl'|'ppm'|'ppm_jit') + scan-fused loop
+  solvers/condensation.py     — Condensation driver (method='tfl'|'tfl_jit'|'ppm'|'ppm_jit') + scan-fused loops
 
 benchmarks/
   fortran/benchmark_24h.f     — Fortran 24h benchmark harness

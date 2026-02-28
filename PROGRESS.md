@@ -4,6 +4,57 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-02-28 (Fri) — JIT-Compile TFL Condensation (Fortran-Matching, 43x Speedup)
+
+**Time**: ~00:00 PST
+
+### Summary
+Created a pure-JAX, JIT-compilable version of the TFL (Tzivion-Feingold-Levin) condensation algorithm. The sequential TFL matches Fortran output well (unlike PPM which produces overly narrow distributions), so JIT-compiling TFL gives us both accuracy and speed.
+
+### Approach
+- Vectorized top-hat construction and dmdt_int translation across all bins
+- `jax.lax.fori_loop` over 36 source bins with vectorized overlap-fraction scatter inside
+- Condensing species uses inverse dmdt_int at bin boundaries for trapezoidal interpolation, matching Fortran's 1.5*YM for full middle bins
+- Three-way branch via `jax.lax.cond` (tmcond / simple-add / no-op)
+- `jax.lax.scan` fuses the 1440-step time loop into a single XLA program
+
+### Files Created
+- `tomas_jax/physics/condensation_tfl_jax.py` — Pure-JAX TFL: `tmcond_jax()` (vectorized bin remapping) + `ezcond_tfl_jax()` (condensation driver). ~370 lines.
+- `tests/test_tfl_jit_condensation.py` — 15 tests: tmcond zero-tau/shift/JIT, ezcond zero-mcond/JIT, full-step no-nan/gas-depletion/mass-conservation/JIT/1-step-match/60-step-match, scan runs/scan-vs-loop/N-conservation, dispatcher. All passing.
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `condensation_step_tfl_jax()`, `condensation_step_tfl_jit`, `run_condensation_scan_tfl()`. New `method='tfl_jit'` dispatcher.
+- `run_box_model.py` — Added `--method tfl_jit` option.
+- `benchmarks/python/run_24h_scenarios.py` — Added `tfl_jit` method with JIT warmup and scan-fused fast path.
+- `benchmarks/python/compare_methods.py` — Added TFL_JIT to 5-way comparison (Fortran/TFL/TFL_JIT/PPM/PPM_JIT).
+- `tomas_jax/solvers/__init__.py` — Updated docstring.
+
+### Performance Results (S01 cond-only, 24h)
+| Method | Wall Time | vs Fortran | vs Sequential TFL |
+|--------|-----------|------------|-------------------|
+| Fortran | 0.091s | 1.0x | — |
+| TFL (sequential) | 13.942s | 153x slower | 1.0x |
+| **TFL JIT** | **0.323s** | **3.5x slower** | **43x faster** |
+| PPM (sequential) | 131.327s | 1443x slower | — |
+| PPM JIT | 0.321s | 3.5x slower | — |
+
+### Validation
+- TFL JIT matches sequential TFL exactly after 1 step (N_tot rel_diff=0.00e+00, M_dry rel_diff=4.79e-16)
+- TFL JIT matches sequential TFL exactly after 60 steps (N_tot rel_diff=0.00e+00, M_dry rel_diff=3.02e-16, all significant bins identical)
+- TFL JIT matches sequential TFL after 6 hours in full comparison (N_ratio=0.999846 for both)
+- Mass conservation error < 1e-4 relative at hour 6
+- All 15 TFL JIT tests pass, all 43 PPM tests pass, all 13 PPM JIT tests pass
+
+### PPM Accuracy Issue Identified
+PPM produces overly narrow size distributions (1-bin spike) that don't match Fortran. TFL matches Fortran well. This is a pre-existing algorithmic issue with PPM (not a JIT bug — PPM JIT matches PPM exactly). The TFL JIT approach bypasses this entirely.
+
+### Known Limitations
+- TFL JIT is 3.5x slower than Fortran (Fortran uses hand-optimized sequential loops; JAX pays XLA dispatch + fori_loop overhead)
+- JIT compilation takes ~30-60s on first call (subsequent calls reuse cached XLA)
+- PPM accuracy issue remains open (not addressed in this change)
+
+---
+
 ## 2026-02-27 (Thu) — JIT-Compile PPM Condensation Pipeline
 
 **Time**: ~22:00 PST
