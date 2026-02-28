@@ -106,7 +106,7 @@ def plot_time_series(
     # Left Axis: Number
     color = 'tab:blue'
     ax1.set_xlabel('Time [s]')
-    ax1.set_ylabel('Total Number [#/cell]', color=color)
+    ax1.set_ylabel('Total Number [#]', color=color)
     ax1.plot(t, N, color=color, lw=2)
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.grid(True, alpha=0.3)
@@ -114,7 +114,7 @@ def plot_time_series(
     # Right Axis: Mass
     ax2 = ax1.twinx()
     color = 'tab:red'
-    ax2.set_ylabel('Total Mass [kg/cell]', color=color)
+    ax2.set_ylabel('Total Mass [kg]', color=color)
     # Plot mass as a dashed line (should be flat if conserved)
     ax2.plot(t, M, color=color, linestyle='--', lw=2)
     ax2.tick_params(axis='y', labelcolor=color)

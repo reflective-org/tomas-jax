@@ -1,4 +1,5 @@
 __pycache__/
+*.pyc
 
 .venv/
 
@@ -9,3 +10,18 @@ data/
 logs/
 
 .DS_Store
+
+# Fortran build artifacts
+*.o
+*.exe
+*.mod
+
+# Benchmark output data (large, regeneratable)
+benchmarks/fortran/output/
+benchmarks/results/
+
+# Pytest cache
+.pytest_cache/
+
+# Egg/install metadata
+*.egg-info/

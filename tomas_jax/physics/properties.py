@@ -38,11 +38,9 @@ def calc_air_properties(
     mu = 2.5277e-7 * jnp.power(temp, 0.75302)
 
     # Mean free path (S&P eqn 8.6)
-    # multicoag.f line 123
-    # optimization: precompute sqrt(8/(pi*R))
-    # sqrt(8 / (pi * 8.314...)) approx 0.553
-    mean_speed_air = jnp.sqrt(8.0 * R_GAS * temp / (PI * MOLAR_MASS_AIR))
-    mfp = 2.0 * mu / (pres * mean_speed_air)
+    # multicoag.f line 123: mfp = 2*mu / (pres * sqrt(8*M_air/(pi*R*T)))
+    # This equals 2*mu / (rho_air * c_bar_air) where rho = pres*M/(R*T)
+    mfp = 2.0 * mu / (pres * jnp.sqrt(8.0 * MOLAR_MASS_AIR / (PI * R_GAS * temp)))
 
     return mu, mfp
 
@@ -76,8 +74,8 @@ def calc_diffusivity_vectorized(
     
     # Numerator: 5 + 4Kn + 6Kn^2 + 18Kn^3
     Kn2 = jnp.square(Kn)
-    num = 5.0 + Kn * (4.0 + Kn2 * (6.0 + 18.0 * Kn))
-    
+    num = 5.0 + Kn * (4.0 + Kn * (6.0 + 18.0 * Kn))
+
     # Denominator: 5 - Kn + (8 + pi)Kn^2
     den = 5.0 - Kn + (8.0 + PI) * Kn2
     

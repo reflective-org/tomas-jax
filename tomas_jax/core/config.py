@@ -54,6 +54,27 @@ R_GAS = 8.314462618     # Gas constant (J/mol K)
 AVOGADRO = 6.02214076e23
 MOLAR_MASS_AIR = 0.0289647  # kg/mol (Standard Atmosphere)
 
-# Minimum thresholds for numerical stability
+# =========================================================================
+# 5. Condensation Parameters
+# =========================================================================
+IORG = 41                       # Number of organic species (indices 1-41)
+N_GAS_SPECIES = ICOMP - 1      # 43 — Gc dimension (all species except water)
+
+# Molecular weights [g/mol]
+MW_H2SO4 = 98.0
+MW_NH3 = 17.0
+MW_NH4 = 18.0
+MW_SO4 = 96.0
+
+# Diffusion volumes (Fuller-Schettler-Giddings method)
+SV_H2SO4 = 42.88               # Sum of atomic diffusion volumes for H2SO4
+
+# Condensation numerical thresholds
+NEPS_COND = 1.0e-5             # Minimum number for condensation
+CS_EPS = 1.0e-20               # Minimum condensation sink
+
+# =========================================================================
+# 6. Minimum thresholds for numerical stability
+# =========================================================================
 TINY_N = 1.0e-20    # Threshold for number concentration
 TINY_M = 1.0e-25    # Threshold for mass

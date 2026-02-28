@@ -15,7 +15,7 @@ from typing import NamedTuple
 
 # Import indices from state (assuming standard TOMAS configuration)
 # You can also pass these as arguments if they vary dynamically
-from ..core.config import SRTSO4, SRTNH4, SRTH2O #, SRTNACL
+from ..core.config import SRTSO4, SRTNH4, SRTH2O, SRTORG1, SRTORGLAST #, SRTNACL
 
 # Molecular Weights [g/mol] -> used as ratios, so units cancel or matter relatively
 MWSO4 = 96.0
@@ -41,7 +41,8 @@ def calc_density(Mk: jnp.ndarray) -> jnp.ndarray:
     """
     # 1. Extract Species Mass
     # Slicing Mk is efficient (view, not copy)
-    mso4 = Mk[:, SRTSO4]
+    # FORTRAN: aerodens(Mk(k,srtso4)+orgmass, ...) lumps organics with sulfate
+    mso4 = Mk[:, SRTSO4] + jnp.sum(Mk[:, SRTORG1:SRTORGLAST+1], axis=1)
     mnh4 = Mk[:, SRTNH4]
     mh2o = Mk[:, SRTH2O]
     mnacl = 0.0
@@ -92,17 +93,9 @@ def calc_density(Mk: jnp.ndarray) -> jnp.ndarray:
     nan = nno3 # Ammonium Nitrate
 
     # 6. Calculate Weight Percents (x)
-    # We need total mass of the SOLUTION (solutes + water + etc)
-    # Re-sum mtot based on species to be perfectly consistent with moles
-    mtot_sol = (
-        nan * MWAN + 
-        ns0 * MWS0 + 
-        ns1 * MWS1 + 
-        ns2 * MWS2 + 
-        nnacl * MWNACL + 
-        mh2o
-    )
-    mtot_safe = jnp.maximum(mtot_sol, 1e-30)
+    # FORTRAN uses raw input component masses for mtot (not reconstructed compounds)
+    # mtot = mso4 + mno3 + mnh4 + mnacl + mh2o
+    mtot_safe = jnp.maximum(mso4 + mno3 + mnh4 + mnacl + mh2o, 1e-30)
     
     # Percentages (0-100 scale)
     factor = 100.0 / mtot_safe
@@ -157,10 +150,9 @@ def calc_density(Mk: jnp.ndarray) -> jnp.ndarray:
     density = sg * 1000.0
 
     # 9. Handle Dry/Empty Limit
-    # If total mass is vanishingly small, default to water density (1000 kg/m³)
-    # or a standard particle density (e.g. 1770) depending on preference.
-    # The original code defaulted to water.
-    is_empty = mtot < 1e-20
+    # FORTRAN aerodens.f: if (mtot .lt. 1.e-15) aerodens=1000.
+    # Match FORTRAN threshold for benchmark compatibility.
+    is_empty = mtot < 1e-15
     density = jnp.where(is_empty, 1000.0, density)
 
     return density

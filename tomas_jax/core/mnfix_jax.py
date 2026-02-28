@@ -121,9 +121,12 @@ def mnfix_jax(
     # =========================================================================
     # 6. Final Cleanup (Empty Bins)
     # =========================================================================
-    # Ensure empty bins have consistent (tiny) values to prevent NaNs in next step
-    
-    mask_empty = Nk_new < TINY_N
+    # Ensure empty bins have consistent (tiny) values to prevent NaNs in next step.
+    # A bin is "empty" if N is tiny OR if it has number but negligible dry mass
+    # (the latter can occur after PPM mass conservation rescaling zeroes out mass).
+
+    drymass_new = jnp.sum(Mk_new[:, :icomp_nodiag], axis=1)
+    mask_empty = (Nk_new < TINY_N) | ((Nk_new >= TINY_N) & (drymass_new < NEPS))
     
     # Reset N to tiny epsilon
     Nk_final = jnp.where(mask_empty, TINY_N, Nk_new)

@@ -84,7 +84,7 @@ def run_simulation(n_total_input):
     # 2. Define Time Loop
     # We use jax.lax.scan instead of a Python 'while' loop.
     # scan is differentiable; python loops are not easily differentiated.
-    total_time = 3600.0 * 24  # 2 hours
+    total_time = 3600.0 * 6  # 6 hours
     dt_model = 60.0          # 1 minute steps
     num_steps = int(total_time / dt_model)
 
@@ -172,7 +172,7 @@ def main():
     
     color = 'tab:blue'
     ax1.set_xlabel('Initial Concentration [#/cm³]')
-    ax1.set_ylabel('Final Total Number [#/cell]', color=color)
+    ax1.set_ylabel('Final Total Number [#]', color=color)
     ax1.loglog(concs, results, color=color, lw=2, label='Final N')
     ax1.tick_params(axis='y', labelcolor=color)
     ax1.grid(True, which="both", alpha=0.3)

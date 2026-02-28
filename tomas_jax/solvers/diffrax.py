@@ -16,6 +16,7 @@ from typing import Tuple, NamedTuple, Optional
 
 # Assumes these modules exist in your project structure
 from ..core.state import TomasState
+from ..core.config import N_GAS_SPECIES
 from ..physics.properties import calc_particle_properties
 from ..physics.coagulation_kernel import calc_coagulation_kernel
 from ..physics.coagulation_rates import calc_coagulation_rates
@@ -44,10 +45,13 @@ def coagulation_rhs(t: float, state: TomasState, args: CoagArgs) -> TomasState:
     return TomasState(
         Nk=dNdt,
         Mk=dMdt,
+        xk=jnp.zeros_like(xk),
         temp=0.0,
         pres=0.0,
-        xk=jnp.zeros_like(xk),
-        boxvol=0.0
+        boxvol=0.0,
+        Gc=jnp.zeros(N_GAS_SPECIES),
+        rh=0.0,
+        alpha=0.0
     )
 
 def diffrax_step(
@@ -102,8 +106,12 @@ def diffrax_step(
     )
     term = diffrax.ODETerm(coagulation_rhs)
 
-    # Initial State Wrapper
-    state = TomasState(Nk=Nk, Mk=Mk, temp=temp, pres=pres, xk=xk, boxvol=boxvol)
+    # Initial State Wrapper (Gc, rh, alpha are preserved unchanged through coagulation)
+    Gc_zero = jnp.zeros(N_GAS_SPECIES)
+    state = TomasState(
+        Nk=Nk, Mk=Mk, xk=xk, temp=temp, pres=pres, boxvol=boxvol,
+        Gc=Gc_zero, rh=0.0, alpha=0.0
+    )
 
     # 3. Integration Loop (Splitting for MNFIX)
     # REPLACED fori_loop with SCAN
@@ -134,14 +142,17 @@ def diffrax_step(
             state_sol.Nk, state_sol.Mk, xk, icomp_nodiag
         )
         
-        # Repack state for next iteration
+        # Repack state for next iteration (preserve Gc, rh, alpha)
         next_state = TomasState(
             Nk=Nk_fixed,
             Mk=Mk_fixed,
+            xk=xk,
             temp=temp,
             pres=pres,
-            xk=xk,
-            boxvol=boxvol
+            boxvol=boxvol,
+            Gc=Gc_zero,
+            rh=0.0,
+            alpha=0.0
         )
         
         # Carry, Output
