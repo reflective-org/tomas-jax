@@ -4,6 +4,54 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-02 (Sun) — PPM Analytical Mass-Weighted Flux Fix + Vectorized Species Transport
+
+**Time**: ~11:00 PST
+
+### Problem
+
+PPM condensation had two critical issues:
+1. **81% N loss over 24h** — The `passive_flux` function used `F_M = F_N * r_avg_donor`, assigning average mass to all departing particles. But PPM selectively removes particles from the bin edge (where they're 2x heavier), causing systematic mass underestimate → M/N mismatch → MNFIX clips → N loss death spiral.
+2. **~150x slower than Fortran** — Species transport used `jax.lax.fori_loop` over 44 species, creating convoluted XLA control flow instead of matrix math.
+
+### Fix: Analytical Mass-Weighted Integrals
+
+Replaced naive `F_M = F_N * r_avg` with exact analytical integral of `m(η)*n(η)` over the departure region:
+- `m(η) = m_L * exp(a*η)` is the dry mass at position η within a bin (mass-doubling: 2x variation)
+- `n(η) = n_L + b*η - n_6*η²` is the PPM number density parabola
+- Antiderivatives: `∫ η^k * exp(aη) dη` for k=0,1,2
+
+New functions in `condensation_ppm.py`:
+- `_mass_antideriv(eta)` — evaluates antiderivatives of η^k * exp(aη)
+- `_integrate_mass_parabola_right/left()` — mass integrals over departure regions
+- `ppm_mass_flux()` — computes F_M_dry at each edge using mass-weighted integrals
+- `species_flux()` — vectorized, all 44 species in one matrix multiply (no loops)
+
+Key normalization insight: `species_flux` uses `M_dry_analytical` from `dry_mass_from_ppm_number()` (not tracked mass) to ensure exact conservation when C=1.
+
+### Results (49 scenarios, 24h)
+
+| Mode | N_tot error (median) | Mass conservation | JAX wall time | JAX/Fortran |
+|------|---------------------|-------------------|---------------|-------------|
+| Cond PPM_JIT | 2.08e-7 | 8.6e-16 | 0.26s | 3.4x |
+| Cond TFL_JIT | 2.08e-7 | 5.9e-15 | 0.47s | 6.2x |
+| Combined PPM_JIT | 2.18e-3 | 1.9e-10 | 0.41s | 1.3x |
+| Coag-Only | 1.83e-3 | 1.9e-10 | 0.15s | 0.57x |
+
+PPM_JIT is **1.8x faster than TFL_JIT** for condensation, with machine-precision mass conservation and perfect N conservation.
+
+### Files Modified
+
+- `tomas_jax/physics/condensation_ppm.py` — Added analytical mass-weighted flux functions, replaced `passive_flux` with vectorized `species_flux`, removed `closure_update`, eliminated `fori_loop` over species
+- `tests/test_ppm_condensation.py` — Updated imports and tests for new API (removed `passive_flux`/`closure_update`, added `species_flux`/`ppm_mass_flux` tests)
+- `benchmarks/python/run_ppm_analytical_benchmark.py` — **NEW**: 49 scenarios x 5 modes benchmark
+
+### Output
+
+- `benchmarks/results/2026-03-02-ppm-analytical/` — 9 figures + summary.txt
+
+---
+
 ## 2026-03-01 (Sat) — Fix TFL Condensation Oscillation (Root Cause: MNFIX + Condensation Sink)
 
 **Time**: ~00:30 PST

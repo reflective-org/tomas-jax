@@ -1,285 +1,486 @@
-# Condensation Pipeline Architecture
+# TOMAS-JAX Architecture
 
-This document describes the condensation/evaporation implementation in TOMAS-JAX, including data flow, Fortran mapping, and design decisions.
+This document describes the complete TOMAS-JAX system: how every module connects, all four condensation methods, critical bug fixes, and how to run everything.
 
-## Overview
+---
 
-Condensation is implemented as an **operator-split** step that runs after the JIT-compiled coagulation solver. Two bin redistribution methods are available:
+## 1. System Overview
 
-- **TFL** (Phase 1, default): Sequential Python loops (numpy) matching the original Fortran line-by-line
-- **PPM** (Phase 2): JIT-compatible Eulerian advection in log-mass space via `jax.lax.fori_loop`
-
-```
-                    Model Timestep (e.g., 60 s)
-                    ===========================
-
- H2SO4 Source ──> Coagulation (JIT) ──> Condensation ──> Output
-                       |                     |
-                   diffrax.py          condensation.py (solver)
-                   Tsit5 + MNFIX          method='tfl' | method='ppm'
-                                    ┌──────────┼──────────────┐
-                                    |          |              |
-                              H2SO4 cond   NH3 eqm     Water eqm
-                                    |      (eznh3eqm)  (ezwatereqm)
-                               ┌────┴────┐
-                               |         |
-                          method='tfl' method='ppm'
-                               |         |
-                          ezcond()   ezcond_ppm()
-                               |         |
-                          tmcond()   ppm_condensation_step()
-                          (TFL alg.) (PPM advection, JIT)
-```
-
-## Data Flow
-
-### Entry Point: `condensation_step()`
-
-**File:** `tomas_jax/solvers/condensation.py`
+TOMAS-JAX implements three aerosol microphysics processes via operator splitting:
 
 ```
-Input:  Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
-Output: Nk_new, Mk_new, Gc_new
+                         Model Timestep (e.g., 60 s)
+                         ===========================
+
+  H2SO4 Source ──> Coagulation (JIT) ──> Condensation ──> Output
+                        |                     |
+                    diffrax.py          condensation.py (solver)
+                    Tsit5 + MNFIX       method = 'tfl' | 'tfl_jit' | 'ppm' | 'ppm_jit'
 ```
 
-**Sequence:**
+Each timestep:
 
-1. **Condensation Sink** (`calc_condensation_sink`)
-   - Computes CS [s^-1] = first-order gas loss rate
-   - Returns per-bin sink fractions for mass distribution
+1. **H2SO4 source** — Add gas-phase production to `Gc[SO4]`
+2. **Coagulation** — JIT-compiled Tsit5 ODE solve (diffrax)
+3. **Condensation** — Gas depletion + bin redistribution + equilibria
+4. **Output** — Nk, Mk, Gc arrays
 
-2. **Gas Depletion**
-   - `mcond = Gc[SO4] * (1 - exp(-CS * dt))` — exponential decay
-   - `Gc[SO4] -= mcond`
+---
 
-3. **ezcond** — Distributes `mcond` across bins
-   - MNFIX on input
-   - Adaptive sub-stepping (limits mass increase to ~10%)
-   - Calls `tmcond` for TFL redistribution or simple mass addition
-   - Post-hoc mass conservation correction
-
-4. **NH3 Equilibrium** (`eznh3eqm`)
-   - Stoichiometric NH4:SO4 = 2:1 partitioning
-
-5. **Water Equilibrium** (`calc_equilibrium_water`)
-   - Polynomial fits to ISORROPIA results
-
-6. **MNFIX** — Final mass-number consistency check
-
-### Internal Call Graph
+## 2. Complete Module Map
 
 ```
-condensation_step(method='tfl')          condensation_step(method='ppm')
-├── calc_condensation_sink()             ├── calc_condensation_sink()
-│   ├── calc_gas_diffusivity()           │   └── (same as TFL)
-│   ├── calc_particle_properties()       │
-│   ├── calc_knudsen_number()            ├── ezcond_ppm()              [ezcond_ppm.py]
-│   └── calc_fuchs_sutugin_correction()  │   ├── mnfix_jax()
-│                                        │   ├── calc_condensation_sink()
-├── ezcond()                             │   └── ppm_condensation_step() [condensation_ppm.py]
-│   ├── mnfix_jax()                      │       ├── compute_wr()
-│   ├── calc_condensation_sink()         │       ├── compute_substeps()
-│   └── tmcond()         [condensation]  │       ├── compute_edge_velocity()
-│       └── dmdt_int()   [condensation]  │       │   └── dmdt_int()
-│                                        │       ├── ppm_reconstruct()
-├── eznh3eqm()    [nh3_equilibrium]      │       ├── ppm_flux()
-├── calc_equilibrium_water()             │       ├── advect_totals()
-└── mnfix_jax()   [mnfix_jax]            │       ├── passive_flux()
-                                         │       ├── dry_mass_from_ppm_number()
-                                         │       └── closure_update()
-                                         │
-                                         ├── eznh3eqm()
-                                         ├── calc_equilibrium_water()
-                                         └── mnfix_jax()
+tomas_jax/
+│
+├── core/
+│   ├── config.py                  ─── Constants, NBINS=36, ICOMP=44, species indices
+│   ├── state.py                   ─── TomasState NamedTuple
+│   └── mnfix_jax.py               ─── Mass-number consistency (Fortran partial-transfer)
+│
+├── physics/
+│   ├── coagulation_kernel.py      ─── Brownian kernel + Fuchs correction
+│   ├── coagulation_rates.py       ─── TFL coagulation solver
+│   ├── properties.py              ─── Particle diameter, diffusivity, thermal speed
+│   ├── density.py                 ─── Mixed-salt aerosol density
+│   ├── gas_properties.py          ─── Gas diffusivity, MFP, Fuchs-Sutugin
+│   ├── condensation_sink.py       ─── CS [s^-1] and per-bin sinkfrac
+│   ├── condensation.py            ─── TFL algorithm: dmdt_int + tmcond (sequential)
+│   ├── condensation_ppm.py        ─── PPM advection (3rd-order, JIT via fori_loop)
+│   ├── condensation_tfl_jax.py    ─── TFL JIT: tmcond_jax + ezcond_tfl_jax
+│   ├── ezcond.py                  ─── TFL ezcond driver (numpy, sequential)
+│   ├── ezcond_ppm.py              ─── PPM ezcond driver (numpy wrapper, slow)
+│   ├── ezcond_ppm_jax.py          ─── PPM ezcond driver (pure JAX, JIT-compilable)
+│   ├── nh3_equilibrium.py         ─── NH3/NH4 stoichiometric equilibrium
+│   └── water_equilibrium.py       ─── Hygroscopic water uptake (ISORROPIA fits)
+│
+├── solvers/
+│   ├── diffrax.py                 ─── Coagulation ODE integrator (Tsit5 + MNFIX)
+│   └── condensation.py            ─── Condensation driver (all 4 methods + scan loops)
+│
+└── utils/
+    ├── plotting.py                ─── Visualization tools
+    └── diagnostics.py             ─── Coagulation rate diagnostics
 ```
 
-## Module Details
+---
 
-### `gas_properties.py` — Gas-Phase Transport Properties
+## 3. Condensation Pipeline — All Four Methods
 
-**Fortran source:** `gasdiff.f`, `getCondSink.f` (lines 77-84)
+### 3.1 Method Comparison
+
+| Property | `tfl` | `tfl_jit` | `ppm` | `ppm_jit` |
+|----------|-------|-----------|-------|-----------|
+| Algorithm | Semi-Lagrangian top-hat | Same | Eulerian PPM advection | Same |
+| Accuracy | 1st order | 1st order | 3rd order | 3rd order |
+| Implementation | numpy + Python loops | Pure JAX + fori_loop | JAX core, numpy wrapper | Pure JAX |
+| JIT-compiled | No | **Yes** | Partially | **Yes** |
+| Scan-fusable | No | **Yes** | No | **Yes** |
+| Speed (cond, 24h) | ~12 s | **~0.47 s** | ~131 s | **~0.26 s** |
+| Fortran match | Exact | Exact | Different scheme | Different scheme |
+| Fortran time | 0.08 s | 0.08 s | 0.08 s | 0.08 s |
+
+**Recommendations:**
+- Use `tfl_jit` when Fortran-matching output is needed
+- Use `ppm_jit` for maximum speed (1.8x faster than TFL_JIT for condensation)
+- Use `tfl` or `ppm` only for debugging (they are 25-500x slower)
+
+### 3.2 Data Flow Diagram
+
+```
+                    condensation_step()  [solvers/condensation.py]
+                    ════════════════════
+                            │
+          ┌─────────────────┼─────────────────────────────┐
+          │                 │                             │
+      method='tfl'    method='tfl_jit'              method='ppm_jit'
+      method='ppm'                                  (also 'ppm' via numpy)
+          │                 │                             │
+          ▼                 ▼                             ▼
+  ┌───────────────┐  ┌──────────────────┐   ┌──────────────────────────┐
+  │ numpy path    │  │ condensation_    │   │ condensation_step_jax()  │
+  │ (sequential)  │  │ step_tfl_jax()   │   │ [solvers/condensation.py]│
+  └───────┬───────┘  │ [condensation_   │   └────────────┬─────────────┘
+          │          │  tfl_jax.py]      │                │
+          │          └────────┬─────────┘                │
+          │                   │                          │
+          ▼                   ▼                          ▼
+  ┌──────────────┐  ┌────────────────────┐   ┌────────────────────────┐
+  │ ezcond()     │  │ ezcond_tfl_jax()   │   │ ezcond_ppm_jax()       │
+  │ [ezcond.py]  │  │ [condensation_     │   │ [ezcond_ppm_jax.py]    │
+  │ or           │  │  tfl_jax.py]       │   │                        │
+  │ ezcond_ppm() │  └────────┬───────────┘   └────────────┬───────────┘
+  │ [ezcond_ppm] │           │                            │
+  └──────┬───────┘           │                            │
+         │                   ▼                            ▼
+         │          ┌────────────────────┐   ┌────────────────────────┐
+         │          │ tmcond_jax()       │   │ ppm_condensation_step()│
+         │          │ [condensation_     │   │ [condensation_ppm.py]  │
+         │          │  tfl_jax.py]       │   │                        │
+         │          │  ├─ dmdt_int()     │   │  ├─ compute_edge_vel() │
+         │          │  ├─ top-hat constr │   │  ├─ ppm_reconstruct()  │
+         │          │  └─ fori_loop remap│   │  ├─ advect_number()    │
+         │          └────────────────────┘   │  ├─ ppm_mass_flux()    │
+         │                                   │  ├─ species_flux()     │
+         │                                   │  └─ advect_totals()    │
+         │                                   └────────────────────────┘
+         │
+         ▼
+  ┌──────────────┐
+  │ tmcond()     │
+  │ [condensation│
+  │  .py]        │
+  │  ├─ dmdt_int │
+  │  └─ Python   │
+  │     loops    │
+  └──────────────┘
+
+                 ═══════════════════════════════
+                 After ezcond (all methods):
+                 ═══════════════════════════════
+
+                 eznh3eqm()          [nh3_equilibrium.py]
+                     │
+                     ▼
+                 calc_equilibrium_    [water_equilibrium.py]
+                 water()
+                     │
+                     ▼
+                 mnfix_jax()          [mnfix_jax.py]
+                     │
+                     ▼
+                 Return (Nk, Mk, Gc)
+```
+
+### 3.3 Scan-Fused Time Loops
+
+For 24h simulations (1440 × 60s steps), scan-fused loops eliminate all Python dispatch:
+
+```
+                  ┌─────────────────────────────────────────┐
+                  │           jax.lax.scan                  │
+                  │  ┌─────────────────────────────────┐   │
+                  │  │  step_fn (runs 1440 times):     │   │
+                  │  │                                  │   │
+                  │  │  1. Gc[SO4] += prod_rate * dt    │   │
+                  │  │  2. condensation_step_jax()      │   │
+                  │  │     or condensation_step_tfl_jax │   │
+                  │  │  3. Return (Nk, Mk, Gc)         │   │
+                  │  │                                  │   │
+                  │  └─────────────────────────────────┘   │
+                  │                                         │
+                  │  Compiled to a SINGLE XLA program       │
+                  │  No Python overhead between steps       │
+                  └─────────────────────────────────────────┘
+
+  API:
+    run_condensation_scan()       # PPM_JIT scan
+    run_condensation_scan_tfl()   # TFL_JIT scan
+```
+
+---
+
+## 4. Shared Physics Modules
+
+These are called by all condensation methods:
+
+### 4.1 `gas_properties.py` — Gas-Phase Transport
+
+**Fortran source:** `gasdiff.f`, `getCondSink.f`
 
 | Function | Formula | Reference |
-|---|---|---|
-| `calc_gas_diffusivity` | Fuller-Schettler-Giddings: Di = 1e-7 * T^1.75 * mwf / (P/bar) / Svf | gasdiff.f L39-41 |
-| `calc_mean_molecular_speed` | ms = sqrt(8*R*T / (pi*MW_kg)) | S&P eqn 9.2 |
-| `calc_mean_free_path` | mfp = 2*Di/ms (TOMAS-specific, NOT kinetic theory) | getCondSink.f L84 |
-| `calc_knudsen_number` | Kn = 2*mfp/Dp | getCondSink.f L111 |
-| `calc_fuchs_sutugin_correction` | beta = (1+Kn)/(1+2*Kn*(1+Kn)/alpha) | getCondSink.f L112 |
+|----------|---------|-----------|
+| `calc_gas_diffusivity` | Fuller-Schettler-Giddings | gasdiff.f |
+| `calc_mean_molecular_speed` | `sqrt(8RT / (pi*MW))` | S&P eqn 9.2 |
+| `calc_mean_free_path` | `2*Di/ms` (TOMAS-specific) | getCondSink.f L84 |
+| `calc_knudsen_number` | `2*mfp/Dp` | getCondSink.f L111 |
+| `calc_fuchs_sutugin_correction` | `(1+Kn)/(1+2Kn(1+Kn)/alpha)` | getCondSink.f L112 |
 
-**Key note:** The mean free path formula `mfp = 2*Di/ms` is specific to TOMAS. It differs from the standard kinetic theory formula. This choice is deliberate for consistency with the Dahneke/Fuchs-Sutugin correction.
+### 4.2 `condensation_sink.py` — First-Order Loss Rate
 
-### `condensation_sink.py` — First-Order Loss Rate
-
-**Fortran source:** `getCondSink.f` (lines 77-135)
+**Fortran source:** `getCondSink.f`
 
 ```
-CS = 2 * pi * Di * sum(Dpk * Nk * beta) / (boxvol * 1e-6)
-sinkfrac[k] = (Dpk[k] * Nk[k] * beta[k]) / sum(Dpk * Nk * beta)
+CS = 2*pi*Di * sum(Dpk * Nk * beta) / (boxvol * 1e-6)    [s^-1]
+sinkfrac[k] = (Dpk[k] * Nk[k] * beta[k]) / sum(...)
 ```
 
-The condensation sink `CS` has units [s^-1] and represents the pseudo-first-order rate constant for gas-phase loss to aerosol. Larger particles and higher number concentrations increase CS.
+**Critical threshold (Neps=1e10):** Bins with `Nk <= 1e10` use default `density=1500 kg/m3` and `mp=1.4*xk[k]` instead of computing from actual composition. This matches Fortran `getCondSink.f` and is essential for reproducing Fortran sinkfrac distributions.
 
-`sinkfrac` distributes the condensing mass proportionally across bins based on each bin's contribution to the total sink.
+### 4.3 `nh3_equilibrium.py` — Ammonium-Sulfate Equilibrium
 
-### `condensation.py` — TFL Condensation Algorithm
+**Fortran source:** `eznh3eqm.f`
 
-**Fortran source:** `tmcond.f` (lines 52-366), `dmdt_int.f`
+Stoichiometric NH4:SO4 = 2:1 partitioning:
+- **Ammonia-limited** (`tot_nh3/2 < tot_so4`): No gas NH3, particle NH4 ∝ SO4
+- **Excess ammonia** (`tot_nh3/2 >= tot_so4`): Particles at 2:1, excess in gas
 
-This is the core physics. The TFL (Tzivion-Feingold-Levin) algorithm is a semi-Lagrangian scheme:
-
-#### `dmdt_int(M0, TAU, WR)` — Analytic Growth
-
-Stevens et al. 1996, Eq. A3:
-
-```
-MH2O = (WR - 1) * M0
-X = ((M0 + MH2O)^(2/3))
-X = sqrt(max(0, (2/3)*TAU + X))
-result = X^3 / WR
-```
-
-- `TAU > 0`: condensation (particle grows)
-- `TAU < 0`: evaporation (particle shrinks)
-- `TAU = 0`: no change
-- `WR` keeps the wet/dry ratio constant during growth
-
-#### `tmcond(TAU, xk, Mkd, Nkd, cspecies, moxd)` — Bin Redistribution
-
-Algorithm per source bin L:
-
-1. **Preprocessing** (lines 82-110)
-   - Empty bins get tiny SO4 mass to prevent division by zero
-   - Overflow bins (avg mass > upper boundary) transfer 10% to neighbor
-
-2. **Top-hat construction** (lines 179-200)
-   - Average mass: `AVG = AMKDRY / ANKD`
-   - Shape factor: `XI = 0.5 + XX*(1.5 - XX)` where `XX = xk[L]/AVG`
-   - Width: blend of shape-based `W1` and boundary-based `W2` (50/50)
-   - Edges: `XU = AVG + WTH/2`, `XL = AVG - WTH/2`
-
-3. **Translation** (lines 219-236)
-   - `YU = dmdt_int(XU, TAU, WR)` — translate upper edge
-   - `YL = dmdt_int(XL, TAU, WR)` — translate lower edge
-   - `c1/c2` corrections (disabled for SO4 with `moxd=0`)
-   - Condensing species mass at edges: `YUC`, `YLC`
-
-4. **Below-grid handling** (lines 243-274)
-   - If `YL < xk[0]`: keep particles in original bin
-
-5. **Remapping** (lines 279-360)
-   - Search for target bins where translated top-hat overlaps
-   - Number proportional to overlap fraction
-   - Non-condensing species: proportional remapping
-   - Condensing species: trapezoidal interpolation using edge masses
-
-### `ezcond.py` — Simple Condensation Driver
-
-**Fortran source:** `ezcond.f` (Jeff Pierce, May 2007)
-
-Three condensation paths based on mass ratio:
-
-| Condition | Path | Method |
-|---|---|---|
-| `mconds > tot_m * 1e-3` | Full TFL | TAU calculation + `tmcond()` |
-| `mconds > tot_s * 1e-12` | Simple add | Distribute mass by `sinkfrac`, MNFIX |
-| Otherwise | Skip | No condensation |
-
-**Adaptive sub-stepping:** The number of sub-steps is chosen so that no bin's mass increases by more than ~10% per step. This prevents numerical instability in the TFL remapping.
-
-**Mass conservation correction:** After all sub-steps, the actual mass change is compared to `mcond`. A correction factor `ratio = (tot_f - tot_i) / mcond` is applied to adjust each bin's species mass.
-
-### `nh3_equilibrium.py` — Ammonium-Sulfate Equilibrium
-
-**Fortran source:** `eznh3eqm.f` (Jeff Pierce, April 2007)
-
-Simple stoichiometric equilibrium:
-
-- Total NH3 (kmoles) = `Gc[NH4]/17 + sum(Mk[:,NH4]/18)`
-- Total SO4 (kmoles) = `sum(Mk[:,SO4]/96)`
-
-**Case 1:** `tot_nh3/2 < tot_so4` (ammonia-limited)
-- No gas-phase NH3
-- Particle NH4 distributed proportionally to sulfate
-
-**Case 2:** `tot_nh3/2 >= tot_so4` (excess ammonia)
-- Particles filled to 2:1 NH4:SO4 stoichiometry
-- Excess NH3 stays in gas phase
-
-### `water_equilibrium.py` — Hygroscopic Water Uptake
+### 4.4 `water_equilibrium.py` — Hygroscopic Water Uptake
 
 **Fortran source:** `waterso4.f`, `waternacl.f`, `ezwatereqm.f`
 
-Piecewise polynomial fits to ISORROPIA thermodynamic model results at 273 K:
+Piecewise polynomial fits to ISORROPIA at 273K. Water mass = `(so4*1.2 + org) * (wr-1)`.
 
-- **Ammonium bisulfate** (`water_uptake_sulfate`): 6 RH ranges, quadratic/cubic polynomials
-- **Sea salt** (`water_uptake_seasalt`): 5 RH ranges, cubic polynomials
+### 4.5 `mnfix_jax.py` — Mass-Number Consistency
 
-Water mass per bin: `water = (so4_mass * 1.2 + org_mass) * (wr_so4 - 1)`
+**Fortran source:** `mnfix.f`
 
-The factor 1.2 converts SO4 mass to NH4HSO4 mass. Organic aerosol is assumed to have the same water uptake as sulfate. Sea salt is currently disabled.
+Corrects bins where the average dry mass is outside bin boundaries. Uses Fortran's **partial-transfer** algorithm (not move-all):
 
-## Design Decisions
+```
+For each bin k:
+  xbar = drymass / Nk                    # average dry mass
+  if xbar > xk[k+1]:                     # too heavy → shift some UP
+      nshift = (drymass - xold*Nk) / (xnew - xold)
+      keep (Nk - nshift) at xold = sqrt(xk[k]*xk[k+1])
+      move nshift to bin k+1 at xnew = xk[k+2]/1.1
+  if xbar < xk[k]:                       # too light → shift some DOWN
+      nshift = (drymass - xold*Nk) / (xnew - xold)
+      keep (Nk - nshift) at xold
+      move nshift to bin k-1
+```
 
-### Phase 1: Sequential Loops
+This ensures smooth, gradual redistribution instead of emptying entire bins.
 
-The condensation modules (`condensation.py`, `ezcond.py`) use numpy arrays and Python for-loops. This matches the Fortran structure exactly, making verification against the original code straightforward. The tradeoff is that these functions are **not JIT-compatible** and run on CPU only.
+---
+
+## 5. TFL Condensation — Sequential and JIT
+
+### 5.1 TFL Algorithm (shared physics)
+
+The TFL (Tzivion-Feingold-Levin) algorithm is a semi-Lagrangian moving-center scheme:
+
+1. **Top-hat construction** — Each bin's mass distribution is approximated as a top-hat (uniform) with width computed from shape factor and bin boundaries
+2. **Analytic translation** — `dmdt_int()` grows/shrinks the top-hat edges using the Stevens et al. (1996) growth equation
+3. **Remapping** — The translated top-hat is redistributed across destination bins proportionally to overlap
+
+### 5.2 Sequential TFL (`method='tfl'`)
+
+**Files:** `ezcond.py` → `condensation.py` (tmcond, dmdt_int)
+
+Direct Fortran port using numpy arrays and Python for-loops. Useful for verification against Fortran, but ~150x slower than JIT paths. This was Phase 1 of development.
+
+### 5.3 JIT TFL (`method='tfl_jit'`)
+
+**Files:** `condensation_tfl_jax.py` (tmcond_jax, ezcond_tfl_jax)
+
+Pure-JAX rewrite that produces **identical output to Fortran**:
+
+- `tmcond_jax()` — Vectorized top-hat construction + `jax.lax.fori_loop` for bin-by-bin remapping
+- `ezcond_tfl_jax()` — Pure-JAX ezcond with `jax.lax.cond` for the three condensation paths
+- `condensation_step_tfl_jax()` — Full pipeline: CS → gas depletion → ezcond → NH3 → water → MNFIX
+- `run_condensation_scan_tfl()` — Scan-fused 1440-step time loop
+
+**Performance:** 43x faster than sequential TFL, matches Fortran output to machine precision.
+
+---
+
+## 6. PPM Condensation — Numpy Wrapper and JIT
+
+### 6.1 PPM Algorithm (shared physics)
+
+The PPM (Piecewise Parabolic Method) is a 3rd-order Eulerian flux-form advection scheme in log-mass space. See `docs/ppm_condensation.md` for the full algorithm.
+
+Key components in `condensation_ppm.py`:
+- **PPM reconstruction** — 4th-order edge interpolation + monotonicity/positivity limiting
+- **CFL substepping** — Automatic substep count from max Courant number (C_max=0.8)
+- **Analytical mass-weighted flux** — Exact integral `∫m(η)n(η)dη` over PPM departure regions
+- **Vectorized species transport** — All 44 species in one matrix multiply (no loops)
+
+### 6.2 Numpy Wrapper PPM (`method='ppm'`)
+
+**Files:** `ezcond_ppm.py` → `condensation_ppm.py`
+
+The PPM core is JIT-compiled, but wrapped in numpy code that forces JAX↔numpy conversions and Python for-loops per call. ~500x slower than the JIT path. Only useful for debugging.
+
+### 6.3 JIT PPM (`method='ppm_jit'`)
+
+**Files:** `ezcond_ppm_jax.py` → `condensation_ppm.py`
+
+Pure-JAX pipeline:
+- `ezcond_ppm_jax()` — Pure-JAX ezcond driver with `jax.lax.cond` branches
+- `condensation_step_jax()` — Full pipeline: CS → gas depletion → ezcond → NH3 → water → MNFIX
+- `condensation_step_jit` — Pre-compiled `jax.jit(condensation_step_jax)`
+- `run_condensation_scan()` — Scan-fused 1440-step time loop
+
+**Performance:** 1.8x faster than TFL_JIT for condensation-only. Machine-precision mass conservation.
+
+### 6.4 Analytical Mass-Weighted Flux (Critical)
+
+The PPM number flux `F_N` tells us how many particles cross each edge. But to transport mass, we need `F_M` — how much mass crosses.
+
+**Naive approach (broken):** `F_M = F_N * (M/N)_donor` — assigns average mass to all departing particles. But PPM selectively removes particles from the bin edge where they're 2x heavier (mass-doubling bins). This causes systematic mass underestimate → M/N mismatch → MNFIX clips → N loss death spiral (81% loss over 24h).
+
+**Correct approach (analytical):** Integrate `m(η)*n(η)` exactly over the departure region:
+- `m(η) = m_L * exp(a*η)` is the mass at position η (a = ln 2 for mass-doubling)
+- `n(η) = n_L + b*η - n_6*η²` is the PPM number density parabola
+- Antiderivatives: `∫ η^k * exp(aη) dη` for k=0,1,2
+
+All species are then transported proportionally: `F_M_all = F_M_dry[:, None] * donor_ratios`, where `donor_ratios = Mk / M_dry_analytical` uses the analytical dry mass (from the same PPM parabola integral) for exact conservation.
+
+---
+
+## 7. Critical Bug Fixes
+
+### 7.1 MNFIX Partial-Transfer Rewrite (2026-03-01)
+
+**Root cause:** Original MNFIX moved ALL particles to the next bin when average mass exceeded the boundary. This caused bins to empty completely, creating pulsing/oscillating size distributions.
+
+**Fortran behavior:** `mnfix.f` uses partial transfer — splits the bin so some particles stay at the geometric mean mass and only the excess moves. This gives smooth, gradual redistribution.
+
+**Fix:** Complete rewrite of `mnfix_jax.py` to implement Fortran's partial-transfer algorithm via `jax.lax.fori_loop`. Result: S20 errors dropped from 100% to 0.3-1.9%.
+
+### 7.2 Condensation Sink Neps Threshold (2026-03-01)
+
+**Root cause:** Our code used `Neps=1e-20`, computing actual density/mp for ALL bins. Fortran `getCondSink.f` uses `Neps=1e10` — bins with `Nk <= 1e10` use default `density=1500`, `mp=1.4*xk[k]`.
+
+**Impact:** Different `sinkfrac` distributions caused different mass allocation across bins, producing different size distribution evolution.
+
+**Fix:** Match Fortran's `Neps=1e10` in `condensation_sink.py`.
+
+### 7.3 Mass Conservation Correction Threshold (2026-03-01)
+
+**Root cause:** `ezcond.py` used `abs(ratio) < 100.0` for the mass conservation correction, allowing extreme amplification. Fortran uses `abs(1-ratio) < 1.0` (ratio must be in 0 to 2).
+
+**Fix:** Match Fortran's threshold in `ezcond.py`.
+
+### 7.4 Condensation Sink NaN Guard (2026-02)
+
+Empty bins have `Dpk=0` → `Kn=inf` → `beta=NaN` → `CS=NaN`.
+
+**Fix:** `safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)` in `condensation_sink.py`.
+
+### 7.5 PPM Analytical Mass Flux (2026-03-02)
+
+The naive `F_M = F_N * r_avg_donor` caused 81% N loss over 24h. Replaced with exact analytical mass-weighted integrals. See Section 6.4 above.
+
+---
+
+## 8. How to Run Everything
+
+### 8.1 Basic Usage
+
+```bash
+# Install
+pip install -e .
+
+# Box model (coagulation + condensation, 24h)
+python run_box_model.py                       # default: TFL sequential
+python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching, fast)
+python run_box_model.py --method ppm_jit      # PPM JIT (fastest condensation)
+
+# Run all tests
+python -m pytest tests/ -v
+```
+
+### 8.2 Condensation Methods in Python
+
+```python
+from tomas_jax.solvers.condensation import (
+    condensation_step,           # Dispatcher for all 4 methods
+    condensation_step_jit,       # Pre-compiled PPM JIT
+    run_condensation_scan,       # Scan-fused PPM JIT (1440 steps)
+    run_condensation_scan_tfl,   # Scan-fused TFL JIT (1440 steps)
+)
+
+# Single step (any method)
+Nk, Mk, Gc = condensation_step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                                method='ppm_jit')
+
+# Scan-fused 24h loop (fastest — single XLA program)
+Nk, Mk, Gc, N_history = run_condensation_scan(
+    Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha,
+    dt=60.0, prod_rate=prod_rate, n_steps=1440
+)
+```
+
+### 8.3 Benchmarks
+
+```bash
+# Comprehensive 49-scenario benchmark (PPM analytical, 5 modes)
+python benchmarks/python/run_ppm_analytical_benchmark.py
+# Output: benchmarks/results/2026-03-02-ppm-analytical/
+
+# Original 24h benchmark suite (50 scenarios × 3 modes × multiple methods)
+python benchmarks/python/run_24h_scenarios.py
+
+# Compare JAX vs Fortran
+python benchmarks/python/compare_24h.py
+python benchmarks/python/plot_24h_summary.py
+python benchmarks/python/plot_24h_timing.py
+
+# Fortran benchmark (requires gfortran)
+cd benchmarks/fortran && make && ./benchmark_24h
+```
+
+### 8.4 Tests
+
+```bash
+python -m pytest tests/test_ppm_condensation.py -v      # PPM unit tests (31 tests)
+python -m pytest tests/test_tfl_jit_condensation.py -v   # TFL JIT tests (15 tests)
+python -m pytest tests/test_24h_scenarios.py -v          # 24h scenario tests
+```
+
+---
+
+## 9. Performance Summary
+
+Median wall time per 24h scenario (49 scenarios):
+
+| Mode | Fortran | TFL_JIT | PPM_JIT | JAX/Fortran |
+|------|---------|---------|---------|-------------|
+| Coag-only | 0.27 s | — | — | 0.15 s (0.57x) |
+| Cond-only | 0.08 s | 0.47 s | 0.26 s | 3.4x (PPM) |
+| Combined | 0.33 s | — | 0.41 s | 1.27x (PPM) |
+
+Notes:
+- Coagulation is **faster than Fortran** (0.57x) due to JIT + vectorization
+- PPM_JIT condensation is 1.8x faster than TFL_JIT
+- Combined (coag + cond) is only 1.27x slower than Fortran
+- First JIT compilation takes ~30-60s (add warmup call)
+
+---
+
+## 10. Design Decisions
 
 ### Operator Splitting
 
-Coagulation and condensation are decoupled into separate operator-split steps. This allows:
-- Coagulation to use the JIT-compiled diffrax solver (fast)
-- Condensation to use the sequential Fortran-faithful implementation (correct)
-- Independent verification of each process
+Coagulation and condensation are decoupled. This allows independent JIT compilation, verification, and method selection.
 
 ### JAX/numpy Boundary
 
-The condensation driver (`solvers/condensation.py`) bridges JAX and numpy:
-- Receives JAX arrays from the main loop
-- Converts to numpy for sequential condensation
-- Converts back to JAX for equilibrium calculations and MNFIX
-- Returns JAX arrays
+The `tfl` and `ppm` methods use a JAX→numpy→JAX boundary (adds overhead but enables debugging). The `tfl_jit` and `ppm_jit` methods are pure JAX throughout.
 
-This boundary crossing adds overhead but keeps the code clean.
+### c1/c2 Corrections Disabled
 
-### c1/c2 Corrections Disabled for SO4
+In `ezcond.py`, tmcond is called with `moxd=zeros` for SO4 condensation. The c1/c2 corrections are only needed for multi-component condensation.
 
-In `ezcond.py`, tmcond is called with `moxd=zeros` for sulfate condensation. The c1/c2 corrections (added by Win Trivitayanurak, 5/25/06) are only needed for multi-component condensation where the condensing species mass flux must match a prescribed value. For pure SO4 condensation, no correction is needed.
+### Mass Conservation Uses Dry Mass
 
-## Phase 2: PPM Condensation
+Water (species 43) is diagnostic — recomputed each step by equilibrium. Mass conservation checks use dry mass only (species 0-42).
 
-The PPM (Piecewise Parabolic Method) is now implemented as an alternative to TFL:
+---
 
-- **File:** `tomas_jax/physics/condensation_ppm.py` — PPM algorithm (JIT-compatible)
-- **File:** `tomas_jax/physics/ezcond_ppm.py` — PPM-aware ezcond driver
-- **Usage:** Pass `method='ppm'` to `condensation_step()` or `--method ppm` to `run_box_model.py`
-- **Docs:** See `docs/ppm_condensation.md` for full algorithm description
+## 11. Fortran Source Mapping
 
-Key differences from TFL:
-- 3rd-order accuracy (vs 1st-order top-hat)
-- Eulerian flux-form advection in log-mass space
-- JIT-compilable via `jax.lax.fori_loop`
-- CFL-based automatic substepping (C_max=0.8)
+| Python Module | Fortran Source | Author |
+|---|---|---|
+| `condensation.py` (dmdt_int) | dmdt_int.f | Stevens et al. 1996 |
+| `condensation.py` (tmcond) | tmcond.f | Tzivion/Feingold/Levin, Adams |
+| `condensation_tfl_jax.py` | tmcond.f (JIT rewrite) | — |
+| `condensation_ppm.py` | (new, no Fortran equivalent) | — |
+| `ezcond.py` | ezcond.f | Jeff Pierce, May 2007 |
+| `nh3_equilibrium.py` | eznh3eqm.f | Jeff Pierce, April 2007 |
+| `water_equilibrium.py` | waterso4.f, waternacl.f | Peter Adams, 2000-2001 |
+| `gas_properties.py` | gasdiff.f, getCondSink.f | Pierce 2007, Perry's |
+| `condensation_sink.py` | getCondSink.f | Jeff Pierce, May 2007 |
+| `mnfix_jax.py` | mnfix.f | — |
 
-## Bug Fixes and Guards
+---
 
-### Condensation Sink NaN Guard (`condensation_sink.py`)
+## 12. Future Roadmap
 
-Empty bins have `Dpk = 0`, which causes division by zero in the Knudsen number calculation (`Kn = 2*mfp/Dpk`). This propagates NaN through the Fuchs-Sutugin correction and into the condensation sink, destroying the entire simulation.
-
-**Guard**: `safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)` — bins with zero diameter contribute nothing to the condensation sink.
-
-### MNFIX Empty-Bin Detection (`mnfix_jax.py`)
-
-After PPM mass conservation rescaling, bins can have positive number but zero dry mass. The original empty-bin check (`Nk_new < TINY_N`) missed these. They cause `xbar = 0`, triggering spurious downward bin shifts.
-
-**Fix**: `mask_empty = (Nk_new < TINY_N) | ((Nk_new >= TINY_N) & (drymass_new < NEPS))`
-
-## Future Roadmap
-
-- **Fix PPM N conservation**: Moving Center method or moment-preserving advection to prevent 0th moment drift
 - **Remove bin-0 mass dump**: Condensation should not create new particles (that's nucleation)
-- **Fused time loop**: `jax.lax.scan` over all 1440 timesteps to eliminate Python dispatch overhead
 - **Multi-species condensation** with VBS partitioning and Kelvin effect
-- **GPU acceleration** for the full coagulation + condensation pipeline
-- **End-to-end JIT** for condensation + coagulation in a single compiled step
+- **GPU acceleration** for the full pipeline
+- **End-to-end JIT** for coagulation + condensation in a single compiled step
+- **Nucleation module** (planned)

@@ -5,11 +5,10 @@ Test hierarchy (implement in order):
 2. PPM reconstruction
 3. Flux computation
 4. Number-only advection
-5. Passive species transport
+5. Species transport (vectorized mass-weighted flux)
 6. Dry mass integral
-7. Closure update
-8. Full stepper
-9. Comparison with TFL
+7. Full stepper
+8. Comparison with TFL
 
 Conservation invariants enforced:
 - Total number conserved (closed boundary)
@@ -34,16 +33,15 @@ from tomas_jax.physics.condensation_ppm import (
     ppm_reconstruct,
     # Flux computation
     ppm_flux,
+    ppm_mass_flux,
     _integrate_parabola_left,
     _integrate_parabola_right,
     # Update
     advect_totals,
-    passive_flux,
+    species_flux,
     # Dry mass integral
     dry_mass_from_ppm_number,
     dry_mass_from_ppm_number_quadrature,
-    # Closure
-    closure_update,
     # Steppers
     compute_substeps,
     ppm_advect_number_only,
@@ -412,37 +410,51 @@ class TestAdvectTotals:
 
 
 # =============================================================================
-# 1.8 PASSIVE SPECIES TRANSPORT TESTS
+# 1.8 SPECIES TRANSPORT TESTS (VECTORIZED MASS-WEIGHTED FLUX)
 # =============================================================================
 
-class TestPassiveFlux:
-    """Tests for consistent passive species transport."""
+class TestSpeciesFlux:
+    """Tests for vectorized species transport via analytical mass-weighted flux."""
 
-    def test_constant_ratio_moves_with_number(self):
-        """If r_j = const, mass should move exactly like number."""
-        Nk = jnp.ones(NBINS) * 1e6
-        ratio = 1e-15
-        Mk_j = Nk * ratio
-        F_N = jnp.zeros(NBINS + 1)
-        F_N = F_N.at[18].set(1e4)
+    def test_uniform_ratio_proportional_flux(self):
+        """If Mk/M_dry_analytical is uniform, species flux ~ F_M_dry."""
+        # Fake F_M_dry at edges
+        F_M_dry = jnp.zeros(NBINS + 1)
+        F_M_dry = F_M_dry.at[18].set(1e-10)
         u_edges = jnp.zeros(NBINS + 1)
         u_edges = u_edges.at[18].set(0.1)
 
-        F_M_j = passive_flux(F_N, Mk_j, Nk, u_edges)
+        # All species have equal mass, M_dry_analytical matches
+        Mk = jnp.ones((NBINS, ICOMP)) * 1e-15
+        M_dry_analytical = jnp.sum(Mk[:, :ICOMP_NODIAG], axis=1)
 
-        expected_mass_flux = F_N * ratio
-        np.testing.assert_allclose(F_M_j[18], expected_mass_flux[18], rtol=1e-10)
+        F_M_all = species_flux(F_M_dry, Mk, M_dry_analytical, u_edges)
+
+        # Each species fraction = 1e-15 / (42 * 1e-15) = 1/42
+        expected_per_species = F_M_dry[18] / ICOMP_NODIAG
+        np.testing.assert_allclose(F_M_all[18, 0], expected_per_species, rtol=1e-10)
 
     def test_empty_donor_no_blowup(self):
         """Empty donor cell should not cause NaN/Inf."""
-        Nk = jnp.zeros(NBINS)
-        Mk_j = jnp.zeros(NBINS)
-        F_N = jnp.ones(NBINS + 1)
+        Mk = jnp.zeros((NBINS, ICOMP))
+        M_dry_analytical = jnp.zeros(NBINS)
+        F_M_dry = jnp.ones(NBINS + 1) * 1e-10
         u_edges = jnp.ones(NBINS + 1) * 0.1
 
-        F_M_j = passive_flux(F_N, Mk_j, Nk, u_edges)
+        F_M_all = species_flux(F_M_dry, Mk, M_dry_analytical, u_edges)
 
-        assert jnp.all(jnp.isfinite(F_M_j)), "Should handle empty donor without NaN"
+        assert jnp.all(jnp.isfinite(F_M_all)), "Should handle empty donor without NaN"
+
+    def test_output_shape(self):
+        """Output should be (nbins+1, ncomp)."""
+        F_M_dry = jnp.zeros(NBINS + 1)
+        Mk = jnp.ones((NBINS, ICOMP)) * 1e-15
+        M_dry_analytical = jnp.ones(NBINS) * 1e-12
+        u_edges = jnp.ones(NBINS + 1) * 0.1
+
+        F_M_all = species_flux(F_M_dry, Mk, M_dry_analytical, u_edges)
+
+        assert F_M_all.shape == (NBINS + 1, ICOMP)
 
 
 # =============================================================================
@@ -490,45 +502,48 @@ class TestDryMassIntegral:
 
 
 # =============================================================================
-# 1.10 CLOSURE UPDATE TESTS
+# 1.10 MASS-WEIGHTED FLUX INTEGRAL TESTS
 # =============================================================================
 
-class TestClosureUpdate:
-    """Tests for CSPECIES closure update."""
+class TestPPMMassFlux:
+    """Tests for analytical mass-weighted PPM flux."""
 
-    def test_noncondensing_unchanged(self, standard_grid, standard_mass):
-        """Non-condensing species should not be modified."""
-        Mk = standard_mass
-        M_dry_total = jnp.sum(Mk[:, :ICOMP_NODIAG], axis=1) * 1.1
-        cspecies = 0
+    def test_zero_velocity_zero_flux(self):
+        """Zero velocity should give zero mass flux."""
+        xk = jnp.logspace(-21, -12, NBINS + 1)
+        n_L = jnp.ones(NBINS) * 5.0
+        n_R = jnp.ones(NBINS) * 5.0
+        n_6 = jnp.zeros(NBINS)
+        u_edges = jnp.zeros(NBINS + 1)
+        dt_sub = 1.0
 
-        Mk_new = closure_update(Mk, M_dry_total, cspecies, ICOMP_NODIAG)
+        F_M = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub)
+        np.testing.assert_allclose(F_M, 0.0, atol=1e-30)
 
-        for j in range(ICOMP_NODIAG):
-            if j != cspecies:
-                np.testing.assert_allclose(Mk_new[:, j], Mk[:, j], rtol=1e-10)
+    def test_boundary_flux_zero(self):
+        """Boundary mass fluxes should be zero."""
+        xk = jnp.logspace(-21, -12, NBINS + 1)
+        n_L = jnp.ones(NBINS) * 5.0
+        n_R = jnp.ones(NBINS) * 5.0
+        n_6 = jnp.zeros(NBINS)
+        u_edges = jnp.ones(NBINS + 1) * 0.1
+        dt_sub = 0.5
 
-    def test_dry_mass_balance(self, standard_grid, standard_mass):
-        """Sum of dry masses should equal M_dry_total after closure."""
-        Mk = standard_mass
-        M_dry_total = jnp.sum(Mk[:, :ICOMP_NODIAG], axis=1) * 1.1
-        cspecies = 0
+        F_M = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub)
+        assert F_M[0] == 0.0
+        assert F_M[-1] == 0.0
 
-        Mk_new = closure_update(Mk, M_dry_total, cspecies, ICOMP_NODIAG)
+    def test_positive_velocity_positive_flux(self):
+        """Positive velocity should give positive mass flux."""
+        xk = jnp.logspace(-21, -12, NBINS + 1)
+        n_L = jnp.ones(NBINS) * 5.0
+        n_R = jnp.ones(NBINS) * 5.0
+        n_6 = jnp.zeros(NBINS)
+        u_edges = jnp.ones(NBINS + 1) * 0.1
+        dt_sub = 0.5
 
-        M_dry_sum = jnp.sum(Mk_new[:, :ICOMP_NODIAG], axis=1)
-        np.testing.assert_allclose(M_dry_sum, M_dry_total, rtol=1e-10)
-
-    def test_cspecies_increases_with_growth(self, standard_grid, standard_mass):
-        """Growth (M_dry_total increases) should increase CSPECIES."""
-        Mk = standard_mass
-        M_dry_old = jnp.sum(Mk[:, :ICOMP_NODIAG], axis=1)
-        M_dry_total = M_dry_old * 1.1
-        cspecies = 0
-
-        Mk_new = closure_update(Mk, M_dry_total, cspecies, ICOMP_NODIAG)
-
-        assert jnp.sum(Mk_new[:, cspecies]) > jnp.sum(Mk[:, cspecies])
+        F_M = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub)
+        assert jnp.all(F_M[1:-1] > 0)
 
 
 # =============================================================================

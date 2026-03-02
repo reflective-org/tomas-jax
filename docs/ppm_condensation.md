@@ -97,10 +97,9 @@ Input: Nk, Mk, xk, TAU, cspecies, dt, icomp_nodiag
 3. **For each substep** (via `jax.lax.fori_loop`):
    - Compute edge velocities (`compute_edge_velocity`)
    - PPM reconstruct number density
-   - Compute number flux and advect Nk
-   - Advect passive species with consistent transport
-   - Compute total dry mass from updated Nk (exact integral)
-   - Set condensing species by closure
+   - Compute number flux (`advect_number`) and advect Nk
+   - Compute analytical dry mass flux (`ppm_mass_flux`) using mass-weighted integrals
+   - Transport all 44 species proportionally (`species_flux` + `advect_totals`) — vectorized, no loops
 4. **Positivity limiter**: `Nk = max(Nk, 0)`, `Mk = max(Mk, 0)`
 
 ### 4.2 Upwind-Consistent Edge Velocity
@@ -121,28 +120,35 @@ where `m_final` is clipped to `[xk[0], xk[-1]]` (zero velocity at boundaries).
 
 Number density is reconstructed with PPM and advected using the Colella & Woodward flux computation.
 
-### 5.2 Passive Species: Consistent Transport
+### 5.2 Analytical Mass-Weighted Dry Mass Flux
 
-Non-condensing species mass moves with particles:
+The total dry mass flux uses exact analytical integrals of `m(η)*n(η)` over PPM departure regions, where:
+- `m(η) = m_L * exp(a*η)` is the dry mass at position η within a bin (mass-doubling: 2x variation across bin)
+- `n(η) = n_L + b*η - n_6*η²` is the PPM number density parabola
+
+This requires evaluating antiderivatives `∫ η^k * exp(aη) dη` for k=0,1,2, precomputed as `_INV_A`, `_INV_A2`, `_INV_A3` where `a = ln(2)`.
+
+Key functions in `condensation_ppm.py`:
+- `_mass_antideriv(eta)` — evaluates antiderivatives at a point
+- `_integrate_mass_parabola_right/left()` — mass integrals over right/left departure regions
+- `ppm_mass_flux()` — computes `F_M_dry` at each edge
+
+### 5.3 All Species: Vectorized Proportional Transport
+
+All 44 species (including condensing species) are transported proportionally to the analytical dry mass flux:
 ```
-F_M_j[edge] = F_N[edge] * (M_j / N)[donor]
+F_M_all = F_M_dry[:, None] * donor_ratios
 ```
 
-where the donor cell is determined by the velocity direction.
+where `donor_ratios = Mk[donor] / M_dry_analytical[donor]` and `M_dry_analytical` comes from `dry_mass_from_ppm_number()` (not tracked mass sums). This ensures exact conservation when Courant number C=1.
 
-### 5.3 Condensing Species: Closure
+The condensed mass for the condensing species is added **after** PPM transport in ezcond, not inside the PPM step.
 
-```
-M_cs = M_dry_total - sum(M_passive_dry)
-```
+### 5.4 Why Analytical Normalization Matters
 
-where `M_dry_total` is computed from the exact integral of the PPM number reconstruction times the exponential mass coordinate.
+Using `M_dry_analytical` (from the PPM number parabola integral) instead of tracked `M_dry = sum(Mk[:, :ICOMP_NODIAG])` is critical. The PPM number reconstruction and mass-weighted flux are computed from the same parabola, so dividing by the analytical integral gives exact ratio=1 when no growth occurs. Using tracked mass creates a mismatch that causes systematic mass creation and N loss via MNFIX correction.
 
-### 5.4 Water/Diagnostics
-
-Water and diagnostic species are transported passively (move with particles).
-
-## 6. Dry Mass Closure
+## 6. Analytical Dry Mass from PPM Number
 
 The total dry mass per bin is computed from the PPM number reconstruction using the exact integral:
 
@@ -157,36 +163,47 @@ where:
 
 ## 7. ezcond_ppm Driver
 
-The PPM-aware ezcond driver (`ezcond_ppm.py`) mirrors the TFL ezcond driver:
+Two variants exist:
+- `ezcond_ppm.py` — numpy wrapper (slow, `method='ppm'`)
+- `ezcond_ppm_jax.py` — pure-JAX, JIT-compilable (`method='ppm_jit'`)
 
-1. MNFIX input
-2. Compute condensation sink and sinkfrac
-3. If CS too small: dump mass in first bin
-4. Compute TAU for **full mcond** (not subdivided by nsteps — PPM handles its own CFL substepping)
-5. Call `ppm_condensation_step` with `dt=1.0`
-6. Mass conservation correction (ratio-based rescaling)
+Both follow the same logic:
+
+1. Compute condensation sink and sinkfrac
+2. If CS too small: dump mass in first bin
+3. Compute TAU for **full mcond** (not subdivided — PPM handles its own CFL substepping)
+4. Call `ppm_condensation_step` with `dt=1.0` — transports all species proportionally
+5. Add condensed mass to condensing species bins: `Mk[:, spec] += mcond * sinkfrac`
+6. MNFIX for mass-number consistency
 
 ## 8. Usage
 
 ```python
 from tomas_jax.solvers.condensation import condensation_step
 
-# Use PPM condensation
+# Use PPM JIT condensation (recommended for PPM — fast)
 Nk, Mk, Gc = condensation_step(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    method='ppm'
+    method='ppm_jit'
 )
 
-# Use TFL condensation (default)
+# Use TFL JIT condensation (recommended for Fortran-matching — fast)
 Nk, Mk, Gc = condensation_step(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    method='tfl'
+    method='tfl_jit'
 )
+
+# Scan-fused time loops (eliminates Python dispatch overhead):
+from tomas_jax.solvers.condensation import run_condensation_scan, run_condensation_scan_tfl
+# PPM scan:
+Nk, Mk, Gc, N_history = run_condensation_scan(Nk, Mk, Gc, xk, ..., n_steps=1440)
+# TFL scan:
+Nk, Mk, Gc, N_history = run_condensation_scan_tfl(Nk, Mk, Gc, xk, ..., n_steps=1440)
 ```
 
 Or from the command line:
 ```bash
-python run_box_model.py --method ppm
+python run_box_model.py --method ppm_jit
 ```
 
 ## 9. References

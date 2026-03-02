@@ -7,20 +7,36 @@ A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) microphys
 - **Extreme Speed:** JIT compilation via XLA for CPU, GPU, and TPU.
 - **Automatic Differentiation:** Gradients of the final state with respect to any input parameter.
 - **Modern Solvers:** `diffrax` for adaptive, high-order ODE integration (Tsit5).
-- **Vectorized Physics:** Full SIMD implementation of the TFL coagulation algorithm.
+- **Vectorized Physics:** Full SIMD implementation of coagulation and condensation.
 
 ---
 
 ## Features
 
-- **Coagulation:** Brownian coagulation with Fuchs correction (transition regime). JIT-compiled, fully differentiable.
-- **Condensation:** H2SO4 condensation onto size-resolved aerosol via TFL moving-center algorithm (Fortran-faithful port of tmcond.f).
+- **Coagulation:** Brownian coagulation with Fuchs correction (transition regime). JIT-compiled, fully differentiable. Faster than Fortran.
+- **Condensation (4 methods):**
+  - `tfl` — Sequential Fortran-faithful port (for verification)
+  - `tfl_jit` — Pure-JAX JIT-compiled TFL (matches Fortran output exactly, 43x faster than sequential)
+  - `ppm` — PPM with numpy wrapper (for debugging)
+  - `ppm_jit` — Pure-JAX JIT-compiled PPM with analytical mass-weighted flux (fastest, 1.8x faster than TFL_JIT)
 - **NH3 Equilibrium:** Stoichiometric ammonium-sulfate partitioning (eznh3eqm.f).
 - **Water Uptake:** Piecewise polynomial fits for ammonium bisulfate and sea salt hygroscopic growth (ISORROPIA-based).
-- **Precision:** Enforced float64 everywhere. Mass conservation < 10^-13 relative error for coagulation.
-- **Operator Splitting:** Decouples expensive kernel calculations (O(N^2)) from the integration loop.
-- **MNFIX-JAX:** Vectorized, JIT-compatible mass-number drift correction.
+- **Precision:** Enforced float64 everywhere. Mass conservation at machine precision.
+- **Scan-Fused Loops:** 1440-step time loops compiled to a single XLA program via `jax.lax.scan`.
+- **MNFIX-JAX:** Fortran-faithful partial-transfer mass-number drift correction.
 - **Diagnostics:** Built-in plotting for size distributions, banana plots, and time series.
+
+---
+
+## Performance
+
+Median wall time per 24h scenario (49 LHC scenarios):
+
+| Mode | Fortran | JAX (best) | Ratio |
+|------|---------|------------|-------|
+| Coagulation only | 0.27 s | 0.15 s | **0.57x (faster)** |
+| Condensation only | 0.08 s | 0.26 s (PPM_JIT) | 3.4x |
+| Combined | 0.33 s | 0.41 s (PPM_JIT) | 1.27x |
 
 ---
 
@@ -43,27 +59,33 @@ pip install -e .
 ### Box Model (Coagulation + Condensation)
 
 ```bash
-python run_box_model.py
+python run_box_model.py                       # default: TFL sequential
+python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching, fast)
+python run_box_model.py --method ppm_jit      # PPM JIT (fastest)
 ```
 
-Runs a 24-hour 0-D box model with:
-- Log-normal initial distribution (100 nm GMD, 100,000 particles/cm3)
-- Constant H2SO4 production (10^7 molec/cm3/s)
-- Operator-split coagulation (JIT) + condensation (sequential)
-- Console output + plots (banana plot, size distributions, time series)
-
-### Coagulation Only
+### Python API
 
 ```python
 from tomas_jax.solvers.diffrax import diffrax_step
+from tomas_jax.solvers.condensation import (
+    condensation_step,
+    run_condensation_scan,       # PPM_JIT scan-fused loop
+    run_condensation_scan_tfl,   # TFL_JIT scan-fused loop
+)
+
+# Coagulation (JIT-compiled)
 Nk_new, Mk_new = diffrax_step(Nk, Mk, xk, temp, pres, boxvol, dt, icomp_nodiag)
-```
 
-### Condensation Only
+# Condensation (single step)
+Nk, Mk, Gc = condensation_step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                                method='ppm_jit')
 
-```python
-from tomas_jax.solvers.condensation import condensation_step
-Nk_new, Mk_new, Gc_new = condensation_step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt)
+# Scan-fused 24h loop (fastest — single XLA program for 1440 steps)
+Nk, Mk, Gc, N_history = run_condensation_scan(
+    Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha,
+    dt=60.0, prod_rate=prod_rate, n_steps=1440
+)
 ```
 
 ### Sensitivity Analysis (Automatic Differentiation)
@@ -79,59 +101,65 @@ python run_temp_sensitivity.py
 
 ```
 tomas-jax-coagulation/
-├── run_box_model.py                 # Main driver (coag + cond)
+├── run_box_model.py                 # Main driver (--method tfl|tfl_jit|ppm|ppm_jit)
 ├── run_sensitivity_analysis.py      # AD examples
 ├── pyproject.toml                   # Build configuration
 │
 ├── tomas_jax/                       # Source package
 │   ├── core/
-│   │   ├── config.py                # Global constants, dimensions, species indices
-│   │   ├── state.py                 # TomasState (Nk, Mk, xk, Gc, rh, alpha, ...)
-│   │   └── mnfix_jax.py             # Mass-number drift correction (vectorized)
+│   │   ├── config.py                # Constants (NBINS=36, ICOMP=44), species indices
+│   │   ├── state.py                 # TomasState NamedTuple
+│   │   └── mnfix_jax.py             # Mass-number correction (Fortran partial-transfer)
 │   │
 │   ├── physics/
 │   │   ├── coagulation_kernel.py    # Brownian coagulation (Fuchs)
 │   │   ├── coagulation_rates.py     # TFL coagulation solver
 │   │   ├── properties.py            # Particle diameter, diffusivity, thermal speed
 │   │   ├── density.py               # Mixed-salt aerosol density (Tang 1997)
-│   │   ├── gas_properties.py        # Gas diffusivity, MFP, Fuchs-Sutugin correction
+│   │   ├── gas_properties.py        # Gas diffusivity, MFP, Fuchs-Sutugin
 │   │   ├── condensation_sink.py     # First-order gas loss rate to aerosol
-│   │   ├── condensation.py          # TFL condensation: dmdt_int + tmcond
-│   │   ├── ezcond.py                # Simple condensation driver
+│   │   ├── condensation.py          # TFL condensation: dmdt_int + tmcond (sequential)
+│   │   ├── condensation_ppm.py      # PPM advection (3rd-order, JIT)
+│   │   ├── condensation_tfl_jax.py  # TFL JIT: tmcond_jax + ezcond_tfl_jax
+│   │   ├── ezcond.py                # TFL ezcond driver (sequential)
+│   │   ├── ezcond_ppm.py            # PPM ezcond driver (numpy wrapper)
+│   │   ├── ezcond_ppm_jax.py        # PPM ezcond driver (pure JAX, JIT)
 │   │   ├── water_equilibrium.py     # Hygroscopic water uptake (ISORROPIA fits)
 │   │   └── nh3_equilibrium.py       # NH3/NH4 stoichiometric equilibrium
 │   │
 │   ├── solvers/
 │   │   ├── diffrax.py               # Coagulation ODE integrator (Tsit5 + MNFIX)
-│   │   └── condensation.py          # Condensation operator-split driver
+│   │   └── condensation.py          # Condensation driver (4 methods + scan loops)
 │   │
 │   └── utils/
 │       ├── plotting.py              # Visualization tools
 │       └── diagnostics.py           # Coagulation rate diagnostics
 │
-├── tests/                           # Test suite
-│   ├── test_ppm_condensation.py     # PPM condensation tests (43 tests)
-│   └── test_24h_scenarios.py        # 24h benchmark tests (50 scenarios)
+├── tests/
+│   ├── test_ppm_condensation.py     # PPM unit tests (31 tests)
+│   ├── test_tfl_jit_condensation.py # TFL JIT tests (15 tests)
+│   └── test_24h_scenarios.py        # 24h benchmark validation
 │
-├── benchmarks/                      # Performance benchmarks
+├── benchmarks/
 │   ├── fortran/                     # Original Fortran benchmark harness
 │   │   ├── benchmark_24h.f          # 24h Fortran driver
-│   │   └── output/24h/             # Fortran CSV output
+│   │   └── output/24h/             # Fortran NPZ/CSV output
 │   ├── python/                      # Python benchmark scripts
-│   │   ├── scenarios.py             # LHC scenario generator
+│   │   ├── scenarios.py             # LHC scenario generator (50 scenarios)
 │   │   ├── run_24h_scenarios.py     # JAX 24h runner
+│   │   ├── run_ppm_analytical_benchmark.py  # PPM analytical benchmark (49×5 modes)
 │   │   ├── compare_24h.py           # 3-way comparison engine
 │   │   ├── plot_24h_summary.py      # 8 summary plots
 │   │   └── plot_24h_timing.py       # Timing comparison plots
-│   └── results/                     # Generated plots and NPZ files
+│   └── results/                     # Generated plots, NPZ files, summaries
 │
 ├── docs/
-│   ├── architecture.md              # Condensation pipeline architecture
+│   ├── architecture.md              # System architecture + module connections
 │   ├── ppm_condensation.md          # PPM algorithm documentation
 │   └── 24h_benchmark.md            # 24h benchmark suite documentation
 │
 ├── CLAUDE.md                        # Development instructions for Claude Code
-└── PROGRESS.md                      # Development progress report (changelog)
+└── PROGRESS.md                      # Development changelog
 ```
 
 ---
@@ -146,49 +174,33 @@ tomas-jax-coagulation/
 - MNFIX applied periodically to correct mass-number bin drift
 - Mass conservation: < 10^-13 relative error
 
-### Condensation (Phase 1 - Sequential)
+### Condensation (4 methods)
 
 - **Gas properties:** Fuller-Schettler-Giddings diffusivity, Fuchs-Sutugin correction
 - **Condensation sink:** CS = 2*pi*Di * sum(Dpk * Nk * beta) / boxvol
 - **Gas depletion:** Exponential decay Gc(t) = Gc(0) * exp(-CS*t)
-- **Bin redistribution:** TFL moving-center algorithm (tmcond.f)
-  - Top-hat construction per bin
-  - Analytic growth solution (dmdt_int, Stevens et al. 1996)
-  - Semi-Lagrangian remapping with species-dependent mass fractions
-- **Adaptive sub-stepping:** Limits mass increase to ~10% per step
-- **Mass conservation correction:** Post-hoc adjustment in ezcond
+- **TFL redistribution:** Semi-Lagrangian moving-center (top-hat + analytic growth)
+- **PPM redistribution:** Eulerian advection with analytical mass-weighted flux
+- **Scan fusion:** 1440-step time loops as single XLA programs
 
 ### Equilibrium Processes
 
 - **NH3:** Stoichiometric NH4/SO4 = 2:1 equilibrium. Excess NH3 stays in gas phase.
 - **Water:** Piecewise polynomial fits to ISORROPIA results at 273 K. Sulfate treated as NH4HSO4 (factor 1.2). Organics assumed same uptake as sulfate.
 
-### Operator Splitting Strategy
+---
 
-Each model timestep (e.g., 60 s):
+## Documentation
 
-1. **H2SO4 source** — Add gas-phase production
-2. **Coagulation** — JIT-compiled Tsit5 ODE solve
-3. **H2SO4 condensation** — Exponential depletion + ezcond
-4. **NH3 equilibrium** — Instantaneous gas-particle partitioning
-5. **Water equilibrium** — Instantaneous hygroscopic uptake
-6. **MNFIX** — Mass-number consistency cleanup
+- **[Architecture](docs/architecture.md)** — System diagram, module connections, all 4 methods, bug fixes, how to run
+- **[PPM Condensation](docs/ppm_condensation.md)** — PPM algorithm: reconstruction, flux, analytical mass integrals
+- **[24h Benchmarks](docs/24h_benchmark.md)** — Benchmark suite: scenarios, comparison methodology, plots
 
 ---
 
 ## Fortran Heritage
 
-This codebase is a direct port of the TOMAS Fortran model. Key source mapping:
-
-| Python Module | Fortran Source | Author |
-|---|---|---|
-| `condensation.py` (dmdt_int) | dmdt_int.f | Stevens et al. 1996 |
-| `condensation.py` (tmcond) | tmcond.f | Tzivion/Feingold/Levin 1989, Adams |
-| `ezcond.py` | ezcond.f | Jeff Pierce, May 2007 |
-| `nh3_equilibrium.py` | eznh3eqm.f | Jeff Pierce, April 2007 |
-| `water_equilibrium.py` | waterso4.f, waternacl.f, ezwatereqm.f | Peter Adams, 2000-2001 |
-| `gas_properties.py` | gasdiff.f, getCondSink.f | Pierce 2007, Perry's Handbook |
-| `condensation_sink.py` | getCondSink.f | Jeff Pierce, May 2007 |
+Direct port of the TOMAS Fortran model. See [Architecture](docs/architecture.md) for the complete source mapping table.
 
 ---
 
@@ -199,30 +211,12 @@ This codebase is a direct port of the TOMAS Fortran model. Key source mapping:
 | `Nk` | (36,) | #/grid cell | Number concentration per bin |
 | `Mk` | (36, 44) | kg/grid cell | Mass per bin per species |
 | `xk` | (37,) | kg | Bin boundary masses |
-| `Gc` | (43,) | kg/grid cell | Gas-phase concentrations (all species except water) |
+| `Gc` | (43,) | kg/grid cell | Gas-phase concentrations |
 | `temp` | scalar | K | Temperature |
 | `pres` | scalar | Pa | Pressure |
 | `boxvol` | scalar | cm^3 | Grid cell volume |
 | `rh` | scalar | fraction | Relative humidity (0-1) |
-| `alpha` | scalar | dimensionless | Accommodation coefficient |
-
-### Species Indices (0-based)
-
-| Index | Species |
-|---|---|
-| 0 | SO4 (sulfate) |
-| 1-41 | Organic aerosol (41 species) |
-| 42 | NH4 (ammonium) |
-| 43 | H2O (water) |
-
----
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/nucleation`)
-3. Commit your changes
-4. Open a Pull Request
+| `alpha` | scalar | — | Accommodation coefficient |
 
 ---
 

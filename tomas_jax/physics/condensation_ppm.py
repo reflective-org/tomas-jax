@@ -43,6 +43,11 @@ I0 = jnp.expm1(_A) / _A                           # (e^a - 1) / a
 I1 = (_EA * (_A - 1.0) + 1.0) / (_A * _A)
 I2 = (_EA * (_A*_A - 2.0*_A + 2.0) - 2.0) / (_A**3)
 
+# Precomputed inverse powers of a for mass-weighted antiderivatives
+_INV_A = 1.0 / _A
+_INV_A2 = _INV_A * _INV_A
+_INV_A3 = _INV_A2 * _INV_A
+
 
 # =============================================================================
 # 1.2 DMDT_INT - Analytic Growth Solution
@@ -477,6 +482,154 @@ def _integrate_parabola_left(
 
 
 # =============================================================================
+# 1.6b MASS-WEIGHTED FLUX (ANALYTICAL INTEGRAL)
+# =============================================================================
+
+def _mass_antideriv(eta):
+    """Antiderivatives of eta^k * exp(a*eta) for k=0,1,2.
+
+    Used to evaluate definite integrals of m(eta)*n(eta) over departure
+    regions, where m(eta) = m_L * exp(a*eta) is the dry mass at position
+    eta within a bin, and n(eta) is the PPM number density parabola.
+
+    Returns:
+        A0, A1, A2: Antiderivatives evaluated at eta.
+    """
+    ea_eta = jnp.exp(_A * eta)
+    A0 = ea_eta * _INV_A
+    A1 = ea_eta * (eta * _INV_A - _INV_A2)
+    A2 = ea_eta * (eta * eta * _INV_A - 2.0 * eta * _INV_A2 + 2.0 * _INV_A3)
+    return A0, A1, A2
+
+
+def _integrate_mass_parabola_right(
+    n_L: jnp.ndarray,
+    n_R: jnp.ndarray,
+    n_6: jnp.ndarray,
+    m_L: jnp.ndarray,
+    C: jnp.ndarray
+) -> jnp.ndarray:
+    """Mass-weighted integral over right departure region [1-C, 1].
+
+    Computes: delta_xi * m_L * integral_{1-C}^{1} exp(a*eta) * n(eta) d_eta
+
+    where n(eta) = n_L + eta*(b) - n_6*eta^2, b = (n_R - n_L) + n_6,
+    and m(eta) = m_L * exp(a*eta) is the dry mass at position eta.
+
+    Args:
+        n_L, n_R, n_6: PPM coefficients for donor cell (left of edge)
+        m_L: Mass at left boundary of donor cell [kg]
+        C: Courant number |u*dt/delta_xi|
+
+    Returns:
+        Mass integral [kg] — the dry mass in the departure region.
+    """
+    b = (n_R - n_L) + n_6
+    C_safe = jnp.clip(C, 0.0, 1.0)
+
+    A0_hi, A1_hi, A2_hi = _mass_antideriv(1.0)
+    A0_lo, A1_lo, A2_lo = _mass_antideriv(1.0 - C_safe)
+
+    integral = (n_L * (A0_hi - A0_lo)
+                + b * (A1_hi - A1_lo)
+                - n_6 * (A2_hi - A2_lo))
+
+    return DELTA_XI * m_L * integral
+
+
+def _integrate_mass_parabola_left(
+    n_L: jnp.ndarray,
+    n_R: jnp.ndarray,
+    n_6: jnp.ndarray,
+    m_L: jnp.ndarray,
+    C: jnp.ndarray
+) -> jnp.ndarray:
+    """Mass-weighted integral over left departure region [0, C].
+
+    Computes: delta_xi * m_L * integral_{0}^{C} exp(a*eta) * n(eta) d_eta
+
+    Args:
+        n_L, n_R, n_6: PPM coefficients for donor cell (right of edge)
+        m_L: Mass at left boundary of donor cell [kg]
+        C: Courant number |u*dt/delta_xi|
+
+    Returns:
+        Mass integral [kg] — the dry mass in the departure region.
+    """
+    b = (n_R - n_L) + n_6
+    C_safe = jnp.clip(C, 0.0, 1.0)
+
+    A0_hi, A1_hi, A2_hi = _mass_antideriv(C_safe)
+    A0_lo, A1_lo, A2_lo = _mass_antideriv(0.0)
+
+    integral = (n_L * (A0_hi - A0_lo)
+                + b * (A1_hi - A1_lo)
+                - n_6 * (A2_hi - A2_lo))
+
+    return DELTA_XI * m_L * integral
+
+
+def ppm_mass_flux(
+    n_L: jnp.ndarray,
+    n_R: jnp.ndarray,
+    n_6: jnp.ndarray,
+    xk: jnp.ndarray,
+    u_edges: jnp.ndarray,
+    dt_sub: float,
+    delta_xi: float = DELTA_XI
+) -> jnp.ndarray:
+    """Compute dry mass flux at each edge using analytical mass-weighted integrals.
+
+    Instead of F_M = F_N * r_avg (which assigns average mass to all particles),
+    this integrates m(eta)*n(eta) over the departure region, correctly accounting
+    for the 2x mass variation across each bin.
+
+    Args:
+        n_L, n_R, n_6: PPM coefficients for number density, shape (nbins,)
+        xk: Bin mass boundaries [kg], shape (nbins+1,)
+        u_edges: Velocity at each edge [1/s], shape (nbins+1,)
+        dt_sub: Substep size [s]
+        delta_xi: Grid spacing (= ln(2))
+
+    Returns:
+        F_M_dry: Dry mass flux at each edge [kg/s], shape (nbins+1,)
+    """
+    # Courant number at each edge
+    C = u_edges * dt_sub / delta_xi
+
+    # --- Positive velocity: flux from left cell (k-1) ---
+    # Pad coefficients: edge 0 has no left cell
+    n_L_ext = jnp.concatenate([jnp.zeros(1), n_L])
+    n_R_ext = jnp.concatenate([jnp.zeros(1), n_R])
+    n_6_ext = jnp.concatenate([jnp.zeros(1), n_6])
+    # m_L of donor cell (k-1): xk[k-1]
+    m_L_pos = jnp.concatenate([xk[:1], xk[:-1]])
+
+    F_M_pos = _integrate_mass_parabola_right(
+        n_L_ext, n_R_ext, n_6_ext, m_L_pos, jnp.abs(C))
+
+    # --- Negative velocity: flux from right cell (k) ---
+    # Pad coefficients: edge nbins has no right cell
+    n_L_right = jnp.concatenate([n_L, jnp.zeros(1)])
+    n_R_right = jnp.concatenate([n_R, jnp.zeros(1)])
+    n_6_right = jnp.concatenate([n_6, jnp.zeros(1)])
+    # m_L of donor cell (k): xk[k]
+    m_L_neg = jnp.concatenate([xk[:-1], xk[-2:-1]])
+
+    F_M_neg = _integrate_mass_parabola_left(
+        n_L_right, n_R_right, n_6_right, m_L_neg, jnp.abs(C))
+
+    # Select based on velocity sign (mass integral already includes delta_xi)
+    F_M = jnp.where(u_edges >= 0, F_M_pos, -F_M_neg) / dt_sub
+
+    # Boundary conditions
+    F_M = F_M.at[0].set(0.0)
+    F_M = F_M.at[-1].set(0.0)
+
+    return F_M
+
+
+# =============================================================================
 # 1.7 CONSERVATIVE UPDATE FROM FLUX DIVERGENCE
 # =============================================================================
 
@@ -506,52 +659,52 @@ def advect_totals(
 
 
 # =============================================================================
-# 1.8 PASSIVE SPECIES CONSISTENT TRANSPORT
+# 1.8 SPECIES TRANSPORT VIA WELL-MIXED RATIO
 # =============================================================================
 
-def passive_flux(
-    F_N: jnp.ndarray,
-    Mk_j: jnp.ndarray,
-    Nk: jnp.ndarray,
+def species_flux(
+    F_M_dry: jnp.ndarray,
+    Mk: jnp.ndarray,
+    M_dry_analytical: jnp.ndarray,
     u_edges: jnp.ndarray
 ) -> jnp.ndarray:
-    """Compute mass flux for passive (non-condensing) species.
+    """Compute mass flux for ALL species simultaneously using broadcasting.
 
-    Uses consistent transport: mass moves with particles.
-    F_M_j[k] = F_N[k] * r_j[donor]
+    Uses the analytical dry mass flux (from ppm_mass_flux) normalized by
+    the analytical total dry mass (from dry_mass_from_ppm_number):
 
-    where r_j = M_j / N is mass per particle in donor cell.
+        F_M[k,j] = F_M_dry[k] * (Mk[donor,j] / M_dry_analytical[donor])
+
+    Fully vectorized — no loops over species.
 
     Args:
-        F_N: Number flux at edges [#/s], shape (nbins+1,)
-        Mk_j: Mass of species j per bin [kg], shape (nbins,)
-        Nk: Number per bin [#], shape (nbins,)
+        F_M_dry: Dry mass flux at edges [kg/s], shape (nbins+1,)
+        Mk: Mass of ALL species per bin [kg], shape (nbins, ncomp)
+        M_dry_analytical: Analytical dry mass per bin [kg], shape (nbins,)
         u_edges: Velocity at edges (for upwind direction), shape (nbins+1,)
 
     Returns:
-        F_M_j: Mass flux at edges [kg/s], shape (nbins+1,)
+        F_M_all: Mass flux at edges for all species [kg/s], shape (nbins+1, ncomp)
     """
-    nbins = Nk.shape[0]
+    nbins = Mk.shape[0]
 
-    # Mass per particle in each bin (with safety for empty bins)
-    r_j = Mk_j / jnp.maximum(Nk, EPSN)
+    # Composition ratio for all species: (nbins, ncomp)
+    M_dry_2d = M_dry_analytical[:, None]
+    ratio = jnp.where(M_dry_2d > 1e-30, Mk / M_dry_2d, 0.0)
 
     # Donor bin indices (upwind)
-    # For edge k: donor is k-1 if u > 0, k if u < 0
     idx = jnp.arange(nbins + 1)
-    donor_left = jnp.clip(idx - 1, 0, nbins - 1)   # k-1, clipped
-    donor_right = jnp.clip(idx, 0, nbins - 1)      # k, clipped
-
-    # Select donor based on velocity sign
+    donor_left = jnp.clip(idx - 1, 0, nbins - 1)
+    donor_right = jnp.clip(idx, 0, nbins - 1)
     donor = jnp.where(u_edges >= 0, donor_left, donor_right)
 
-    # Mass ratio at donor cell
-    r_j_donor = r_j[donor]
+    # Extract donor ratios: (nbins+1, ncomp)
+    donor_ratios = ratio[donor]
 
-    # Mass flux = number flux * mass per particle
-    F_M_j = F_N * r_j_donor
+    # Multiply 1D dry flux by 2D donor ratios: (nbins+1, 1) * (nbins+1, ncomp)
+    F_M_all = F_M_dry[:, None] * donor_ratios
 
-    return F_M_j
+    return F_M_all
 
 
 # =============================================================================
@@ -631,46 +784,6 @@ def dry_mass_from_ppm_number_quadrature(
         M_dry = M_dry + w * m_q * n_q * delta_xi
 
     return M_dry
-
-
-# =============================================================================
-# 1.10 CLOSURE UPDATE FOR CSPECIES
-# =============================================================================
-
-def closure_update(
-    Mk: jnp.ndarray,
-    M_dry_total: jnp.ndarray,
-    cspecies: int,
-    icomp_nodiag: int
-) -> jnp.ndarray:
-    """Set CSPECIES mass as residual of dry species.
-
-    M_cs = M_dry_total - sum_{j in dry, j != cs} M_j
-
-    Args:
-        Mk: Mass per bin per species [kg], shape (nbins, icomp)
-        M_dry_total: Total dry mass per bin [kg], shape (nbins,)
-        cspecies: Index of condensing species
-        icomp_nodiag: Number of dry (non-diagnostic) species
-
-    Returns:
-        Mk_updated: Updated mass array with CSPECIES set by closure
-    """
-    # Create mask for non-condensing dry species
-    icomp = Mk.shape[1]
-    j_indices = jnp.arange(icomp)
-    noncond_mask = (j_indices < icomp_nodiag) & (j_indices != cspecies)
-
-    # Sum of non-condensing dry species masses
-    M_noncond = jnp.sum(Mk * noncond_mask[None, :], axis=1)
-
-    # CSPECIES = total dry - non-condensing
-    M_cs_new = jnp.maximum(M_dry_total - M_noncond, 0.0)
-
-    # Update CSPECIES in output
-    Mk_updated = Mk.at[:, cspecies].set(M_cs_new)
-
-    return Mk_updated
 
 
 # =============================================================================
@@ -786,15 +899,15 @@ def ppm_condensation_step(
         F_N = ppm_flux(n_L, n_R, n_6, u_edges, dt_sub, DELTA_XI)
         Nk_next = advect_totals(Nk_curr, F_N, dt_sub)
 
-        # 3d. Transport ALL species with upwind flux (including cspecies)
-        def advect_species(j, Mk_acc):
-            F_M_j = passive_flux(F_N, Mk_curr[:, j], Nk_curr, u_edges)
-            Mk_j_new = advect_totals(Mk_curr[:, j], F_M_j, dt_sub)
-            return Mk_acc.at[:, j].set(Mk_j_new)
+        # 3d. Compute analytical dry mass flux (mass-weighted integral)
+        F_M_dry = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub, DELTA_XI)
 
-        Mk_next = jax.lax.fori_loop(0, ncomp, advect_species, Mk_curr)
+        # 3e. Transport ALL species — vectorized, no loops
+        M_dry_analytical = dry_mass_from_ppm_number(n_L, n_R, n_6, xk)
+        F_M_all = species_flux(F_M_dry, Mk_curr, M_dry_analytical, u_edges)
+        Mk_next = advect_totals(Mk_curr, F_M_all, dt_sub)
 
-        # 3e. Positivity clamp
+        # 3f. Positivity clamp
         Nk_next = jnp.maximum(Nk_next, 0.0)
         Mk_next = jnp.maximum(Mk_next, 0.0)
 

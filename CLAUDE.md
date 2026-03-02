@@ -26,7 +26,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **config.py is the single source of truth** for dimensions (NBINS=36, ICOMP=44), species indices, and physical constants. Never hardcode these elsewhere.
 - **TomasState is a NamedTuple** with fields: Nk, Mk, xk, temp, pres, boxvol, Gc, rh, alpha. Use `.create()` factory for initialization, `.update()` for modification.
 - **Coagulation is JIT-compiled** via diffrax (Tsit5 solver). The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
-- **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). TFL_JIT is the recommended fast path — matches Fortran output exactly while being 43x faster than sequential TFL. Use `run_condensation_scan_tfl()` for scan-fused time loops. Note: PPM produces overly narrow distributions; TFL matches Fortran.
+- **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). Both TFL_JIT and PPM_JIT are fast paths. PPM_JIT uses analytical mass-weighted fluxes for exact conservation and is ~1.8x faster than TFL_JIT for condensation-only. TFL matches Fortran output exactly. Use `run_condensation_scan_tfl()` or `run_condensation_scan()` for scan-fused time loops.
 - **Operator splitting:** Each timestep runs coagulation (JIT) then condensation independently.
 
 ## File Layout
@@ -53,6 +53,7 @@ benchmarks/
   fortran/benchmark_24h.f     — Fortran 24h benchmark harness
   python/scenarios.py         — LHC scenario generator (50 scenarios)
   python/run_24h_scenarios.py — JAX 24h runner (3 modes × 3 methods)
+  python/run_ppm_analytical_benchmark.py — PPM analytical flux benchmark (49 scenarios × 5 modes)
   python/compare_24h.py       — 3-way comparison (Fortran vs TFL vs PPM)
   python/plot_24h_summary.py  — 8 summary plots
   python/plot_24h_timing.py   — Timing comparison plots

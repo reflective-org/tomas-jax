@@ -5,8 +5,9 @@
 The 24-hour benchmark evaluates TOMAS-JAX against the original Fortran TOMAS implementation across 50 diverse atmospheric scenarios. It compares three implementations:
 
 - **Fortran** — Original TOMAS Fortran (multicoag + ezcond)
-- **JAX-TFL** — JAX port using the sequential Transfer-Free Lagrangian (TFL) condensation algorithm
-- **JAX-PPM** — JAX port using the JIT-compiled Piecewise Parabolic Method (PPM) condensation
+- **JAX-TFL** — JAX port using the sequential TFL condensation (`method='tfl'`)
+- **JAX-TFL_JIT** — Pure-JAX JIT-compiled TFL (`method='tfl_jit'`, matches Fortran output)
+- **JAX-PPM_JIT** — Pure-JAX JIT-compiled PPM with analytical mass-weighted flux (`method='ppm_jit'`)
 
 Each scenario runs for 24 simulated hours with 60-second timesteps (1440 steps), producing hourly snapshots of the aerosol size distribution, gas-phase concentrations, and diagnostic totals.
 
@@ -226,25 +227,26 @@ pytest tests/test_24h_scenarios.py -v -k "sid1"
 
 ### Measured Timing (Apple M-series, single core)
 
-| Mode | Fortran (avg) | JAX-TFL | JAX-PPM |
-|------|---------------|---------|---------|
-| Coag Only | 0.27s | ~2-5s | N/A (same as TFL) |
-| Cond Only | 0.08s | ~5-15s | ~0.1-200s (GMD-dependent) |
-| Combined | 0.33s | ~7-20s | ~2-200s (GMD-dependent) |
+| Mode | Fortran | JAX-TFL (seq) | JAX-TFL_JIT | JAX-PPM_JIT | Best JAX/Fortran |
+|------|---------|---------------|-------------|-------------|------------------|
+| Coag Only | 0.27s | ~3.5s | — | — | 0.15s (**0.57x**) |
+| Cond Only | 0.08s | ~12s | 0.47s | **0.26s** | 3.4x |
+| Combined | 0.33s | ~16s | — | **0.41s** | 1.27x |
 
-### Why JAX is Currently Slower than Fortran
+### Performance Notes
 
-1. **TFL is sequential**: Python for-loops over 1440 timesteps with per-step function calls. Not JIT-compilable.
-2. **Coagulation uses Tsit5**: Adaptive 5th-order RK vs Fortran's forward Euler. More accurate but more work per step. Also, 1440 Python-level calls to diffrax_step (per-step dispatch overhead).
-3. **PPM CFL substeps**: Small-GMD scenarios (< 0.03 um) require many CFL substeps per condensation step, dominating runtime.
-4. **No fused time loop**: Each timestep involves Python-level dispatch for coag → cond → equilibria → MNFIX. A fused `jax.lax.scan` over all timesteps would eliminate dispatch overhead.
+- **Coagulation is faster than Fortran** (0.57x ratio) thanks to JIT compilation + vectorization
+- **PPM_JIT is 1.8x faster than TFL_JIT** for condensation-only
+- **Combined (coag + PPM_JIT cond)** is only 1.27x slower than Fortran
+- Sequential methods (`tfl`, `ppm`) are 25-500x slower — use only for debugging
+- First JIT compilation takes ~30-60s; add a warmup call
+- Scan-fused loops (`run_condensation_scan`, `run_condensation_scan_tfl`) compile the entire 1440-step time loop to a single XLA program
 
-### Path to Fortran-Competitive Speed
+### Remaining Speed Gap
 
-- Fuse the entire 1440-step time loop into a single `jax.lax.scan` call
-- Pre-compile the full coag + cond step as one JIT function
-- Batch multiple scenarios for GPU parallelism
-- Replace sequential TFL with JIT-compiled PPM (once accuracy is fixed)
+- Coagulation uses Tsit5 (adaptive RK45) vs Fortran's forward Euler — more accurate but more work per step
+- PPM CFL substeps for small-GMD scenarios (< 0.03 um) require up to 200 substeps
+- End-to-end JIT (coag + cond in one compiled step) not yet implemented
 
 ## 9. FAQ
 
@@ -271,8 +273,8 @@ A: Delete the NPZ files: `rm benchmarks/results/24h/*.npz`
 | Precision | double (64-bit) | double (64-bit, via jax_enable_x64) |
 | Pi constant | 3.141592654 | 3.141592653589793 |
 | Boltzmann | 1.38e-23 | 1.380649e-23 |
-| MNFIX | Fortran MNFIX (sequential loops) | Vectorized JAX MNFIX (parallel shifts) |
-| Condensation | ezcond (TFL) | ezcond (TFL) or PPM |
+| MNFIX | Fortran MNFIX (sequential loops) | Fortran-faithful partial-transfer (fori_loop) |
+| Condensation | ezcond (TFL) | TFL, TFL_JIT (Fortran-matching), PPM, PPM_JIT |
 | Water equilibrium | ezwatereqm.f | water_equilibrium.py (piecewise polynomial port) |
 | NH3 equilibrium | eznh3eqm.f | nh3_equilibrium.py (stoichiometric port) |
 
@@ -280,27 +282,36 @@ A: Delete the NPZ files: `rm benchmarks/results/24h/*.npz`
 
 ### Fixed: NaN Propagation in Condensation Sink (2026-02-27)
 
-**Problem**: Empty bins have `Dpk = 0`, which causes `Kn = 2*mfp/0 = inf` → `beta = NaN` → `CS = NaN`. When CS is NaN, the gas-phase depletion formula `mcond = Gc * (1 - exp(-CS*dt))` produces NaN, causing the entire simulation to diverge.
+**Problem**: Empty bins have `Dpk = 0` → `Kn = inf` → `beta = NaN` → `CS = NaN`.
 
-**Fix**: Added `safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)` in `condensation_sink.py:71`. Bins with zero diameter contribute nothing to the condensation sink.
+**Fix**: `safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)` in `condensation_sink.py`.
 
-### Fixed: MNFIX Empty-Bin Detection (2026-02-27)
+### Fixed: MNFIX Partial-Transfer Rewrite (2026-03-01)
 
-**Problem**: After PPM mass conservation rescaling, some bins had positive number but zero dry mass. These bins caused NaN in subsequent calculations because `xbar = drymass / Nk = 0 / N = 0`, which falls below `xk_lo` for all bins, triggering spurious downward shifts.
+**Problem**: Original MNFIX moved ALL particles to the next bin when average mass exceeded the boundary. This caused bins to empty completely → pulsing/oscillating size distributions. Fortran uses partial transfer.
 
-**Fix**: Changed empty-bin mask to include zero-dry-mass bins: `mask_empty = (Nk_new < TINY_N) | ((Nk_new >= TINY_N) & (drymass_new < NEPS))` in `mnfix_jax.py:129`.
+**Fix**: Complete rewrite of `mnfix_jax.py` with Fortran's partial-transfer algorithm: `nshift = (drymass - xold*Nk) / (xnew - xold)`, keeping remaining particles at geometric mean mass. S20 errors dropped from 100% to 0.3-1.9%.
 
-### Open: PPM Number Conservation Drift
+### Fixed: Condensation Sink Neps Threshold (2026-03-01)
 
-**Problem**: The PPM Eulerian advection scheme does not conserve the 0th moment (number concentration) when combined with MNFIX clipping. For small-GMD scenarios (< 0.03 um), number can drift by up to 33% over 24 hours. This is a fundamental limitation of Eulerian advection with post-hoc bin correction.
+**Problem**: Our code used `Neps=1e-20` for all bins. Fortran `getCondSink.f` uses `Neps=1e10` — bins with `Nk <= 1e10` use default `density=1500`, `mp=1.4*xk[k]`. Different `sinkfrac` distributions caused different size distribution evolution.
 
-**Potential fixes**:
-- Moving Center method (Jacobson 1997): Lagrangian bin centers that follow the mean mass, no remapping needed
-- Moment-preserving advection: Constrain PPM fluxes to conserve both N and M simultaneously
-- Tighter MNFIX limiters: Reduce the threshold at which bins are considered "empty"
+**Fix**: Match Fortran's `Neps=1e10` in `condensation_sink.py`.
+
+### Fixed: Mass Conservation Correction Threshold (2026-03-01)
+
+**Problem**: `ezcond.py` used `abs(ratio) < 100.0` (allowed 100x amplification). Fortran uses `abs(1-ratio) < 1.0` (ratio in 0 to 2).
+
+**Fix**: Match Fortran's threshold.
+
+### Fixed: PPM Number Conservation (2026-03-02)
+
+**Problem**: PPM had 81% N loss over 24h due to naive mass flux `F_M = F_N * r_avg_donor`. PPM selectively removes particles from the bin edge where they're 2x heavier → systematic mass underestimate → M/N mismatch → MNFIX clips → N loss death spiral.
+
+**Fix**: Analytical mass-weighted integrals `∫m(η)n(η)dη` over PPM departure regions + vectorized all-species transport. Result: machine-precision mass conservation (8.6e-16), median N_tot error 2.08e-7 across 49 scenarios.
 
 ### Open: Bin-0 Mass Dump in Condensation
 
-**Problem**: When the condensation sink CS is very small (< 1e-20), the current code dumps all gas-phase mass into bin 0 and creates corresponding number. This is physically nucleation, not condensation.
+**Problem**: When CS < 1e-20, mass is dumped into bin 0 (physically nucleation, not condensation).
 
-**Status**: Deferred until nucleation module is implemented. For now, this pathway should not be exercised in normal scenarios.
+**Status**: Deferred until nucleation module is implemented.
