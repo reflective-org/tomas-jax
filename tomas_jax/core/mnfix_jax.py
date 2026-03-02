@@ -1,17 +1,21 @@
-"""Pure JAX implementation of MNFIX - Vectorized for High Performance.
+"""Pure JAX implementation of MNFIX — Fortran-faithful partial-transfer algorithm.
 
-This module restores consistency between Number (Nk) and Mass (Mk) concentrations.
-It replaces the sequential Fortran loops with parallel array operations (shifts),
-making it suitable for GPU/TPU execution and JIT compilation.
+Port of mnfix.f (Peter Adams, September 2000).
 
-Algorithm:
-    1. Calculate average mass per particle (xbar) for each bin.
-    2. Identify bins where xbar has drifted outside bin boundaries.
-    3. Shift the entire population of drifting bins to the appropriate neighbor.
-    
-Assumption:
-    Since this is used inside an adaptive ODE solver (Diffrax), time steps are
-    small enough that particles typically drift only one bin at a time.
+When average mass per particle drifts outside a bin's boundaries, this routine
+performs a **partial transfer**: it splits the bin's population so that some
+particles stay (at the geometric mean mass) and the excess moves to the
+appropriate neighbor bin. This conserves both total number and total mass.
+
+Key difference from a naive "move-all" approach:
+  - Fortran/this code: partial split → smooth gradual redistribution
+  - Naive move-all: entire bin dumps to neighbor → oscillation/pulses
+
+Uses ``jax.lax.fori_loop`` for sequential bin processing, matching the Fortran
+in-place modification order.
+
+References:
+    - mnfix.f (Peter Adams, September 2000)
 """
 import jax
 # Enforce 64-bit precision for mass conservation
@@ -19,13 +23,18 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 from typing import Tuple
 
+
 def mnfix_jax(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
     xk: jnp.ndarray,
     icomp_nodiag: int = 42
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Correct mass/number drift in bins using vectorized operations.
+    """Correct mass/number drift using Fortran-faithful partial transfer.
+
+    Port of mnfix.f: when avg mass exceeds bin boundaries, split the bin
+    population so the remainder sits at the geometric mean and the excess
+    moves to the appropriate neighbor bin.
 
     Args:
         Nk: Number concentration [#/grid cell], shape (ibins,)
@@ -37,106 +46,167 @@ def mnfix_jax(
         Nk_new: Corrected number concentration
         Mk_new: Corrected mass concentration
     """
-    # =========================================================================
-    # 1. Constants & Preprocessing
-    # =========================================================================
     nbins = Nk.shape[0]
-    NEPS = 1.0e-20  # Threshold to avoid division by zero
-    TINY_N = 1.0e-10 # Minimum number concentration for empty bins
-    
-    # Enforce physical positivity immediately
+    icomp = Mk.shape[1]
+
+    # Constants matching Fortran mnfix.f
+    EPS = 1.0e-40
+    NEPS = 1.0e-5  # Fortran: parameter(Neps=1E-5)
+
+    # Enforce physical positivity
     Nk = jnp.maximum(Nk, 0.0)
     Mk = jnp.maximum(Mk, 0.0)
 
     # =========================================================================
-    # 2. Diagnostics (Calculate Average Mass)
+    # Phase 1: Fix empty/near-empty bins (mnfix.f lines 56-72)
+    # If Nk < Neps: zero out dry mass, set Nk=Neps, Mk_so4 = Neps*sqrt(xk*xk+1)
     # =========================================================================
-    # Sum dry mass components
-    drymass = jnp.sum(Mk[:, :icomp_nodiag], axis=1)
-    
-    # Calculate average mass (xbar), handling empty bins safely
-    # If Nk < NEPS, xbar is irrelevant (set to 0.0)
-    xbar = jnp.where(Nk > NEPS, drymass / Nk, 0.0)
-    
-    # Bin boundaries
-    xk_lo = xk[:-1]
-    xk_hi = xk[1:]
+    def fix_empty_bin(k, state):
+        Nk_s, Mk_s = state
+        is_empty = Nk_s[k] < NEPS
 
-    # =========================================================================
-    # 3. Identify Drifting Bins
-    # =========================================================================
-    # Particles that have grown too large for their current bin
-    mask_up = (xbar > xk_hi) & (Nk > NEPS)
-    
-    # Particles that have shrunk too small for their current bin
-    mask_down = (xbar < xk_lo) & (Nk > NEPS)
+        # For empty bins: zero all dry mass, set SO4 to tiny value
+        xk_geo = jnp.sqrt(xk[k] * xk[k + 1])
+        Mk_empty = jnp.zeros(icomp)
+        Mk_empty = Mk_empty.at[0].set(NEPS * xk_geo)  # SO4 = Neps * geometric mean
+
+        Nk_s = jnp.where(is_empty, Nk_s.at[k].set(NEPS), Nk_s)
+        Mk_s = jnp.where(is_empty, Mk_s.at[k].set(Mk_empty), Mk_s)
+        return Nk_s, Mk_s
+
+    Nk, Mk = jax.lax.fori_loop(0, nbins, fix_empty_bin, (Nk, Mk))
 
     # =========================================================================
-    # 4. Calculate Fluxes (Vectorized)
+    # Phase 2: Fix extreme out-of-range (mnfix.f lines 75-94)
+    # avg > xk[ibins+1]: trim mass
+    # avg < xk[0]: trim number
     # =========================================================================
-    # Instead of looping, we determine the flux for the whole grid at once.
-    
-    # Prepare Flux Arrays (Amount to move out of current bin)
-    N_flux_up = jnp.where(mask_up, Nk, 0.0)
-    M_flux_up = jnp.where(mask_up[:, None], Mk, 0.0)
-    
-    N_flux_down = jnp.where(mask_down, Nk, 0.0)
-    M_flux_down = jnp.where(mask_down[:, None], Mk, 0.0)
+    def fix_extreme(k, state):
+        Nk_s, Mk_s = state
 
-    # Apply Boundary Conditions (Cannot shift out of the domain)
-    # 1. Last bin (nbins-1) cannot shift UP. 
-    #    (Standard TFL choice: keep them there, or let them rain out. We keep them.)
-    N_flux_up = N_flux_up.at[nbins-1].set(0.0)
-    M_flux_up = M_flux_up.at[nbins-1].set(0.0)
+        drymass = jnp.sum(Mk_s[k, :icomp_nodiag])
+        avg = drymass / (Nk_s[k] + EPS)
 
-    # 2. First bin (0) cannot shift DOWN.
-    #    (They cannot shrink smaller than the smallest bin.)
-    N_flux_down = N_flux_down.at[0].set(0.0)
-    M_flux_down = M_flux_down.at[0].set(0.0)
+        # avg > xk[ibins+1] → trim mass
+        too_high = avg > xk[nbins]
+        mshift = Nk_s[k] * xk[nbins] / 1.2
+        scale = mshift / (drymass + EPS)
+        Mk_trimmed = Mk_s[k] * scale
+        Mk_s = jnp.where(too_high, Mk_s.at[k].set(Mk_trimmed), Mk_s)
 
-    # =========================================================================
-    # 5. Apply Shifts (Vectorized Roll)
-    # =========================================================================
-    # Step A: Remove drifting particles from their source bins
-    Nk_new = Nk - N_flux_up - N_flux_down
-    Mk_new = Mk - M_flux_up - M_flux_down
+        # Recompute drymass after potential trim
+        drymass2 = jnp.where(too_high, jnp.sum(Mk_trimmed[:icomp_nodiag]), drymass)
 
-    # Step B: Add drifting particles to their destination bins
-    # Shift Up -> Moves to index k+1. We use roll with shift +1.
-    # Note: jnp.roll shifts indices: index 0 moves to 1.
-    Nk_new = Nk_new + jnp.roll(N_flux_up, 1)
-    Mk_new = Mk_new + jnp.roll(M_flux_up, 1, axis=0)
+        # avg < xk[0] → trim number
+        too_low = drymass2 / (Nk_s[k] + EPS) < xk[0]
+        new_nk = drymass2 / (xk[0] * 1.2)
+        Nk_s = jnp.where(too_low, Nk_s.at[k].set(new_nk), Nk_s)
 
-    # Shift Down -> Moves to index k-1. We use roll with shift -1.
-    Nk_new = Nk_new + jnp.roll(N_flux_down, -1)
-    Mk_new = Mk_new + jnp.roll(M_flux_down, -1, axis=0)
+        return Nk_s, Mk_s
 
-    # Step C: Clean up "wrap-around" artifacts from roll
-    # jnp.roll is circular. 
-    # - Anything shifting UP from the last bin would wrap to 0. (Handled by boundary condition above).
-    # - Anything shifting DOWN from bin 0 would wrap to last bin. (Handled by boundary condition above).
-    # However, strictly enforcing zero at the "entry" points of the roll is good practice.
-    # (Implicitly handled by BCs, but floating point noise can exist).
+    Nk, Mk = jax.lax.fori_loop(0, nbins, fix_extreme, (Nk, Mk))
 
     # =========================================================================
-    # 6. Final Cleanup (Empty Bins)
+    # Phase 3: Partial transfer for out-of-range bins (mnfix.f lines 96-156)
+    # This is the CRITICAL part that differs from the old "move-all" approach.
+    #
+    # When avg > xk[k+1]:
+    #   xold = sqrt(xk[k]*xk[k+1])  (geometric mean of current bin)
+    #   xnew = xk[kk+1] / 1.1       (target mass in destination bin kk)
+    #   nshift = (drymass - xold*number) / (xnew - xold)
+    #   Particles staying in bin k get avg mass = xold
+    #   Particles moving to bin kk get avg mass = xnew
+    #
+    # Similarly for avg < xk[k] (downward shift).
     # =========================================================================
-    # Ensure empty bins have consistent (tiny) values to prevent NaNs in next step
-    
-    mask_empty = Nk_new < TINY_N
-    
-    # Reset N to tiny epsilon
-    Nk_final = jnp.where(mask_empty, TINY_N, Nk_new)
-    
-    # Reset Mass: Zero out, then add tiny diagnostic mass (e.g. Sulfate)
-    Mk_temp = jnp.where(mask_empty[:, None], 0.0, Mk_new)
-    
-    # Calculate geometric mean mass for the bin
-    mean_mass_bin = jnp.sqrt(xk_lo * xk_hi)
-    
-    # Add tiny mass to first component (usually SO4, index 0)
-    Mk_final = Mk_temp.at[:, 0].set(
-        jnp.where(mask_empty, TINY_N * mean_mass_bin, Mk_temp[:, 0])
-    )
+    def fix_drift(k, state):
+        Nk_s, Mk_s = state
 
-    return Nk_final, Mk_final
+        drymass = jnp.sum(Mk_s[k, :icomp_nodiag])
+        number = Nk_s[k]
+        avg = drymass / (number + EPS)
+
+        # --- Handle N=0 edge case (Fortran lines 103-110) ---
+        avg = jnp.where(
+            (number == 0.0) & (drymass <= 0.0),
+            jnp.sqrt(xk[k] * xk[k + 1]),  # use geometric mean
+            avg
+        )
+
+        xk_lo = xk[k]
+        xk_hi = xk[k + 1]
+        xold = jnp.sqrt(xk_lo * xk_hi)  # geometric mean of current bin
+
+        # Composition fractions
+        fj = Mk_s[k] / (drymass + EPS)
+
+        # ===== UPWARD SHIFT (avg > xk[k+1]) =====
+        needs_up = (avg > xk_hi) & (k < nbins - 1)
+
+        # Target: bin kk = k+1, with xnew = xk[kk+1]/1.1
+        # For simplicity, handle 1-bin shift (most common case).
+        # Multi-bin drift is handled by repeated MNFIX calls or the Phase 2 trim.
+        kk_up = jnp.minimum(k + 1, nbins - 1)
+        xnew_up = xk[kk_up + 1] / 1.1
+
+        # If xnew_up <= avg, try one more bin up
+        need_extra_up = xnew_up <= avg
+        kk_up2 = jnp.minimum(k + 2, nbins - 1)
+        xnew_up2 = xk[jnp.minimum(kk_up2 + 1, nbins)] / 1.1
+        kk_up = jnp.where(need_extra_up, kk_up2, kk_up)
+        xnew_up = jnp.where(need_extra_up, xnew_up2, xnew_up)
+
+        nshift_up = (drymass - xold * number) / (xnew_up - xold + EPS)
+        nshift_up = jnp.maximum(nshift_up, 0.0)  # Safety: no negative shifts
+        nshift_up = jnp.minimum(nshift_up, number)  # Can't shift more than we have
+        mshift_up = xnew_up * nshift_up
+
+        # Apply upward shift
+        Nk_up = Nk_s.at[k].add(-nshift_up)
+        Nk_up = Nk_up.at[kk_up].add(nshift_up)
+
+        # Remaining particles in bin k get avg mass = xold, composition = fj
+        n_remain_up = number - nshift_up
+        Mk_up = Mk_s.at[k].set(xold * n_remain_up * fj)
+        # Shifted particles in bin kk get mass = mshift_up * fj
+        Mk_up = Mk_up.at[kk_up].add(mshift_up * fj)
+
+        # ===== DOWNWARD SHIFT (avg < xk[k]) =====
+        needs_down = (avg < xk_lo) & (k > 0)
+
+        kk_dn = jnp.maximum(k - 1, 0)
+        xnew_dn = xk[kk_dn] * 1.1
+
+        # If xnew_dn >= avg, try one more bin down
+        need_extra_dn = xnew_dn >= avg
+        kk_dn2 = jnp.maximum(k - 2, 0)
+        xnew_dn2 = xk[kk_dn2] * 1.1
+        kk_dn = jnp.where(need_extra_dn, kk_dn2, kk_dn)
+        xnew_dn = jnp.where(need_extra_dn, xnew_dn2, xnew_dn)
+
+        nshift_dn = (drymass - xold * number) / (xnew_dn - xold + EPS)
+        nshift_dn = jnp.maximum(nshift_dn, 0.0)
+        nshift_dn = jnp.minimum(nshift_dn, number)
+        mshift_dn = xnew_dn * nshift_dn
+
+        # Apply downward shift
+        Nk_dn = Nk_s.at[k].add(-nshift_dn)
+        Nk_dn = Nk_dn.at[kk_dn].add(nshift_dn)
+
+        n_remain_dn = number - nshift_dn
+        Mk_dn = Mk_s.at[k].set(xold * n_remain_dn * fj)
+        Mk_dn = Mk_dn.at[kk_dn].add(mshift_dn * fj)
+
+        # ===== SELECT CASE =====
+        Nk_out = jnp.where(needs_up, Nk_up,
+                 jnp.where(needs_down, Nk_dn,
+                 Nk_s))
+        Mk_out = jnp.where(needs_up, Mk_up,
+                 jnp.where(needs_down, Mk_dn,
+                 Mk_s))
+
+        return Nk_out, Mk_out
+
+    Nk, Mk = jax.lax.fori_loop(0, nbins, fix_drift, (Nk, Mk))
+
+    return Nk, Mk
