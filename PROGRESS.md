@@ -4,6 +4,30 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-02 (Sun) — GMD Paper Draft Populated
+
+**Time**: ~18:00 PST
+
+### Summary
+
+Populated the full GMD-style paper draft at `docs/paper/draft.md` (~5000 words) with:
+- Complete prose for all 8 sections + 4 appendices
+- LaTeX-style equations extracted from source code (dmdt_int, PPM reconstruction, analytical mass-weighted flux, Fuchs-Sutugin, condensation sink, MNFIX partial transfer)
+- 6 validation/timing tables with exact numbers from benchmark summary
+- 9 planned figure captions and 6 table references
+- 30+ references in GMD bibliography style
+- Cross-verified all formulas against source code and all benchmark numbers against `summary.txt` — no inconsistencies found
+
+### Files Modified
+- `docs/paper/draft.md` — complete rewrite from outline to full paper
+
+### Next Steps
+- Generate actual figures from benchmark data
+- Convert to LaTeX for GMD submission
+- Add nucleation and organic condensation sections when implemented
+
+---
+
 ## 2026-03-02 (Sun) — PPM Analytical Mass-Weighted Flux Fix + Vectorized Species Transport
 
 **Time**: ~11:00 PST
