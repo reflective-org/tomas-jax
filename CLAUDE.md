@@ -58,6 +58,17 @@ benchmarks/
   python/plot_24h_summary.py  — 8 summary plots
   python/plot_24h_timing.py   — Timing comparison plots
 
+tomas_fortran/
+  src/                        — 14 core TOMAS Fortran source files (TFL condensation)
+  src_ppm/tmcond_ppm.f        — PPM condensation (8 subroutines, ported from JAX)
+  src_ppm/ezcond_ppm.f        — PPM-aware ezcond driver
+  include/sizecode.COM        — Common block definitions
+  harness/benchmark_24h.f     — 24h TFL benchmark driver
+  harness/benchmark_24h_ppm.f — 24h PPM benchmark driver
+  harness/benchmark_harness.f — Single-scenario benchmark driver
+  Makefile                    — Self-contained build (no external paths)
+  README.md                   — Build instructions and file descriptions
+
 docs/
   architecture.md             — Condensation pipeline architecture
   ppm_condensation.md         — PPM algorithm documentation
@@ -73,7 +84,7 @@ docs/
 
 The condensation modules are direct ports of TOMAS Fortran:
 - `condensation.py` (dmdt_int, tmcond) ← dmdt_int.f, tmcond.f
-- `condensation_ppm.py` — PPM advection (new, no Fortran equivalent)
+- `condensation_ppm.py` → tmcond_ppm.f (PPM advection, Fortran port in src_ppm/)
 - `ezcond.py` ← ezcond.f
 - `ezcond_ppm.py` — PPM driver (same interface as ezcond, uses PPM internally)
 - `ezcond_ppm_jax.py` — Pure-JAX PPM driver (JIT-compilable version of ezcond_ppm.py)
@@ -82,7 +93,7 @@ The condensation modules are direct ports of TOMAS Fortran:
 - `gas_properties.py` ← gasdiff.f, getCondSink.f
 - `condensation_sink.py` ← getCondSink.f
 
-Original Fortran lives at: `../../original-models/TOMAS/backup/src/`
+Original Fortran source is in `tomas_fortran/src/` (self-contained copy).
 
 ## Common Patterns
 

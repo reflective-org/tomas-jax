@@ -4,6 +4,105 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-02 (Sun) — Fortran TFL vs PPM 24h Benchmark Comparison
+
+**Time**: ~14:30 PST
+
+### Summary
+
+Ran 49 scenarios (S01-S49) x 24 hours x 2 modes (cond_only, combined) for both Fortran TFL and Fortran PPM, then generated 8 comparison plots and a detailed summary.
+
+### Key Results
+
+- **22 of 49 scenarios** exercise PPM transport (Path 1 where mcond > 1e-3 * total_dry_mass)
+- **Cond-only (active only)**: N_tot error median=1.5e-6, max=1.2e-3; M_dry error median=5.1e-6, max=1.9e-4
+- **Combined (active only)**: N_tot error median=6.0e-3, max=4.9e-2; M_dry error median=5.2e-6, max=1.7e-4
+- **N conservation**: TFL perfect (1.0000); PPM median=0.9999, worst=0.9996 (cond-only)
+- **Per-bin differences**: Up to 100% in individual bins — expected algorithmic difference (PPM is less diffusive, produces sharper distributions; TFL smears the growth front across bins)
+- **Timing**: PPM ~0.93x TFL for cond-only (69ms vs 74ms); equal for combined (~0.32s, dominated by coagulation)
+- **Scenario 50**: Crashes both methods (known extreme condition issue)
+
+### Files Created
+- `benchmarks/python/compare_fortran_tfl_ppm.py` — Comparison script (8 plots + summary)
+- `benchmarks/results/fortran_tfl_vs_ppm/` — 8 PNG figures + summary.txt
+
+### Next Steps
+- Investigate PPM N conservation loss (worst case 0.04% at 24h) — likely from positivity clamping
+- Consider running with `-O2` for more realistic timing comparison
+- Compare Fortran PPM against JAX PPM to verify cross-language consistency
+
+---
+
+## 2026-03-02 (Sun) — Port PPM Condensation to Fortran
+
+**Time**: ~14:00 PST
+
+### Summary
+
+Ported the PPM (Piecewise Parabolic Method) condensation algorithm from JAX/Python (`tomas_jax/physics/condensation_ppm.py`) to Fortran. The PPM Fortran code lives in a separate `tomas_fortran/src_ppm/` directory so both TFL and PPM methods coexist and can be benchmarked head-to-head in pure Fortran.
+
+### Files Created
+- `tomas_fortran/src_ppm/tmcond_ppm.f` — 8 PPM subroutines (~590 lines):
+  - `PPM_RECONSTRUCT` — 4th-order interface interpolation + Colella-Woodward limiting + positivity
+  - `PPM_EDGE_VELOCITY` — Upwind velocity at bin edges via DMDT_INT
+  - `PPM_NUMBER_FLUX` — Departure-point parabola integration for number flux
+  - `PPM_MASS_FLUX` — Analytical mass-weighted flux (∫m(η)n(η)dη with exp antiderivatives)
+  - `PPM_DRY_MASS_ANALYTICAL` — Exact dry mass from PPM coefficients (moment integrals I0, I1, I2)
+  - `PPM_SPECIES_FLUX` — Upwind donor ratio × dry mass flux for all 44 species
+  - `PPM_COMPUTE_SUBSTEPS` — CFL-limited substep count (C_max = 0.8)
+  - `PPM_CONDENSATION_STEP` — Main orchestrator (freeze WR, substep loop, call all above)
+- `tomas_fortran/src_ppm/ezcond_ppm.f` — PPM-aware ezcond driver (~170 lines):
+  - Same 3-path decision tree as ezcond.f (CS check, significance thresholds)
+  - Path 1 calls PPM_CONDENSATION_STEP with dt=1.0, then adds condensed mass via sinkfrac
+  - Mass conservation check and correction (same as ezcond.f)
+- `tomas_fortran/harness/benchmark_24h_ppm.f` — PPM benchmark harness (~230 lines):
+  - Same as benchmark_24h.f but calls ezcond_ppm instead of ezcond
+  - Output files prefixed with `ppm_` (e.g., `ppm_s01_cond_hour01_Nk.csv`)
+  - Timing CSV: `output/24h/timing_fortran_ppm.csv`
+
+### Files Modified
+- `tomas_fortran/Makefile` — Added `SRC_PPM`, `PPM_OBJS`, compile rules, `benchmark_24h_ppm` target, `benchmark_both` convenience target
+- `tomas_fortran/README.md` — Documented src_ppm/ and new build targets
+- `CLAUDE.md` — Added src_ppm/ files to file layout, updated Fortran source mapping
+
+### Verification
+- `make benchmark_24h_ppm` compiles cleanly (no warnings)
+- `make benchmark_24h` still compiles (TFL unchanged)
+- Both executables produced: `benchmark_24h_ppm.exe` (121KB), `benchmark_24h.exe` (103KB)
+
+### Next Steps
+- Run single scenario cond-only and compare against JAX PPM JIT output
+- Run full 50-scenario benchmark for timing comparison
+- Add Python comparison script for TFL vs PPM Fortran output
+
+---
+
+## 2026-03-02 (Sun) — Bring TOMAS Fortran into tomas_fortran/
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Made the repository self-contained by copying the original TOMAS Fortran source into `tomas_fortran/` with a proper build system. Previously, the Fortran source was referenced via fragile relative paths to `../../original-models/TOMAS/backup/src/`.
+
+### Files Created
+- `tomas_fortran/src/` — 14 core Fortran source files (multicoag.f, initbounds.f, mnfix.f, aerodens.f, loginit.f, ezcond.f, tmcond.f, dmdt_int.f, getCondSink.f, gasdiff.f, eznh3eqm.f, ezwatereqm.f, waterso4.f, waternacl.f)
+- `tomas_fortran/include/sizecode.COM` — Common block definitions
+- `tomas_fortran/harness/benchmark_24h.f` — 24h benchmark driver (copied from benchmarks/fortran/)
+- `tomas_fortran/harness/benchmark_harness.f` — Single-scenario driver (copied from benchmarks/fortran/)
+- `tomas_fortran/Makefile` — Self-contained build system (targets: all, benchmark_24h, run_24h, clean)
+- `tomas_fortran/README.md` — Build instructions and file descriptions
+
+### Files Modified
+- `benchmarks/fortran/Makefile` — Updated TOMAS_SRC and TOMAS_INC to point to `../../tomas_fortran/src/` and `../../tomas_fortran/include/`
+- `CLAUDE.md` — Added tomas_fortran/ to file layout, updated Fortran source path reference
+
+### Next Steps
+- Remove symlink dependency from benchmarks/fortran/ (sizecode.COM still symlinked for its local compile)
+- Consider adding `.gitignore` for `tomas_fortran/output/` and `*.o` files
+
+---
+
 ## 2026-03-02 (Sun) — GMD Paper Draft Populated
 
 **Time**: ~18:00 PST
