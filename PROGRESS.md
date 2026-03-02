@@ -4,6 +4,66 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-01 (Sat) — Fix TFL Condensation Oscillation (Root Cause: MNFIX + Condensation Sink)
+
+**Time**: ~00:30 PST
+
+### Root Cause
+
+TFL condensation produced oscillating/pulsing size distributions (bins emptying completely then all particles jumping to the next bin). Two bugs were identified:
+
+1. **MNFIX was doing "move-all" instead of Fortran's "partial-transfer"** (THE ROOT CAUSE)
+   - Our MNFIX: when avg mass > upper bin boundary → move ALL particles to next bin → source bin empties → pulse
+   - Fortran MNFIX: split the bin — some particles stay at geometric mean mass, excess moves to neighbor → smooth gradual redistribution
+   - Fortran uses `nshift = (drymass - xold*number) / (xnew - xold)` for the partial transfer, keeping remaining particles at `xold = sqrt(xk[k]*xk[k+1])` and shifting `nshift` particles at `xnew = xk[kk+1]/1.1`
+
+2. **Condensation sink Neps threshold was wrong** (SECONDARY)
+   - Fortran getCondSink.f: `Neps = 1e10` — bins with < 1e10 particles use default `density=1500`, `mp=1.4*xk[k]`
+   - Our code: `Neps = 1e-20` — computed actual density/mp for ALL bins, giving different `sinkfrac` distributions
+
+3. **Mass conservation correction threshold was too permissive** (MINOR)
+   - Fortran ezcond.f: `abs(1-ratio) < 1.0` → ratio in (0, 2)
+   - Our ezcond.py: `abs(ratio) < 100.0` → allowed extreme amplification
+
+### Files Modified
+
+- `tomas_jax/core/mnfix_jax.py` — **Complete rewrite** to match Fortran mnfix.f:
+  - Phase 1: Fix empty bins (Neps=1e-5, matching Fortran)
+  - Phase 2: Fix extreme out-of-range (avg > max grid or avg < min grid)
+  - Phase 3: Partial transfer using Fortran's split algorithm (nshift formula)
+  - Uses `jax.lax.fori_loop` for sequential processing matching Fortran order
+  - Multi-bin drift handled for 1-2 bin shifts (common case)
+
+- `tomas_jax/physics/condensation_sink.py` — Match Fortran getCondSink.f Neps=1e10:
+  - Bins with Nk > 1e10: compute actual density and mp from composition
+  - Bins with Nk <= 1e10: use default density=1500, mp=1.4*xk[k]
+  - Now directly computes Dpk instead of calling calc_particle_properties
+
+- `tomas_jax/physics/ezcond.py` — Fixed mass correction threshold:
+  - Changed from `abs(ratio) < 100.0` to `ratio > 0.0 and ratio < 2.0` (matching Fortran)
+
+- `tomas_jax/core/config.py` — Added `xk_boundaries()` utility function and `XK0` constant
+
+### Results (1-hour, 60 steps)
+
+| Scenario | Before Fix | After Fix |
+|----------|-----------|-----------|
+| S10 (peak bins) | 2-7% error | 0.02-12% error |
+| S20 (all bins) | **100% error (empty bins!)** | **0.3-1.9% error** |
+| S39 (peak bins) | **93% error** | **0.2-2.4% error** |
+
+### Tests
+
+All 73 non-cached tests pass (15 TFL JIT + 43 PPM + 13 PPM JIT + 2 coagulation).
+
+### Known Remaining Issues
+
+- S39 lower-tail bins (6-8) still have 14-39% error — these have very few particles and are affected by the Neps threshold boundary
+- PPM still has fundamental N conservation issues (separate from MNFIX) due to passive_flux using average donor mass instead of position-dependent mass
+- The 24h benchmark NPZ files need regeneration with the fixed code
+
+---
+
 ## 2026-02-28 (Fri) — JIT-Compile TFL Condensation (Fortran-Matching, 43x Speedup)
 
 **Time**: ~00:00 PST

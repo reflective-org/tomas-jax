@@ -257,10 +257,10 @@ def ezcond_tfl_jax(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Pure-JAX ezcond using TFL tmcond — JIT-compilable.
 
-    Simplified version of ezcond.f:
+    Matches ezcond.f structure:
     - Single-step (nsteps=1) — relies on outer time loop for sub-stepping
     - No c1/c2 corrections (moxd=0 for SO4)
-    - No internal MNFIX (caller handles it)
+    - MNFIX before tmcond and after mass correction (matching Fortran lines 202, 279)
     - Includes mass conservation correction
 
     Args:
@@ -276,6 +276,7 @@ def ezcond_tfl_jax(
         Nk_out, Mk_out
     """
     from .condensation_sink import calc_condensation_sink
+    from ..core.mnfix_jax import mnfix_jax
 
     ibins = Nk.shape[0]
     icomp = Mk.shape[1]
@@ -312,10 +313,12 @@ def ezcond_tfl_jax(
     tot_m = jnp.sum(Mk[:, :icomp_nodiag])
     tot_s = jnp.sum(Mk[:, spec])
 
-    # --- Path 1: Full tmcond ---
+    # --- Path 1: Full tmcond (with MNFIX before, matching ezcond.f line 202) ---
     def tmcond_path(args):
         Nk_in, Mk_in, tau_in = args
-        Nk2, Mk2 = tmcond_jax(tau_in, xk, Mk_in, Nk_in, spec, icomp_nodiag)
+        # MNFIX before tmcond (ezcond.f line 202)
+        Nk_fixed, Mk_fixed = mnfix_jax(Nk_in, Mk_in, xk, icomp_nodiag)
+        Nk2, Mk2 = tmcond_jax(tau_in, xk, Mk_fixed, Nk_fixed, spec, icomp_nodiag)
         return Nk2, Mk2
 
     # --- Path 2: Simple mass addition ---
@@ -327,7 +330,9 @@ def ezcond_tfl_jax(
             0.0
         )
         Mk_out = Mk_in.at[:, spec].add(mass_add)
-        return Nk_in, Mk_out
+        # MNFIX after simple add (ezcond.f line 232)
+        Nk_out, Mk_out = mnfix_jax(Nk_in, Mk_out, xk, icomp_nodiag)
+        return Nk_out, Mk_out
 
     # --- Path 3: No-op ---
     def noop_path(args):
@@ -356,12 +361,16 @@ def ezcond_tfl_jax(
     tot_f = jnp.sum(Mk_cond[:, spec])
     gained = tot_f - tot_i
     ratio = jnp.where(jnp.abs(mcond) > 0, gained / mcond, 1.0)
-    should_correct = (jnp.abs(ratio) > 0.0) & (jnp.abs(ratio) < 100.0)
-    safe_ratio = jnp.where(should_correct & (jnp.abs(ratio) > 1e-30), ratio, 1.0)
+    # Fortran condition: abs(1 - ratio) < 1.0, i.e. 0 < ratio < 2
+    should_correct = (ratio > 0.0) & (ratio < 2.0)
+    safe_ratio = jnp.where(should_correct, ratio, 1.0)
     Mk_corrected = Mk.at[:, spec].set(
         Mk[:, spec] + (Mk_cond[:, spec] - Mk[:, spec]) / safe_ratio
     )
     Mk_cond = jnp.where(should_correct & (mcond > 0.0), Mk_corrected, Mk_cond)
+
+    # MNFIX after mass correction (ezcond.f line 279)
+    Nk_cond, Mk_cond = mnfix_jax(Nk_cond, Mk_cond, xk, icomp_nodiag)
 
     # Select: dump vs condensation
     Nk_out = jnp.where(CS < 1e-20, Nk_dump, Nk_cond)

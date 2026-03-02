@@ -23,11 +23,14 @@ from typing import Tuple, Union
 
 from .gas_properties import (
     calc_gas_diffusivity,
-    calc_knudsen_number,
+    calc_mean_free_path,
     calc_fuchs_sutugin_correction,
 )
-from .properties import calc_particle_properties
-from ..core.config import PI, MW_H2SO4, SV_H2SO4
+from .density import calc_density
+from ..core.config import PI, MW_H2SO4, SV_H2SO4, NBINS, ICOMP_NODIAG
+
+# Fortran getCondSink.f: parameter(Neps=1.0d10)
+NEPS_CONDSINK = 1.0e10
 
 
 def calc_condensation_sink(
@@ -44,6 +47,10 @@ def calc_condensation_sink(
 
     Exact port of getCondSink.f lines 77-135.
 
+    For bins with Nk > 1e10: uses actual density and mp from composition.
+    For bins with Nk <= 1e10: uses default density=1500 and mp=1.4*xk[k],
+    matching Fortran getCondSink.f parameter(Neps=1.0d10).
+
     Args:
         Nk: Number concentration [#/grid cell], shape (ibins,)
         Mk: Mass concentration [kg/grid cell], shape (ibins, icomp)
@@ -58,16 +65,40 @@ def calc_condensation_sink(
         CS: Condensation sink [s^-1]
         sinkfrac: Fraction of CS from each bin, shape (ibins,)
     """
-    Di = calc_gas_diffusivity(temp, pres, molecular_weight, diffusion_volume)
-    Dpk, Dk, ck = calc_particle_properties(Nk, Mk, temp, pres)
+    from ..core.config import xk_boundaries
 
-    Kn = calc_knudsen_number(
-        Dpk, temp, pres, molecular_weight, diffusion_volume
-    )
+    xk = xk_boundaries()
+
+    Di = calc_gas_diffusivity(temp, pres, molecular_weight, diffusion_volume)
+    mfp = calc_mean_free_path(temp, pres, molecular_weight, diffusion_volume)
+
+    # --- Compute Dpk following Fortran getCondSink.f lines 89-113 ---
+    # For bins with Nk > Neps: actual density and mp
+    # For bins with Nk <= Neps: default density=1500, mp=1.4*xk[k]
+    has_particles = Nk > NEPS_CONDSINK
+
+    # Actual properties (for populated bins)
+    Mktot = jnp.sum(Mk, axis=1)  # total wet mass per bin
+    mp_actual = Mktot / jnp.maximum(Nk, 1e-30)
+    density_actual = calc_density(Mk)
+
+    # Default properties (for sparse bins)
+    mp_default = 1.4 * xk[:-1]
+    density_default = 1500.0
+
+    mp = jnp.where(has_particles, mp_actual, mp_default)
+    density = jnp.where(has_particles, density_actual, density_default)
+
+    # Dpk = ((mp/density) * (6/pi))^(1/3)
+    Dpk = jnp.cbrt(mp / density * (6.0 / PI))
+
+    # Kn = 2*mfp/Dpk (getCondSink.f line 111)
+    Kn = 2.0 * mfp / jnp.maximum(Dpk, 1e-30)
+
+    # beta = (1+Kn)/(1+2*Kn*(1+Kn)/alpha) (getCondSink.f line 112)
     beta = calc_fuchs_sutugin_correction(Kn, accommodation_coeff)
 
     # Guard: bins with Dpk=0 produce Kn=inf -> beta=NaN.
-    # Zero out their contribution (no diameter = no condensation).
     safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)
     sink_contributions = Dpk * Nk * safe_beta
     CS_sum = jnp.sum(sink_contributions)

@@ -78,3 +78,22 @@ CS_EPS = 1.0e-20               # Minimum condensation sink
 # =========================================================================
 TINY_N = 1.0e-20    # Threshold for number concentration
 TINY_M = 1.0e-25    # Threshold for mass
+
+# =========================================================================
+# 7. Bin Boundaries
+# =========================================================================
+# Mass-doubling grid: xk[k+1] = 2 * xk[k], starting at 1.6033e-23 kg.
+XK0 = 1.6033e-23    # Lower boundary of first bin [kg]
+
+
+def xk_boundaries():
+    """Return bin boundary array xk, shape (NBINS+1,).
+
+    Uses JAX arrays for compatibility with JIT-traced code.
+    """
+    import jax.numpy as jnp
+    xk = jnp.zeros(NBINS + 1)
+    xk = xk.at[0].set(XK0)
+    for k in range(NBINS):
+        xk = xk.at[k + 1].set(2.0 * xk[k])
+    return xk

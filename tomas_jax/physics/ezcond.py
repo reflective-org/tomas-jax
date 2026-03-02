@@ -215,7 +215,7 @@ def ezcond(
     tot_f = np.sum(Mkf[:, spec])
     if mcond > 0.0 and abs(mcond - (tot_f - tot_i)) / mcond > 0.0:
         ratio = (tot_f - tot_i) / mcond
-        if abs(ratio) > 0.0 and abs(ratio) < 100.0:
+        if ratio > 0.0 and ratio < 2.0:  # Fortran: abs(1-ratio) < 1.0
             for k in range(ibins):
                 Mkf[k, spec] = Mki[k, spec] + (Mkf[k, spec] - Mki[k, spec]) / ratio
             # MNFIX after correction (line 279)
