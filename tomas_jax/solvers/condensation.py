@@ -9,10 +9,22 @@ Orchestrates the full condensation pipeline in sequence:
 
 This is called once per model timestep, after the coagulation step.
 
-Three implementations:
+Condensation methods:
     - method='tfl': Sequential (non-JIT), Fortran-faithful TFL algorithm
+    - method='tfl_jit': Fully JIT-compiled TFL (Fortran-matching, recommended)
     - method='ppm': Sequential wrapper, PPM advection (JIT internally)
-    - method='ppm_jit': Fully JIT-compiled PPM pipeline (fastest)
+    - method='ppm_jit': Fully JIT-compiled PPM pipeline
+
+Scan-fused time loops (single XLA program, zero Python dispatch):
+
+    Function                          | Coag      | Cond | Nucl
+    ----------------------------------|-----------|------|-----
+    run_condensation_scan             | —         | PPM  | —
+    run_condensation_scan_tfl         | —         | TFL  | —
+    run_combined_scan_ppm             | Euler(3)  | PPM  | —
+    run_combined_scan_tfl             | Euler(3)  | TFL  | —
+    run_nucleation_condensation_scan  | —         | both | Yes
+    run_full_scan                     | Euler(10) | TFL  | Yes
 
 Usage::
 
@@ -22,8 +34,8 @@ Usage::
     )
 
     # JIT-compiled version with scan-fused time loop:
-    from tomas_jax.solvers.condensation import run_condensation_scan
-    Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan(
+    from tomas_jax.solvers.condensation import run_condensation_scan_tfl
+    Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan_tfl(
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha,
         dt=60.0, nsteps=1440, prod_rate=h2so4_prod_kg_s
     )
@@ -36,8 +48,9 @@ from functools import partial
 
 from ..core.config import (
     SRTSO4, SRTNH4, ICOMP_NODIAG,
-    MW_H2SO4, SV_H2SO4, CS_EPS
+    MW_H2SO4, SV_H2SO4, CS_EPS,
 )
+from ..physics.nucleation import nucleation_step
 from ..physics.condensation_sink import calc_condensation_sink
 from ..physics.ezcond import ezcond
 from ..physics.ezcond_ppm_jax import ezcond_ppm_jax
@@ -391,12 +404,344 @@ def run_condensation_scan_tfl(
     prod_rate: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Run nsteps TFL condensation steps fused into a single XLA program."""
-    def step_fn(carry, _):
+    def step_fn_tfl(carry, _):
         Nk_c, Mk_c, Gc_c = carry
         Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
         Nk_c, Mk_c, Gc_c = condensation_step_tfl_jax(
             Nk_c, Mk_c, Gc_c, xk,
             temp, pres, boxvol, rh, alpha, dt
+        )
+        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+
+    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+        step_fn_tfl, (Nk, Mk, Gc), None, length=nsteps
+    )
+    return Nk_f, Mk_f, Gc_f, N_history
+
+
+# =========================================================================
+# Nucleation + Condensation combined step (JIT-compilable)
+# =========================================================================
+
+def condensation_step_with_nucleation_jax(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    org_conc: jnp.ndarray,
+    nh3_conc: jnp.ndarray,
+    fion: jnp.ndarray,
+    enable_organic: float = 1.0,
+    enable_inorganic: float = 1.0,
+    fn_scale: float = 1.0,
+    use_tfl: float = 1.0,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Nucleation then condensation in one JIT-compilable step.
+
+    Args:
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt: standard state
+        org_conc: Organic vapor [molec/cm3]
+        nh3_conc: NH3 [molec/cm3]
+        fion: Ion-pair production rate [pairs/cm3/s]
+        enable_organic: 1.0/0.0 mask for Riccobono
+        enable_inorganic: 1.0/0.0 mask for Dunne
+        fn_scale: nucleation rate scaling factor
+        use_tfl: 1.0 for TFL condensation, 0.0 for PPM
+
+    Returns:
+        (Nk_new, Mk_new, Gc_new)
+    """
+    # 1. Nucleation
+    Nk, Mk, Gc = nucleation_step(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
+        org_conc, nh3_conc, fion,
+        enable_organic, enable_inorganic, fn_scale,
+    )
+
+    # 2. Condensation (TFL or PPM based on use_tfl flag)
+    Nk_tfl, Mk_tfl, Gc_tfl = condensation_step_tfl_jax(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
+    )
+    Nk_ppm, Mk_ppm, Gc_ppm = condensation_step_jax(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
+    )
+    Nk = jnp.where(use_tfl > 0.5, Nk_tfl, Nk_ppm)
+    Mk = jnp.where(use_tfl > 0.5, Mk_tfl, Mk_ppm)
+    Gc = jnp.where(use_tfl > 0.5, Gc_tfl, Gc_ppm)
+
+    return Nk, Mk, Gc
+
+
+condensation_step_with_nucleation_jit = jax.jit(
+    condensation_step_with_nucleation_jax
+)
+
+
+@partial(jax.jit, static_argnums=(10,))
+def run_nucleation_condensation_scan(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    nsteps: int,
+    prod_rate: jnp.ndarray,
+    org_conc: jnp.ndarray,
+    nh3_conc: jnp.ndarray,
+    fion: jnp.ndarray,
+    enable_organic: jnp.ndarray,
+    enable_inorganic: jnp.ndarray,
+    fn_scale: jnp.ndarray,
+    use_tfl: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scan-fused nucleation + condensation loop."""
+    def step_fn(carry, _):
+        Nk_c, Mk_c, Gc_c = carry
+        Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+        Nk_c, Mk_c, Gc_c = condensation_step_with_nucleation_jax(
+            Nk_c, Mk_c, Gc_c, xk,
+            temp, pres, boxvol, rh, alpha, dt,
+            org_conc, nh3_conc, fion,
+            enable_organic, enable_inorganic, fn_scale, use_tfl,
+        )
+        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+
+    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+        step_fn, (Nk, Mk, Gc), None, length=nsteps
+    )
+    return Nk_f, Mk_f, Gc_f, N_history
+
+
+# =========================================================================
+# Combined mode: Coagulation + Condensation (scan-fused, no nucleation)
+# =========================================================================
+
+def combined_step_ppm_jax(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    icomp_nodiag: int = 42,
+    n_coag_substeps: int = 3,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Combined coagulation + PPM condensation step (JIT-compilable).
+
+    Uses forward Euler coagulation (scan-fusable) + PPM condensation.
+    """
+    from .diffrax import coag_euler_step
+
+    # 1. Coagulation (forward Euler + MNFIX)
+    Nk, Mk = coag_euler_step(
+        Nk, Mk, xk, temp, pres, boxvol,
+        dt=dt, icomp_nodiag=icomp_nodiag,
+        n_substeps=n_coag_substeps,
+    )
+
+    # 2. Condensation (PPM only)
+    Nk, Mk, Gc = condensation_step_jax(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
+    )
+
+    return Nk, Mk, Gc
+
+
+def combined_step_tfl_jax(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    icomp_nodiag: int = 42,
+    n_coag_substeps: int = 3,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Combined coagulation + TFL condensation step (JIT-compilable).
+
+    Uses forward Euler coagulation (scan-fusable) + TFL condensation.
+    """
+    from .diffrax import coag_euler_step
+
+    # 1. Coagulation (forward Euler + MNFIX)
+    Nk, Mk = coag_euler_step(
+        Nk, Mk, xk, temp, pres, boxvol,
+        dt=dt, icomp_nodiag=icomp_nodiag,
+        n_substeps=n_coag_substeps,
+    )
+
+    # 2. Condensation (TFL only)
+    Nk, Mk, Gc = condensation_step_tfl_jax(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
+    )
+
+    return Nk, Mk, Gc
+
+
+@partial(jax.jit, static_argnums=(10,))
+def run_combined_scan_ppm(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    nsteps: int,
+    prod_rate: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scan-fused Euler coagulation + PPM condensation loop."""
+    def step_fn(carry, _):
+        Nk_c, Mk_c, Gc_c = carry
+        Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+        Nk_c, Mk_c, Gc_c = combined_step_ppm_jax(
+            Nk_c, Mk_c, Gc_c, xk,
+            temp, pres, boxvol, rh, alpha, dt,
+        )
+        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+
+    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+        step_fn, (Nk, Mk, Gc), None, length=nsteps
+    )
+    return Nk_f, Mk_f, Gc_f, N_history
+
+
+@partial(jax.jit, static_argnums=(10,))
+def run_combined_scan_tfl(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    nsteps: int,
+    prod_rate: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scan-fused Euler coagulation + TFL condensation loop."""
+    def step_fn(carry, _):
+        Nk_c, Mk_c, Gc_c = carry
+        Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+        Nk_c, Mk_c, Gc_c = combined_step_tfl_jax(
+            Nk_c, Mk_c, Gc_c, xk,
+            temp, pres, boxvol, rh, alpha, dt,
+        )
+        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+
+    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+        step_fn, (Nk, Mk, Gc), None, length=nsteps
+    )
+    return Nk_f, Mk_f, Gc_f, N_history
+
+
+# =========================================================================
+# Full mode: Nucleation + Coagulation + Condensation (scan-fused)
+# =========================================================================
+
+def full_step_jax(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    org_conc: jnp.ndarray,
+    nh3_conc: jnp.ndarray,
+    fion: jnp.ndarray,
+    enable_organic: float = 1.0,
+    enable_inorganic: float = 1.0,
+    fn_scale: float = 1.0,
+    use_tfl: float = 1.0,
+    icomp_nodiag: int = 42,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Full step: nucleation + coagulation + condensation (JIT-compilable).
+
+    Uses fixed-step forward Euler coagulation (no diffrax) for minimal XLA overhead.
+    """
+    from .diffrax import coag_euler_step
+
+    # 1. Nucleation
+    Nk, Mk, Gc = nucleation_step(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
+        org_conc, nh3_conc, fion,
+        enable_organic, enable_inorganic, fn_scale,
+    )
+
+    # 2. Coagulation (forward Euler + MNFIX, scan-fusable)
+    Nk, Mk = coag_euler_step(
+        Nk, Mk, xk, temp, pres, boxvol,
+        dt=dt, icomp_nodiag=icomp_nodiag,
+        n_substeps=10,
+    )
+
+    # 3. Condensation (TFL only — PPM path removed to halve XLA graph)
+    Nk, Mk, Gc = condensation_step_tfl_jax(
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt
+    )
+
+    return Nk, Mk, Gc
+
+
+@partial(jax.jit, static_argnums=(10,))
+def run_full_scan(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    Gc: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: jnp.ndarray,
+    pres: jnp.ndarray,
+    boxvol: jnp.ndarray,
+    rh: jnp.ndarray,
+    alpha: jnp.ndarray,
+    dt: jnp.ndarray,
+    nsteps: int,
+    prod_rate: jnp.ndarray,
+    org_conc: jnp.ndarray,
+    nh3_conc: jnp.ndarray,
+    fion: jnp.ndarray,
+    enable_organic: jnp.ndarray,
+    enable_inorganic: jnp.ndarray,
+    fn_scale: jnp.ndarray,
+    use_tfl: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Scan-fused nucleation + coagulation + condensation loop."""
+    def step_fn(carry, _):
+        Nk_c, Mk_c, Gc_c = carry
+        Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+        Nk_c, Mk_c, Gc_c = full_step_jax(
+            Nk_c, Mk_c, Gc_c, xk,
+            temp, pres, boxvol, rh, alpha, dt,
+            org_conc, nh3_conc, fion,
+            enable_organic, enable_inorganic, fn_scale, use_tfl,
         )
         return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
 

@@ -4,6 +4,287 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-03 (Mon) — Solver Cleanup + Clean Timing Benchmark
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Cleaned up solver code accumulated during nucleation debugging: restored degraded Tsit5 parameters, renamed misnamed `coag_rk4_step` → `coag_euler_step`, documented all 6 scan-fused functions, and wrote a clean single-scenario timing benchmark script.
+
+### Changes
+
+1. **Restored `diffrax_step` parameters** (`solvers/diffrax.py`): rtol 1e-3→1e-4, atol 1.0→1e-10, max_steps 500→5000. These were loosened during debugging and never restored.
+
+2. **Renamed `coag_rk4_step` → `coag_euler_step`** (`solvers/diffrax.py`, `solvers/condensation.py`): The function was always forward Euler, not RK4. Added deprecated alias for backward compatibility. Updated all callers and docstrings.
+
+3. **Documented scan-fused functions** (`solvers/condensation.py`): Added table at top of module docstring listing all 6 scan functions with their coag/cond/nucl capabilities.
+
+4. **New timing benchmark** (`benchmarks/python/time_single_scenario.py`): Clean script that times all 8 solver combinations for a single scenario with JIT warmup, median of 3 runs, and Fortran comparison table.
+
+### Fresh Timing Results (S01, 24h, M1 Pro)
+
+| Test | JAX (s) | Fortran (s) | Ratio |
+|------|---------|-------------|-------|
+| Tsit5 coag-only | 4.144 | 0.256 | 16.2x |
+| Euler coag-only | 0.346 | 0.256 | 1.35x |
+| PPM cond-only | 0.213 | 0.086 | 2.47x |
+| TFL cond-only | 0.488 | 0.086 | 5.66x |
+| Euler+PPM combined | 0.579 | 0.328 | 1.76x |
+| Euler+TFL combined | 0.828 | 0.328 | 2.52x |
+| Nucl+TFL cond | 0.701 | — | — |
+| Full (nucl+coag+cond) | 1.673 | — | — |
+
+### Key Observations
+
+- Tsit5 with restored tolerances (atol=1e-10) is 16x slower than Fortran — the loose atol=1.0 was what made it fast before
+- Euler coag is only 1.35x slower than Fortran — competitive
+- PPM cond is the fastest JAX condensation path (2.5x Fortran)
+- Euler+PPM combined is the best full JAX path (1.76x Fortran)
+
+### Files Modified
+- `tomas_jax/solvers/diffrax.py` — parameters + rename
+- `tomas_jax/solvers/condensation.py` — updated imports/calls + docstring table
+- `benchmarks/python/time_single_scenario.py` — new timing script
+
+---
+
+## 2026-03-03 (Mon) — Full-Mode Stability Fixes + Benchmark Plots
+
+**Time**: ~14:00 PST
+
+### Summary
+
+Fixed critical stability issues in full-mode (nucleation+coagulation+condensation) that caused NaN divergence in 13/50 scenarios. Root cause: unclamped organic mass in nucleation when H2SO4 gas is exhausted. Also replaced RK4 coagulation solver with forward Euler (matches Fortran approach). Generated comprehensive 8-figure benchmark comparison for all 5 modes.
+
+### Bugs Fixed
+
+1. **Nucleation organic mass clamping** (`nucleation.py`): When H2SO4 gas supply is exhausted (`need_clamp=True`), number and SO4 mass were clamped but organic mass was left at the full nucleation rate. This created particles with avg mass 80,000x above bin 0 boundary (e.g., mass=3.08e-19 in bin 0 where xk[0]=1.6e-23). The misalignment caused catastrophic cascading rates in TFL coagulation. Fix: `dM_org_clamped = dN_clamped * 0.1 * _MNUC` — clamp organic proportionally.
+
+2. **RK4 intermediate-stage amplification** (`diffrax.py`): RK4 intermediate stages (k2/k3/k4) amplify N^2 coagulation rates through positive feedback when particle counts are high (cold scenarios with strong nucleation). Replaced with forward Euler (single RHS evaluation per substep + positivity clipping + MNFIX). This matches Fortran's explicit approach and is more stable.
+
+3. **Fortran CSV missing-E exponent** (`utils.py`): Fortran writes very small numbers like `0.1024186408109169-238` (missing 'E' before exponent). Added `_fix_fortran_float()` regex to insert 'E'.
+
+### Results (All 5 modes, 50 scenarios, TFL vs Fortran at hour 24)
+
+| Mode | N Scenarios | N<1% | N<5% | N Med Err | N Max Err | M Med Err | M Max Err |
+|------|-------------|------|------|-----------|-----------|-----------|-----------|
+| Coag Only | 42 | 39 | 42 | 1.37e-3 | 2.59e-2 | 3.15e-7 | 4.82e-3 |
+| Cond Only | 42 | 42 | 42 | 9.97e-7 | 1.01e-3 | 2.64e-6 | 1.00e+0 |
+| Coag+Cond | 41 | 34 | 40 | 1.30e-3 | 7.74e-2 | 3.47e-6 | 4.82e-3 |
+| Nucl+Cond | 50 | 33 | 41 | 2.14e-3 | 2.48e-1 | 1.22e-5 | 4.33e-3 |
+| Full | 50 | 16 | 24 | 8.06e-2 | 9.95e-1 | 8.21e-4 | 1.00e+0 |
+
+Note: Coag/Cond/Combined have 42/41 scenarios because Fortran S50 crashes (known ezcond STOP). Full mode has higher errors due to organic clamping divergence from Fortran (intentional fix for JAX stability).
+
+### Files Modified
+- `tomas_jax/physics/nucleation.py` — Added organic mass clamping in gas-limited path
+- `tomas_jax/solvers/diffrax.py` — Replaced RK4 with forward Euler coagulation solver
+- `tomas_jax/solvers/condensation.py` — n_substeps=10, removed dual TFL/PPM computation in full_step_jax
+- `benchmarks/python/utils.py` — Fixed Fortran CSV parser for missing-E exponents
+
+### Files Created
+- `benchmarks/python/plot_all_modes.py` — 8-figure comprehensive benchmark comparison
+- `benchmarks/results/nucleation_benchmark/` — 8 PNG figures (timeseries, error evolution, scatter, heatmap, summary)
+
+---
+
+## 2026-03-02 (Sun) — Nucleation Benchmark: Fortran vs JAX Verification
+
+**Time**: ~21:00 PST
+
+### Summary
+
+Two-phase nucleation benchmark comparing JAX vs Fortran for Riccobono 2014 and Dunne 2016 parameterizations.
+
+### Phase 1: Parameterization-Level (Option A)
+
+20 test cases (10 Riccobono + 10 Dunne) with varying T, H2SO4, org, NH3, fion. All match Fortran to machine precision (max relative error < 1e-12).
+
+**Files created:**
+- `tomas_fortran/src/ricco_nucl.f`, `tomas_fortran/src/dunne_inorg_nucl.f` — copied from TRACER_SOM-TOMAS (prints stripped)
+- `tomas_fortran/harness/benchmark_nucleation.f` — standalone Fortran benchmark
+- `benchmarks/python/compare_nucleation.py` — JAX vs Fortran comparison
+
+### Phase 2: Full 24h Driver (Option B)
+
+50 scenarios × nucl_cond and full modes, comparing hourly output over 24 hours.
+
+**Key bugs found and fixed:**
+1. **Gas depletion MW correction**: JAX had `gas_depleted = dM_so4 * (98/96)`, Fortran depletes Gc by SO4 mass directly (no correction). Fixed.
+2. **Organic mass clamping**: When H2SO4 gas is exhausted, Fortran does NOT revert the organic mass to bin 0. JAX was reverting it. Fixed to match Fortran.
+3. **MNFIX multi-bin shift**: JAX MNFIX only handled 1-2 bin shifts. Nucleated particles with large organic mass need to jump 12+ bins. Fixed with analytical log2 computation: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
+
+**Results (nucl_cond mode, 50 scenarios):**
+- N_tot median error: 0.2%, max 25% (33/50 < 1%, 41/50 < 5%)
+- M_tot max error: 0.43%, median 1.2e-5
+- Residual N errors from MNFIX partial-transfer differences compounding over 1440 steps
+
+**Files created:**
+- `tomas_fortran/src/nucleation_driver.f` — 24h nucleation driver subroutine
+- Fortran output: `tomas_fortran/output/24h/` (50 scenarios × 5 modes × 24 hours)
+
+**Files modified:**
+- `tomas_jax/physics/nucleation.py` — Fixed gas depletion and organic clamping
+- `tomas_jax/core/mnfix_jax.py` — Fixed multi-bin shift with analytical computation
+- `tomas_jax/solvers/condensation.py` — Added `full_step_jax`, `run_full_scan` (scan-fused nucleation+coagulation+condensation)
+- `tomas_fortran/harness/benchmark_24h.f` — Added modes 4 (nucl_cond) and 5 (full)
+- `tomas_fortran/Makefile` — Added nucleation objects
+- `benchmarks/python/run_24h_scenarios.py` — Added nucl_cond and full modes with scan-fused paths, hourly snapshots
+- `benchmarks/python/compare_24h.py` — Added nucl_cond and full modes, fixed FORTRAN_DIR path
+- `tests/test_nucleation.py` — Updated mass balance test
+
+### Performance
+- JAX nucl_cond (scan-fused): ~0.5s/scenario (24×60-step scans)
+- JAX full (scan-fused with diffrax): ~5-13s/scenario (adaptive ODE stepping)
+- Fortran combined: ~0.33s/scenario
+
+---
+
+## 2026-03-02 (Sun) — Add Nucleation (Riccobono 2014 + Dunne 2016)
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Implemented nucleation parameterizations ported from TRACER_SOM-TOMAS Fortran. Two schemes: Riccobono 2014 organic nucleation (with Yu 2017 temperature correction) and Dunne 2016 inorganic nucleation (4 mechanisms: binary/ternary x neutral/ion-induced). All functions are pure-JAX and JIT-compilable.
+
+### Files Created
+- `tomas_jax/physics/nucleation.py` — 3 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `nucleation_step`
+- `tests/test_nucleation.py` — 24 unit tests (all passing)
+- `docs/nucleation.md` — Algorithm documentation
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `condensation_step_with_nucleation_jax`, `run_nucleation_condensation_scan`
+- `run_box_model.py` — Nucleation in time loop (after H2SO4 production, before coagulation), `--no-nucleation` CLI flag
+- `CLAUDE.md` — Updated file layout, operator-split order, Fortran source mapping
+- `PROGRESS.md` — This entry
+
+### Key Details
+- Nucleation cluster: r=0.85nm, rho=1350 kg/m3, composition 90% SO4 + 10% organic
+- Cluster mass (~3.47e-24 kg) < XK0 (1.6e-23 kg), always placed in bin 0
+- Gas depletion: SO4 mass subtracted directly from Gc[SRTSO4] (no 98/96 MW correction), with clamping
+- In clamped path (gas exhausted): SO4 mass = Gc * 96/98, organic mass NOT reverted (matches Fortran)
+- Enable/disable flags use multiplicative float masks (0.0/1.0) to avoid JIT recompilation
+- Operator splitting order: H2SO4 production -> nucleation -> coagulation -> condensation
+
+### Verification
+- Riccobono at T=278K, h2so4=1e7, org=1e7: J = 3.27 cm^-3 s^-1 (exact)
+- Dunne with nh3=0, fion=0: only Jbn > 0 (correct)
+- Mass balance: aerosol SO4 gained * 98/96 = gas H2SO4 lost (within 1e-6 relative)
+- All 24 tests passing, JIT compilation verified
+
+### Known Limitations
+- Coagulation-sink survival fraction (Kerminen-Kulmala) not implemented (commented out in Fortran too)
+- Organic vapor (org_conc) is an external input, not coupled to the gas-phase chemistry
+- No nuc_bin search — always bin 0 (valid since mnuc < XK0)
+
+### Next Steps
+- Run 24h benchmark with nucleation enabled
+- Compare nucleation event banana plots with observations
+- Consider coupling organic vapor to gas-phase chemistry
+
+---
+
+## 2026-03-02 (Sun) — Fortran TFL vs PPM 24h Benchmark Comparison
+
+**Time**: ~14:30 PST
+
+### Summary
+
+Ran 49 scenarios (S01-S49) x 24 hours x 2 modes (cond_only, combined) for both Fortran TFL and Fortran PPM, then generated 8 comparison plots and a detailed summary.
+
+### Key Results
+
+- **22 of 49 scenarios** exercise PPM transport (Path 1 where mcond > 1e-3 * total_dry_mass)
+- **Cond-only (active only)**: N_tot error median=1.5e-6, max=1.2e-3; M_dry error median=5.1e-6, max=1.9e-4
+- **Combined (active only)**: N_tot error median=6.0e-3, max=4.9e-2; M_dry error median=5.2e-6, max=1.7e-4
+- **N conservation**: TFL perfect (1.0000); PPM median=0.9999, worst=0.9996 (cond-only)
+- **Per-bin differences**: Up to 100% in individual bins — expected algorithmic difference (PPM is less diffusive, produces sharper distributions; TFL smears the growth front across bins)
+- **Timing**: PPM ~0.93x TFL for cond-only (69ms vs 74ms); equal for combined (~0.32s, dominated by coagulation)
+- **Scenario 50**: Crashes both methods (known extreme condition issue)
+
+### Files Created
+- `benchmarks/python/compare_fortran_tfl_ppm.py` — Comparison script (8 plots + summary)
+- `benchmarks/results/fortran_tfl_vs_ppm/` — 8 PNG figures + summary.txt
+
+### Next Steps
+- Investigate PPM N conservation loss (worst case 0.04% at 24h) — likely from positivity clamping
+- Consider running with `-O2` for more realistic timing comparison
+- Compare Fortran PPM against JAX PPM to verify cross-language consistency
+
+---
+
+## 2026-03-02 (Sun) — Port PPM Condensation to Fortran
+
+**Time**: ~14:00 PST
+
+### Summary
+
+Ported the PPM (Piecewise Parabolic Method) condensation algorithm from JAX/Python (`tomas_jax/physics/condensation_ppm.py`) to Fortran. The PPM Fortran code lives in a separate `tomas_fortran/src_ppm/` directory so both TFL and PPM methods coexist and can be benchmarked head-to-head in pure Fortran.
+
+### Files Created
+- `tomas_fortran/src_ppm/tmcond_ppm.f` — 8 PPM subroutines (~590 lines):
+  - `PPM_RECONSTRUCT` — 4th-order interface interpolation + Colella-Woodward limiting + positivity
+  - `PPM_EDGE_VELOCITY` — Upwind velocity at bin edges via DMDT_INT
+  - `PPM_NUMBER_FLUX` — Departure-point parabola integration for number flux
+  - `PPM_MASS_FLUX` — Analytical mass-weighted flux (∫m(η)n(η)dη with exp antiderivatives)
+  - `PPM_DRY_MASS_ANALYTICAL` — Exact dry mass from PPM coefficients (moment integrals I0, I1, I2)
+  - `PPM_SPECIES_FLUX` — Upwind donor ratio × dry mass flux for all 44 species
+  - `PPM_COMPUTE_SUBSTEPS` — CFL-limited substep count (C_max = 0.8)
+  - `PPM_CONDENSATION_STEP` — Main orchestrator (freeze WR, substep loop, call all above)
+- `tomas_fortran/src_ppm/ezcond_ppm.f` — PPM-aware ezcond driver (~170 lines):
+  - Same 3-path decision tree as ezcond.f (CS check, significance thresholds)
+  - Path 1 calls PPM_CONDENSATION_STEP with dt=1.0, then adds condensed mass via sinkfrac
+  - Mass conservation check and correction (same as ezcond.f)
+- `tomas_fortran/harness/benchmark_24h_ppm.f` — PPM benchmark harness (~230 lines):
+  - Same as benchmark_24h.f but calls ezcond_ppm instead of ezcond
+  - Output files prefixed with `ppm_` (e.g., `ppm_s01_cond_hour01_Nk.csv`)
+  - Timing CSV: `output/24h/timing_fortran_ppm.csv`
+
+### Files Modified
+- `tomas_fortran/Makefile` — Added `SRC_PPM`, `PPM_OBJS`, compile rules, `benchmark_24h_ppm` target, `benchmark_both` convenience target
+- `tomas_fortran/README.md` — Documented src_ppm/ and new build targets
+- `CLAUDE.md` — Added src_ppm/ files to file layout, updated Fortran source mapping
+
+### Verification
+- `make benchmark_24h_ppm` compiles cleanly (no warnings)
+- `make benchmark_24h` still compiles (TFL unchanged)
+- Both executables produced: `benchmark_24h_ppm.exe` (121KB), `benchmark_24h.exe` (103KB)
+
+### Next Steps
+- Run single scenario cond-only and compare against JAX PPM JIT output
+- Run full 50-scenario benchmark for timing comparison
+- Add Python comparison script for TFL vs PPM Fortran output
+
+---
+
+## 2026-03-02 (Sun) — Bring TOMAS Fortran into tomas_fortran/
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Made the repository self-contained by copying the original TOMAS Fortran source into `tomas_fortran/` with a proper build system. Previously, the Fortran source was referenced via fragile relative paths to `../../original-models/TOMAS/backup/src/`.
+
+### Files Created
+- `tomas_fortran/src/` — 14 core Fortran source files (multicoag.f, initbounds.f, mnfix.f, aerodens.f, loginit.f, ezcond.f, tmcond.f, dmdt_int.f, getCondSink.f, gasdiff.f, eznh3eqm.f, ezwatereqm.f, waterso4.f, waternacl.f)
+- `tomas_fortran/include/sizecode.COM` — Common block definitions
+- `tomas_fortran/harness/benchmark_24h.f` — 24h benchmark driver (copied from benchmarks/fortran/)
+- `tomas_fortran/harness/benchmark_harness.f` — Single-scenario driver (copied from benchmarks/fortran/)
+- `tomas_fortran/Makefile` — Self-contained build system (targets: all, benchmark_24h, run_24h, clean)
+- `tomas_fortran/README.md` — Build instructions and file descriptions
+
+### Files Modified
+- `benchmarks/fortran/Makefile` — Updated TOMAS_SRC and TOMAS_INC to point to `../../tomas_fortran/src/` and `../../tomas_fortran/include/`
+- `CLAUDE.md` — Added tomas_fortran/ to file layout, updated Fortran source path reference
+
+### Next Steps
+- Remove symlink dependency from benchmarks/fortran/ (sizecode.COM still symlinked for its local compile)
+- Consider adding `.gitignore` for `tomas_fortran/output/` and `*.o` files
+
+---
+
 ## 2026-03-02 (Sun) — GMD Paper Draft Populated
 
 **Time**: ~18:00 PST

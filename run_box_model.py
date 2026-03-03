@@ -28,6 +28,7 @@ from tomas_jax.core.config import (
 from tomas_jax.core.state import TomasState
 from tomas_jax.solvers.diffrax import diffrax_step
 from tomas_jax.solvers.condensation import condensation_step
+from tomas_jax.physics.nucleation import nucleation_step
 from tomas_jax.utils import plotting
 from tomas_jax.utils.diagnostics import get_coagulation_rates
 
@@ -102,10 +103,12 @@ def molec_cm3_to_kg_gridcell(conc_molec_cm3: float, boxvol_cm3: float) -> float:
 # 2. Main Simulation Loop
 # =========================================================================
 
-def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
+def run_box_model(enable_condensation: bool = True, method: str = 'tfl',
+                   enable_nucleation: bool = True):
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
     print(f"   Bins: {NBINS}, Components: {ICOMP}")
+    print(f"   Nucleation:   {'ON' if enable_nucleation else 'OFF'}")
     print(f"   Condensation: {'ON' if enable_condensation else 'OFF'}")
     print(f"   Cond. Method: {method.upper()}")
     print(f"   Precision: {'float64' if jax.config.jax_enable_x64 else 'float32'}")
@@ -143,8 +146,17 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
     h2so4_prod_rate_molec_cm3_s = 1.0e7
     h2so4_prod_rate_kg_s = molec_cm3_to_kg_gridcell(h2so4_prod_rate_molec_cm3_s, boxvol)
 
+    # --- Nucleation Parameters ---
+    org_conc = jnp.float64(1e7)   # Oxidized organic vapor [molec/cm3]
+    nh3_conc = jnp.float64(1e9)   # NH3 [molec/cm3] (~1 ppb)
+    fion = jnp.float64(3.0)       # Ion-pair production rate [pairs/cm3/s]
+    fn_scale = jnp.float64(1.0)   # Nucleation rate scaling factor
+
     print(f"\nInitial H2SO4 gas: {h2so4_init_molec_cm3:.1e} molec/cm3")
     print(f"H2SO4 production:  {h2so4_prod_rate_molec_cm3_s:.1e} molec/cm3/s")
+    if enable_nucleation:
+        print(f"Organic vapor:     {float(org_conc):.1e} molec/cm3")
+        print(f"NH3:               {float(nh3_conc):.1e} molec/cm3")
 
     # Calculate initial totals for conservation check
     total_N_init = jnp.sum(Nk)
@@ -198,7 +210,18 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
         # 1. Add H2SO4 production (constant source)
         Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + h2so4_prod_rate_kg_s * dt_model)
 
-        # 2. Run Coagulation Step
+        # 2. Nucleation (creates particles, depletes gas)
+        if enable_nucleation:
+            Nk, Mk, Gc = nucleation_step(
+                Nk, Mk, Gc, xk,
+                jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+                jnp.float64(dt_model),
+                org_conc, nh3_conc, fion,
+                enable_organic=1.0, enable_inorganic=1.0,
+                fn_scale=float(fn_scale),
+            )
+
+        # 3. Run Coagulation Step
         Nk, Mk = solver_jit(
             Nk, Mk, xk,
             temp, pres, boxvol,
@@ -206,7 +229,7 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
             icomp_nodiag=ICOMP_NODIAG
         )
 
-        # 3. Run Condensation Step (operator split)
+        # 4. Run Condensation Step (operator split)
         if enable_condensation:
             Nk, Mk, Gc = condensation_step(
                 Nk, Mk, Gc, xk,
@@ -215,18 +238,18 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl'):
                 method=method
             )
 
-        # 4. DIAGNOSE: Calculate coagulation rates
+        # 5. DIAGNOSE: Calculate coagulation rates
         dNdt, dMdt = get_coagulation_rates(
             Nk, Mk, xk, temp, pres, boxvol, ICOMP_NODIAG
         )
         history_dNdt.append(np.array(dNdt))
         history_dMdt.append(np.array(dMdt))
 
-        # 5. Advance Time
+        # 6. Advance Time
         current_time += dt_model
         step_count += 1
 
-        # 6. Logging
+        # 7. Logging
         total_N = jnp.sum(Nk)
         total_M = jnp.sum(Mk)
 
@@ -323,8 +346,11 @@ if __name__ == "__main__":
                         help='Condensation method: tfl (default), ppm, or ppm_jit')
     parser.add_argument('--no-condensation', action='store_true',
                         help='Disable condensation')
+    parser.add_argument('--no-nucleation', action='store_true',
+                        help='Disable nucleation')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
-        method=args.method
+        method=args.method,
+        enable_nucleation=not args.no_nucleation,
     )
