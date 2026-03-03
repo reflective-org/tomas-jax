@@ -96,12 +96,12 @@ def diffrax_step(
     # Pack static arguments
     args = CoagArgs(kij=kij, xk=xk, icomp_nodiag=icomp_nodiag)
 
-    # Solver Definition
+    # Solver Definition — Tsit5 (explicit RK5(4), relaxed tolerances for physical units)
     solver = diffrax.Tsit5()
     stepsize_controller = diffrax.PIDController(
-        rtol=rtol, 
-        atol=atol, 
-        dtmin=1e-13, 
+        rtol=rtol,
+        atol=atol,
+        dtmin=1e-13,
         dtmax=dt_chunk
     )
     term = diffrax.ODETerm(coagulation_rhs)
@@ -131,7 +131,8 @@ def diffrax_step(
             args=args,
             stepsize_controller=stepsize_controller,
             saveat=diffrax.SaveAt(t1=True),
-            max_steps=5000
+            max_steps=5000,
+            throw=False
         )
         
         # Extract result
@@ -162,3 +163,52 @@ def diffrax_step(
     final_state, _ = jax.lax.scan(scan_body, state, None, length=n_substeps)
 
     return final_state.Nk, final_state.Mk
+
+
+def coag_euler_step(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    xk: jnp.ndarray,
+    temp: float,
+    pres: float,
+    boxvol: float,
+    dt: float = 60.0,
+    icomp_nodiag: int = 42,
+    n_substeps: int = 3,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Fixed-step forward Euler coagulation solver (scan-fusable).
+
+    Matches Fortran approach: explicit forward step + MNFIX after each substep.
+    Forward Euler avoids the intermediate-stage amplification that makes
+    higher-order methods unstable for high-N coagulation (N^2 rates create
+    positive feedback in intermediate stage evaluations).
+    """
+    # Pre-compute coagulation kernel (once per timestep)
+    Dpk, Dk, ck = calc_particle_properties(Nk, Mk, temp, pres)
+    kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
+
+    dt_sub = dt / n_substeps
+
+    def substep(carry, _):
+        Nk_c, Mk_c = carry
+
+        # Forward Euler
+        dNdt, dMdt = calc_coagulation_rates(Nk_c, Mk_c, kij, xk, icomp_nodiag)
+        Nk_new = Nk_c + dt_sub * dNdt
+        Mk_new = Mk_c + dt_sub * dMdt
+
+        # Positivity enforcement
+        Nk_new = jnp.maximum(Nk_new, 0.0)
+        Mk_new = jnp.maximum(Mk_new, 0.0)
+
+        # MNFIX after each substep
+        Nk_new, Mk_new = mnfix_jax(Nk_new, Mk_new, xk, icomp_nodiag)
+
+        return (Nk_new, Mk_new), None
+
+    (Nk_f, Mk_f), _ = jax.lax.scan(substep, (Nk, Mk), None, length=n_substeps)
+    return Nk_f, Mk_f
+
+
+# Deprecated alias (was misnamed as RK4 when it's actually forward Euler)
+coag_rk4_step = coag_euler_step

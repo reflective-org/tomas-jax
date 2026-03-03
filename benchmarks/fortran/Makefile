@@ -6,10 +6,9 @@
 FC = gfortran
 FFLAGS = -O0 -fdefault-real-8 -fdefault-double-8 -ffixed-form -std=legacy -I.
 
-# Path to original TOMAS source files
-# From benchmarks/fortran/ go up 4 levels to aerosol-microphysics/
-TOMAS_SRC = ../../../../original-models/TOMAS/src
-TOMAS_INC = ../../../../original-models/TOMAS/inputs/created_files
+# Path to TOMAS source files (self-contained in tomas_fortran/)
+TOMAS_SRC = ../../tomas_fortran/src
+TOMAS_INC = ../../tomas_fortran/include
 
 # Source files
 HARNESS = benchmark_harness.f
