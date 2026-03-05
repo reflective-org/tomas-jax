@@ -91,9 +91,23 @@ def xk_boundaries():
 
     Uses JAX arrays for compatibility with JIT-traced code.
     """
+    return make_grid(NBINS, XK0, 2.0)
+
+
+def make_grid(nbins=36, xk0=XK0, doubling_factor=2.0):
+    """Create mass-ratio bin boundary array for arbitrary resolution.
+
+    Args:
+        nbins: Number of size bins
+        xk0: Lower boundary of first bin [kg]
+        doubling_factor: Mass ratio between adjacent bins (2.0 = standard TOMAS)
+
+    Returns:
+        xk: Bin boundaries, shape (nbins+1,), JAX float64 array
+    """
     import jax.numpy as jnp
-    xk = jnp.zeros(NBINS + 1)
-    xk = xk.at[0].set(XK0)
-    for k in range(NBINS):
-        xk = xk.at[k + 1].set(2.0 * xk[k])
+    xk = jnp.zeros(nbins + 1)
+    xk = xk.at[0].set(xk0)
+    for k in range(nbins):
+        xk = xk.at[k + 1].set(doubling_factor * xk[k])
     return xk

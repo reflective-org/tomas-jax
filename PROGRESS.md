@@ -4,6 +4,59 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-03 (Mon) — Configurable NBINS + TFL vs PPM Convergence Test
+
+**Time**: ~15:00 PST
+
+### Summary
+
+Made the number of size bins (NBINS) a runtime parameter instead of a hardcoded constant. Both TFL and PPM condensation now work at arbitrary bin resolutions (36, 72, 144+). Created a multi-resolution convergence benchmark that runs both methods at 3 grid configurations.
+
+### Changes
+
+1. **`make_grid()` function** (`core/config.py`): Creates bin boundaries for arbitrary resolution. Accepts `nbins`, `xk0` (lower boundary), and `doubling_factor`. Refactored existing `xk_boundaries()` to delegate to it.
+
+2. **Removed NBINS hardcoding** (`core/state.py`): Replaced `assert Nk.shape[0] == NBINS` with shape consistency checks (Nk 1D, Mk bins == Nk bins).
+
+3. **Cleaned NBINS imports from 8 physics files**: All JIT-compiled functions now derive bin count from array shapes (`Nk.shape[0]`) instead of importing the config constant. Removed unused NBINS imports from `condensation_sink.py`, `condensation_ppm.py`, `condensation_tfl_jax.py`, `ezcond_ppm_jax.py`, `nucleation.py`.
+
+4. **`condensation_sink.py` xk parameter**: Added explicit `xk` parameter (default None, falls back to `xk_boundaries()`). Updated all 8 call sites to pass `xk=xk` explicitly.
+
+5. **PPM adaptive delta_xi** (`condensation_ppm.py`): Parameterized all PPM internals by `delta_xi = ln(doubling_factor)` instead of hardcoded `ln(2)`. Added `_compute_moment_integrals(a)` for dynamic I0/I1/I2 computation. PPM now works correctly at any bin resolution.
+
+6. **Convergence benchmark** (`benchmarks/python/convergence_test.py`): New script running condensation-only at 3 resolutions (36×2, 72×√2, 144×2^¼) starting from 1.7nm. Generates 4 figures: size distributions, zoomed comparison, integral convergence, timing.
+
+### Key Results
+
+| Config | TFL time | TFL M_dry | PPM time | PPM M_dry |
+|--------|----------|-----------|----------|-----------|
+| 36 bins (×2) | 0.48s | 6.32e-7 | 0.20s | 6.32e-7 |
+| 72 bins (×√2) | 1.14s | 1.06e-6 | 0.59s | 6.31e-7 |
+| 144 bins (×2^¼) | 3.72s | 1.09e-6 | 2.07s | 6.29e-7 |
+
+- **PPM M_dry is resolution-stable** (0.5% variation) while TFL M_dry diverges 72% at finer grids (S01)
+- **PPM is ~1.8x faster** than TFL at every resolution
+- TFL shows oscillation artifacts at 144 bins; PPM stays smooth
+- For well-contained distributions (S05), both methods converge identically
+
+### Files Modified
+- `tomas_jax/core/config.py` — Added `make_grid()`
+- `tomas_jax/core/state.py` — Shape consistency checks
+- `tomas_jax/physics/ezcond.py`, `ezcond_ppm.py`, `condensation.py` — `ibins = Nk.shape[0]`
+- `tomas_jax/physics/condensation_sink.py` — Added `xk` parameter
+- `tomas_jax/physics/condensation_ppm.py` — Adaptive `delta_xi`
+- `tomas_jax/physics/condensation_tfl_jax.py`, `ezcond_ppm_jax.py`, `nucleation.py` — Removed unused imports
+- `tomas_jax/solvers/condensation.py` — Pass `xk=xk` to condensation_sink calls
+- `benchmarks/python/convergence_test.py` — **New**
+
+### Plots
+- `benchmarks/results/convergence/convergence_sizedist_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_zoomed_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_totals_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_timing_S{01,05}.png`
+
+---
+
 ## 2026-03-03 (Mon) — Solver Cleanup + Clean Timing Benchmark
 
 **Time**: ~22:00 PST

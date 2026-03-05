@@ -35,10 +35,11 @@ Usage::
 
     # JIT-compiled version with scan-fused time loop:
     from tomas_jax.solvers.condensation import run_condensation_scan_tfl
-    Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan_tfl(
+    Nk_f, Mk_f, Gc_f, history = run_condensation_scan_tfl(
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha,
         dt=60.0, nsteps=1440, prod_rate=h2so4_prod_kg_s
     )
+    # history shape (nsteps, 3): columns [N_tot, M_dry, Gc_SO4]
 """
 import jax
 import numpy as np
@@ -47,7 +48,7 @@ from typing import Tuple
 from functools import partial
 
 from ..core.config import (
-    SRTSO4, SRTNH4, ICOMP_NODIAG,
+    SRTSO4, SRTNH4, SRTH2O, ICOMP_NODIAG,
     MW_H2SO4, SV_H2SO4, CS_EPS,
 )
 from ..physics.nucleation import nucleation_step
@@ -128,7 +129,7 @@ def condensation_step(
     # Calculate condensation sink for H2SO4
     CS, sinkfrac = calc_condensation_sink(
         Nk, Mk, temp, pres, boxvol,
-        MW_H2SO4, SV_H2SO4, alpha
+        MW_H2SO4, SV_H2SO4, alpha, xk=xk
     )
     CS_val = float(CS)
 
@@ -227,7 +228,7 @@ def condensation_step_jax(
     # 1. Condensation sink
     CS, sinkfrac = calc_condensation_sink(
         Nk, Mk, temp, pres, boxvol,
-        MW_H2SO4, SV_H2SO4, alpha
+        MW_H2SO4, SV_H2SO4, alpha, xk=xk
     )
 
     # 2. H2SO4 condensation
@@ -306,7 +307,7 @@ def condensation_step_tfl_jax(
     # 1. Condensation sink
     CS, sinkfrac = calc_condensation_sink(
         Nk, Mk, temp, pres, boxvol,
-        MW_H2SO4, SV_H2SO4, alpha
+        MW_H2SO4, SV_H2SO4, alpha, xk=xk
     )
 
     # 2. H2SO4 condensation
@@ -372,7 +373,12 @@ def run_condensation_scan(
     nsteps: int,
     prod_rate: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Run nsteps PPM condensation steps fused into a single XLA program."""
+    """Run nsteps PPM condensation steps fused into a single XLA program.
+
+    Returns:
+        Nk_f, Mk_f, Gc_f: Final state arrays
+        history: shape (nsteps, 3) — columns [N_tot, M_dry, Gc_SO4]
+    """
     def step_fn(carry, _):
         Nk_c, Mk_c, Gc_c = carry
         Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
@@ -380,12 +386,15 @@ def run_condensation_scan(
             Nk_c, Mk_c, Gc_c, xk,
             temp, pres, boxvol, rh, alpha, dt
         )
-        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+        diag = jnp.array([jnp.sum(Nk_c),
+                           jnp.sum(Mk_c[:, :SRTH2O]),
+                           Gc_c[SRTSO4]])
+        return (Nk_c, Mk_c, Gc_c), diag
 
-    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+    (Nk_f, Mk_f, Gc_f), history = jax.lax.scan(
         step_fn, (Nk, Mk, Gc), None, length=nsteps
     )
-    return Nk_f, Mk_f, Gc_f, N_history
+    return Nk_f, Mk_f, Gc_f, history
 
 
 @partial(jax.jit, static_argnums=(10,))
@@ -403,7 +412,12 @@ def run_condensation_scan_tfl(
     nsteps: int,
     prod_rate: jnp.ndarray,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Run nsteps TFL condensation steps fused into a single XLA program."""
+    """Run nsteps TFL condensation steps fused into a single XLA program.
+
+    Returns:
+        Nk_f, Mk_f, Gc_f: Final state arrays
+        history: shape (nsteps, 3) — columns [N_tot, M_dry, Gc_SO4]
+    """
     def step_fn_tfl(carry, _):
         Nk_c, Mk_c, Gc_c = carry
         Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
@@ -411,12 +425,15 @@ def run_condensation_scan_tfl(
             Nk_c, Mk_c, Gc_c, xk,
             temp, pres, boxvol, rh, alpha, dt
         )
-        return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
+        diag = jnp.array([jnp.sum(Nk_c),
+                           jnp.sum(Mk_c[:, :SRTH2O]),
+                           Gc_c[SRTSO4]])
+        return (Nk_c, Mk_c, Gc_c), diag
 
-    (Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(
+    (Nk_f, Mk_f, Gc_f), history = jax.lax.scan(
         step_fn_tfl, (Nk, Mk, Gc), None, length=nsteps
     )
-    return Nk_f, Mk_f, Gc_f, N_history
+    return Nk_f, Mk_f, Gc_f, history
 
 
 # =========================================================================

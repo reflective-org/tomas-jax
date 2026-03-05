@@ -27,7 +27,7 @@ from .gas_properties import (
     calc_fuchs_sutugin_correction,
 )
 from .density import calc_density
-from ..core.config import PI, MW_H2SO4, SV_H2SO4, NBINS, ICOMP_NODIAG
+from ..core.config import PI, MW_H2SO4, SV_H2SO4, ICOMP_NODIAG
 
 # Fortran getCondSink.f: parameter(Neps=1.0d10)
 NEPS_CONDSINK = 1.0e10
@@ -41,7 +41,8 @@ def calc_condensation_sink(
     boxvol: Union[float, jnp.ndarray],
     molecular_weight: float = MW_H2SO4,
     diffusion_volume: float = SV_H2SO4,
-    accommodation_coeff: float = 1.0
+    accommodation_coeff: float = 1.0,
+    xk: jnp.ndarray = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate condensation sink from aerosol size distribution.
 
@@ -60,14 +61,15 @@ def calc_condensation_sink(
         molecular_weight: MW of condensing species [g/mol]
         diffusion_volume: Diffusion volume parameter
         accommodation_coeff: alpha (default 1.0)
+        xk: Bin boundaries [kg], shape (ibins+1,). If None, uses default 36-bin grid.
 
     Returns:
         CS: Condensation sink [s^-1]
         sinkfrac: Fraction of CS from each bin, shape (ibins,)
     """
-    from ..core.config import xk_boundaries
-
-    xk = xk_boundaries()
+    if xk is None:
+        from ..core.config import xk_boundaries
+        xk = xk_boundaries()
 
     Di = calc_gas_diffusivity(temp, pres, molecular_weight, diffusion_volume)
     mfp = calc_mean_free_path(temp, pres, molecular_weight, diffusion_volume)

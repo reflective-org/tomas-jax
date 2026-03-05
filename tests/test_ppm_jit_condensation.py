@@ -293,7 +293,7 @@ class TestCondensationScan:
 
         prod_rate = 1e7 * BOXVOL * (MW_H2SO4 / 1000.0) / AVOGADRO
 
-        Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan(
+        Nk_f, Mk_f, Gc_f, hist = run_condensation_scan(
             Nk, Mk, Gc, xk,
             jnp.array(298.0), jnp.array(101325.0),
             jnp.array(BOXVOL), jnp.array(0.5),
@@ -304,7 +304,7 @@ class TestCondensationScan:
 
         assert Nk_f.shape == (NBINS,)
         assert Mk_f.shape == (NBINS, ICOMP)
-        assert N_hist.shape == (10,)
+        assert hist.shape == (10, 3)
         assert not jnp.any(jnp.isnan(Nk_f))
         assert not jnp.any(jnp.isnan(Mk_f))
 
@@ -362,7 +362,7 @@ class TestCondensationScan:
 
         N_init = float(jnp.sum(Nk))
 
-        Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan(
+        Nk_f, Mk_f, Gc_f, _ = run_condensation_scan(
             Nk, Mk, Gc, xk,
             jnp.array(298.0), jnp.array(101325.0),
             jnp.array(BOXVOL), jnp.array(0.5),

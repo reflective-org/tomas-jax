@@ -10,7 +10,7 @@ All functions are pure-JAX and JIT-compilable.
 import jax.numpy as jnp
 
 from ..core.config import (
-    SRTSO4, SRTORGLAST, NBINS, ICOMP,
+    SRTSO4, SRTORGLAST, ICOMP,
     AVOGADRO, PI,
 )
 

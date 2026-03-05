@@ -32,7 +32,7 @@ References:
 import numpy as np
 from typing import Tuple
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG, IDIAG, SRTSO4
+from ..core.config import ICOMP, ICOMP_NODIAG, IDIAG, SRTSO4
 
 
 # Constants matching Fortran PARAMETER statements
@@ -97,7 +97,7 @@ def tmcond(
         Nk_out: Updated number concentration, shape (ibins,)
         Mk_out: Updated mass concentration, shape (ibins, icomp)
     """
-    ibins = NBINS
+    ibins = Nkd.shape[0]
     icomp = ICOMP
     idiag = IDIAG
 

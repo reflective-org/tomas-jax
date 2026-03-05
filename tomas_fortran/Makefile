@@ -57,6 +57,7 @@ TARGET = benchmark.exe
 TARGET_24H = benchmark_24h.exe
 TARGET_24H_PPM = benchmark_24h_ppm.exe
 TARGET_NUC = benchmark_nucleation.exe
+TARGET_CONSTGC = benchmark_constgc.exe
 
 # Default target
 all: setup $(TARGET)
@@ -70,6 +71,9 @@ benchmark_24h_ppm: setup_24h $(TARGET_24H_PPM)
 # Build nucleation benchmark (standalone, no sizecode.COM)
 benchmark_nucleation: setup $(TARGET_NUC)
 
+# Build constant-gas benchmark
+benchmark_constgc: setup_constgc $(TARGET_CONSTGC)
+
 # Build both TFL and PPM benchmarks
 benchmark_both: benchmark_24h benchmark_24h_ppm
 
@@ -79,6 +83,9 @@ setup:
 
 setup_24h:
 	mkdir -p output/24h
+
+setup_constgc:
+	mkdir -p output/constgc
 
 # Link
 $(TARGET): benchmark_harness.o $(TOMAS_OBJS)
@@ -93,6 +100,9 @@ $(TARGET_24H_PPM): benchmark_24h_ppm.o $(PPM_OBJS) $(SHARED_OBJS)
 $(TARGET_NUC): benchmark_nucleation.o $(NUC_OBJS)
 	$(FC) $(FFLAGS) -o $@ $^
 
+$(TARGET_CONSTGC): benchmark_constgc.o $(TOMAS_OBJS)
+	$(FC) $(FFLAGS) -o $@ $^
+
 # Compile harness files
 benchmark_harness.o: $(HARNESS)/benchmark_harness.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
@@ -104,6 +114,9 @@ benchmark_24h_ppm.o: $(HARNESS)/benchmark_24h_ppm.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
 benchmark_nucleation.o: $(HARNESS)/benchmark_nucleation.f
+	$(FC) $(FFLAGS) -c $<
+
+benchmark_constgc.o: $(HARNESS)/benchmark_constgc.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
 # Compile TOMAS sources
@@ -178,8 +191,11 @@ run_24h_ppm: $(TARGET_24H_PPM)
 
 # Clean
 clean:
-	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_NUC)
+	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_NUC) $(TARGET_CONSTGC)
 	rm -rf output
 
-.PHONY: all setup setup_24h run run_24h run_24h_ppm clean \
-        benchmark_24h benchmark_24h_ppm benchmark_both benchmark_nucleation
+run_constgc: $(TARGET_CONSTGC)
+	./$(TARGET_CONSTGC)
+
+.PHONY: all setup setup_24h setup_constgc run run_24h run_24h_ppm run_constgc clean \
+        benchmark_24h benchmark_24h_ppm benchmark_both benchmark_nucleation benchmark_constgc
