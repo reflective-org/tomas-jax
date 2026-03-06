@@ -27,7 +27,11 @@ from tomas_jax.solvers.condensation import (
     condensation_step,
     condensation_step_jit, run_condensation_scan,
     condensation_step_tfl_jit, run_condensation_scan_tfl,
+    condensation_step_with_nucleation_jit,
+    run_nucleation_condensation_scan,
+    full_step_jax, run_full_scan,
 )
+from tomas_jax.physics.nucleation import nucleation_step
 
 from benchmarks.python.scenarios import get_scenarios
 
@@ -40,6 +44,12 @@ BOXVOL = 1.0e6  # cm3
 DT = 60.0       # seconds per step
 NSTEPS = 1440   # steps in 24 hours
 NHOURS = 24
+
+# Nucleation parameters (fixed for all scenarios, matching Fortran)
+NUC_ORG_CONC = 1e7     # organic vapor [molec/cm3]
+NUC_NH3_CONC = 1e9     # NH3 [molec/cm3]
+NUC_FION = 3.0         # ion formation rate [pairs/cm3/s]
+NUC_FN_SCALE = 1.0     # nucleation rate scaling factor
 
 
 def init_lognormal_scenario(N_total, Dp_gmd_um, sigma_gsd, xk):
@@ -83,12 +93,12 @@ def init_lognormal_scenario(N_total, Dp_gmd_um, sigma_gsd, xk):
     return Nk, Mk
 
 
-def run_scenario(scenario, mode, method='tfl', verbose=False):
+def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
     """Run one 24-hour simulation.
 
     Args:
         scenario: dict with keys from scenarios.py
-        mode: 'coag_only' | 'cond_only' | 'combined'
+        mode: 'coag_only' | 'cond_only' | 'combined' | 'nucl_cond' | 'full'
         method: 'tfl' | 'ppm'
         verbose: Print progress
 
@@ -146,7 +156,7 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
     M_dry = np.zeros(NHOURS)
 
     # JIT compile coagulation solver (if needed for this mode)
-    if mode in ('coag_only', 'combined'):
+    if mode in ('coag_only', 'combined', 'full'):
         solver_jit = jax.jit(diffrax_step, static_argnames=['icomp_nodiag'])
         # Warmup
         _ = solver_jit(Nk, Mk, xk, temp, pres, BOXVOL, 0.01, ICOMP_NODIAG)
@@ -175,34 +185,64 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
         if verbose:
             print("    JIT warmup complete")
 
-    # Scan-fused fast path for ppm_jit/tfl_jit cond-only
-    if method in ('ppm_jit', 'tfl_jit') and mode == 'cond_only':
-        scan_fn = run_condensation_scan_tfl if method == 'tfl_jit' else run_condensation_scan
-        t_loop_start = time.perf_counter()
-
-        Nk_f, Mk_f, Gc_f, N_hist = scan_fn(
+    # JIT warmup for nucleation modes
+    if mode in ('nucl_cond', 'full') and method in ('tfl_jit', 'ppm_jit'):
+        use_tfl_val = 1.0 if 'tfl' in method else 0.0
+        _ = condensation_step_with_nucleation_jit(
             Nk, Mk, Gc, xk,
             jnp.asarray(temp), jnp.asarray(pres),
             jnp.asarray(BOXVOL), jnp.asarray(rh),
             jnp.asarray(alpha), jnp.asarray(DT),
-            nsteps=NSTEPS,
-            prod_rate=jnp.asarray(prod_rate_kg_s),
+            jnp.asarray(NUC_ORG_CONC), jnp.asarray(NUC_NH3_CONC),
+            jnp.asarray(NUC_FION),
+            1.0, 1.0, NUC_FN_SCALE, use_tfl_val,
         )
-        # Block until computation completes
-        Nk_f.block_until_ready()
+        if mode in ('nucl_cond', 'full'):
+            scan_fn_nuc = run_full_scan if mode == 'full' else run_nucleation_condensation_scan
+            _ = scan_fn_nuc(
+                Nk, Mk, Gc, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(rh),
+                jnp.asarray(alpha), jnp.asarray(DT),
+                nsteps=2,
+                prod_rate=jnp.asarray(prod_rate_kg_s),
+                org_conc=jnp.asarray(NUC_ORG_CONC),
+                nh3_conc=jnp.asarray(NUC_NH3_CONC),
+                fion=jnp.asarray(NUC_FION),
+                enable_organic=jnp.asarray(1.0),
+                enable_inorganic=jnp.asarray(1.0),
+                fn_scale=jnp.asarray(NUC_FN_SCALE),
+                use_tfl=use_tfl_val,
+            )
+        if verbose:
+            print("    JIT warmup (nucleation) complete")
 
+    # Scan-fused fast path for ppm_jit/tfl_jit cond-only
+    # Run 24 x 60-step scans to capture hourly snapshots
+    if method in ('ppm_jit', 'tfl_jit') and mode == 'cond_only':
+        scan_fn = run_condensation_scan_tfl if method == 'tfl_jit' else run_condensation_scan
+        steps_per_hour = NSTEPS // NHOURS  # 60
+        t_loop_start = time.perf_counter()
+
+        Nk_cur, Mk_cur, Gc_cur = Nk, Mk, Gc
+        for ihour in range(NHOURS):
+            Nk_cur, Mk_cur, Gc_cur, _ = scan_fn(
+                Nk_cur, Mk_cur, Gc_cur, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(rh),
+                jnp.asarray(alpha), jnp.asarray(DT),
+                nsteps=steps_per_hour,
+                prod_rate=jnp.asarray(prod_rate_kg_s),
+            )
+            Nk_hourly[ihour] = np.array(Nk_cur)
+            Mk_hourly[ihour] = np.array(Mk_cur).flatten()
+            Gc_hourly[ihour] = np.array(Gc_cur)
+            N_tot[ihour] = float(jnp.sum(Nk_cur))
+            M_tot[ihour] = float(jnp.sum(Mk_cur))
+            M_dry[ihour] = float(jnp.sum(Mk_cur[:, :SRTH2O]))
+
+        Nk_cur.block_until_ready()
         wall_time_s = time.perf_counter() - t_loop_start
-
-        # Extract hourly snapshots from final state
-        # (scan only returns final state + N_history per step)
-        # For the scan path, we only have the final snapshot at hour 24
-        # Fill hourly arrays with final values at last hour
-        Nk_hourly[-1] = np.array(Nk_f)
-        Mk_hourly[-1] = np.array(Mk_f).flatten()
-        Gc_hourly[-1] = np.array(Gc_f)
-        N_tot[-1] = float(jnp.sum(Nk_f))
-        M_tot[-1] = float(jnp.sum(Mk_f))
-        M_dry[-1] = float(jnp.sum(Mk_f[:, :SRTH2O]))
 
         if verbose:
             print(f"    Scan complete: N_tot={N_tot[-1]:.4e}, wall={wall_time_s:.2f}s")
@@ -218,27 +258,134 @@ def run_scenario(scenario, mode, method='tfl', verbose=False):
             'scenario_params': scenario,
         }
 
-    # Time loop
+    # Scan-fused fast path for nucl_cond with JIT
+    # Run 24 x 60-step scans to capture hourly snapshots
+    if method in ('ppm_jit', 'tfl_jit') and mode == 'nucl_cond':
+        use_tfl_val = 1.0 if 'tfl' in method else 0.0
+        steps_per_hour = NSTEPS // NHOURS  # 60
+        t_loop_start = time.perf_counter()
+
+        Nk_cur, Mk_cur, Gc_cur = Nk, Mk, Gc
+        for ihour in range(NHOURS):
+            Nk_cur, Mk_cur, Gc_cur, _ = run_nucleation_condensation_scan(
+                Nk_cur, Mk_cur, Gc_cur, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(rh),
+                jnp.asarray(alpha), jnp.asarray(DT),
+                nsteps=steps_per_hour,
+                prod_rate=jnp.asarray(prod_rate_kg_s),
+                org_conc=jnp.asarray(NUC_ORG_CONC),
+                nh3_conc=jnp.asarray(NUC_NH3_CONC),
+                fion=jnp.asarray(NUC_FION),
+                enable_organic=jnp.asarray(1.0),
+                enable_inorganic=jnp.asarray(1.0),
+                fn_scale=jnp.asarray(NUC_FN_SCALE),
+                use_tfl=use_tfl_val,
+            )
+            Nk_hourly[ihour] = np.array(Nk_cur)
+            Mk_hourly[ihour] = np.array(Mk_cur).flatten()
+            Gc_hourly[ihour] = np.array(Gc_cur)
+            N_tot[ihour] = float(jnp.sum(Nk_cur))
+            M_tot[ihour] = float(jnp.sum(Mk_cur))
+            M_dry[ihour] = float(jnp.sum(Mk_cur[:, :SRTH2O]))
+
+        Nk_cur.block_until_ready()
+        wall_time_s = time.perf_counter() - t_loop_start
+
+        if verbose:
+            print(f"    Scan complete (nucl_cond): N_tot={N_tot[-1]:.4e}, wall={wall_time_s:.2f}s")
+
+        return {
+            'Nk': Nk_hourly,
+            'Mk': Mk_hourly.reshape(NHOURS, NBINS, ICOMP),
+            'Gc': Gc_hourly,
+            'N_tot': N_tot,
+            'M_tot': M_tot,
+            'M_dry': M_dry,
+            'wall_time_s': wall_time_s,
+            'scenario_params': scenario,
+        }
+
+    # Scan-fused fast path for full mode with JIT
+    # Run 24 x 60-step scans to capture hourly snapshots
+    if method in ('ppm_jit', 'tfl_jit') and mode == 'full':
+        use_tfl_val = 1.0 if 'tfl' in method else 0.0
+        steps_per_hour = NSTEPS // NHOURS  # 60
+        t_loop_start = time.perf_counter()
+
+        Nk_cur, Mk_cur, Gc_cur = Nk, Mk, Gc
+        for ihour in range(NHOURS):
+            Nk_cur, Mk_cur, Gc_cur, _ = run_full_scan(
+                Nk_cur, Mk_cur, Gc_cur, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(rh),
+                jnp.asarray(alpha), jnp.asarray(DT),
+                nsteps=steps_per_hour,
+                prod_rate=jnp.asarray(prod_rate_kg_s),
+                org_conc=jnp.asarray(NUC_ORG_CONC),
+                nh3_conc=jnp.asarray(NUC_NH3_CONC),
+                fion=jnp.asarray(NUC_FION),
+                enable_organic=jnp.asarray(1.0),
+                enable_inorganic=jnp.asarray(1.0),
+                fn_scale=jnp.asarray(NUC_FN_SCALE),
+                use_tfl=use_tfl_val,
+            )
+            Nk_hourly[ihour] = np.array(Nk_cur)
+            Mk_hourly[ihour] = np.array(Mk_cur).flatten()
+            Gc_hourly[ihour] = np.array(Gc_cur)
+            N_tot[ihour] = float(jnp.sum(Nk_cur))
+            M_tot[ihour] = float(jnp.sum(Mk_cur))
+            M_dry[ihour] = float(jnp.sum(Mk_cur[:, :SRTH2O]))
+
+        Nk_cur.block_until_ready()
+        wall_time_s = time.perf_counter() - t_loop_start
+
+        if verbose:
+            print(f"    Scan complete (full): N_tot={N_tot[-1]:.4e}, wall={wall_time_s:.2f}s")
+
+        return {
+            'Nk': Nk_hourly,
+            'Mk': Mk_hourly.reshape(NHOURS, NBINS, ICOMP),
+            'Gc': Gc_hourly,
+            'N_tot': N_tot,
+            'M_tot': M_tot,
+            'M_dry': M_dry,
+            'wall_time_s': wall_time_s,
+            'scenario_params': scenario,
+        }
+
+    # Time loop (fallback for non-JIT methods)
+    use_tfl_val = 1.0 if 'tfl' in method else 0.0
     t_loop_start = time.perf_counter()
     for istep in range(NSTEPS):
-        # 1. Coagulation
-        if mode in ('coag_only', 'combined'):
+        # 1. H2SO4 production (all modes except coag_only)
+        if mode != 'coag_only':
+            Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + prod_rate_kg_s * DT)
+
+        # 2. Nucleation (nucl_cond and full modes)
+        if mode in ('nucl_cond', 'full'):
+            Nk, Mk, Gc = nucleation_step(
+                Nk, Mk, Gc, xk,
+                jnp.asarray(temp), jnp.asarray(pres),
+                jnp.asarray(BOXVOL), jnp.asarray(DT),
+                jnp.asarray(NUC_ORG_CONC), jnp.asarray(NUC_NH3_CONC),
+                jnp.asarray(NUC_FION),
+                1.0, 1.0, NUC_FN_SCALE,
+            )
+
+        # 3. Coagulation (coag_only, combined, full)
+        if mode in ('coag_only', 'combined', 'full'):
             try:
                 Nk, Mk = solver_jit(
                     Nk, Mk, xk, temp, pres, BOXVOL,
                     dt=DT, icomp_nodiag=ICOMP_NODIAG
                 )
             except Exception:
-                # max_steps exceeded or solver diverged — skip this step
                 if verbose and istep < 5:
                     print(f"    WARNING: coag solver failed at step {istep}, skipping")
 
-        # 2. Condensation
-        if mode in ('cond_only', 'combined'):
-            # Add H2SO4 production
-            Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + prod_rate_kg_s * DT)
-
-            # Run condensation step
+        # 4. Condensation (all modes except coag_only)
+        if mode != 'coag_only':
             Nk, Mk, Gc = condensation_step(
                 Nk, Mk, Gc, xk,
                 temp, pres, BOXVOL,
@@ -375,7 +522,8 @@ if __name__ == '__main__':
                         help='Condensation methods to run')
     parser.add_argument('--mode', nargs='+',
                         default=['coag_only', 'cond_only', 'combined'],
-                        choices=['coag_only', 'cond_only', 'combined'],
+                        choices=['coag_only', 'cond_only', 'combined',
+                                 'nucl_cond', 'full'],
                         help='Simulation modes to run')
     parser.add_argument('--scenarios', nargs='+', type=int, default=None,
                         help='Scenario IDs to run (1-based). Default: all')

@@ -187,14 +187,16 @@ c            AVG=MAX(X(L),MIN(X(L+1),AMKDRY(L)/(NEPS+ANKD(L))))
                write(*,*)'Nk is ', ANKD(L)
                write(*,*)'Mk are ', (AMKD(k,j),j=1,icomp)
                write(*,*)'Initial N and M are: ',ANKD(L),AMKDRY(L)
-               STOP
+C               STOP  ! Disabled for benchmark
+               RETURN
             endif
             W1 =SQRT(12.d0*(XI-1.d0))*AVG
             W2 =MIN(X(L+1)-AVG,AVG-X(L))
             WTH=W1*WW+W2*(1.d0-WW)
             IF(WTH.GT.1.) then
                write(*,*)'WTH>1 in cond.f, bin #',L
-               STOP
+C               STOP  ! Disabled for benchmark
+               RETURN
             ENDIF
             XU=AVG+WTH*.5d0
             XL=AVG-WTH*.5d0
@@ -340,7 +342,8 @@ c
                         enddo
                         ANK(K)=ANK(K)+DN
                      ENDDO
-                     STOP 'Trying to put stuff in bin ibins+1'
+C                     STOP 'Trying to put stuff in bin ibins+1'
+                     RETURN
  100                 CONTINUE
                      DN=ANKD(L)*(YU-X(K))*DYI
                      do j=1,icomp

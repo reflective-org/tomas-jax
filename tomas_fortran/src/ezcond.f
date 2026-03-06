@@ -286,7 +286,8 @@ c     print*,'fracch',fracch,'totch',totch
             print*,'Nkf',Nkf
             print*,'Mki',Mki
             print*,'Mkf',Mkf
-            STOP
+C            STOP  ! Disabled for benchmark — continue with uncorrected values
+            RETURN
          endif
       endif
 

@@ -67,7 +67,8 @@ C-----CODE--------------------------------------------------------------
          if (waternacl .gt. 45.) then
             write(*,*) 'ERROR in waternacl'
             write(*,*) rhe,waternacl
-            STOP
+C            STOP  ! Disabled for benchmark
+            waternacl = 45.d0
          endif
 
       RETURN

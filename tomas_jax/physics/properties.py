@@ -72,12 +72,11 @@ def calc_diffusivity_vectorized(
     # Optimized polynomial evaluation (Phillips approximation)
     # multicoag.f lines 147-148
     
-    # Numerator: 5 + 4Kn + 6Kn^2 + 18Kn^3
-    Kn2 = jnp.square(Kn)
+    # Numerator: 5 + 4Kn + 6Kn^2 + 18Kn^3 (Horner form)
     num = 5.0 + Kn * (4.0 + Kn * (6.0 + 18.0 * Kn))
 
     # Denominator: 5 - Kn + (8 + pi)Kn^2
-    den = 5.0 - Kn + (8.0 + PI) * Kn2
+    den = 5.0 - Kn + (8.0 + PI) * Kn * Kn
     
     # Slip correction factor
     cc = num / den
@@ -120,9 +119,10 @@ def calc_particle_properties(
     # Sum all species masses for each bin
     total_mass_conc = jnp.sum(Mk, axis=1)
     
-    # Safety: Handle empty bins (Nk ~ 0) to avoid NaNs
-    # If bin is empty, assign dummy mass 1e-25 kg
-    mp = jnp.where(Nk > 1e-20, total_mass_conc / Nk, 1e-25)
+    # Safety: Clamp denominator before division to prevent NaN in XLA select
+    # (jnp.where evaluates both branches; 0/0 produces NaN that poisons gradients)
+    safe_Nk = jnp.maximum(Nk, 1e-20)
+    mp = jnp.where(Nk > 1e-20, total_mass_conc / safe_Nk, 1e-25)
 
     # 4. Calculate Diameter (Dpk)
     # Volume = mp / rho

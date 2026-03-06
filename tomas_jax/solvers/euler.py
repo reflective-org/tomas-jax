@@ -53,15 +53,17 @@ def _compute_adaptive_dt(
         dt: Adaptive sub-step size [s]
     """
     # Number-based limit: dt < 0.25 * N / |dN/dt|
+    # Mask out empty bins (Fortran skips bins with Nk < Neps)
     abs_dNdt = jnp.maximum(jnp.abs(dNdt), 1e-30)
-    dtlimit = 0.25 * jnp.abs(Nk) / abs_dNdt
+    dtlimit = jnp.where(Nk > 1e-15, 0.25 * jnp.abs(Nk) / abs_dNdt, jnp.inf)
     dt_N = jnp.min(dtlimit)
 
     # Mass-based limit: dt < 10.0 * M / |dM/dt|
+    # Mask out near-zero mass entries
     Mk_prog = Mk[:, :icomp_nodiag]
     dMdt_prog = dMdt[:, :icomp_nodiag]
     abs_dMdt = jnp.maximum(jnp.abs(dMdt_prog), 1e-30)
-    itlimit = 10.0 * jnp.abs(Mk_prog) / abs_dMdt
+    itlimit = jnp.where(Mk_prog > 1e-25, 10.0 * jnp.abs(Mk_prog) / abs_dMdt, jnp.inf)
     dt_M = jnp.min(itlimit)
 
     # Take minimum of all constraints

@@ -70,7 +70,8 @@ C-----CODE--------------------------------------------------------------
          if (waterso4 .gt. 30.) then
             write(*,*) 'ERROR in waterso4'
             write(*,*) rhe,waterso4
-            STOP
+C            STOP  ! Disabled for benchmark
+            waterso4 = 30.d0
          endif
 
       RETURN

@@ -234,7 +234,7 @@ class TestScanTfl:
     def test_scan_runs(self, xk, lognormal_state):
         Nk, Mk, Gc = lognormal_state
         prod_rate = jnp.array(float(Gc[SRTSO4]) * 0.001)
-        Nk_f, Mk_f, Gc_f, N_hist = run_condensation_scan_tfl(
+        Nk_f, Mk_f, Gc_f, hist = run_condensation_scan_tfl(
             Nk, Mk, Gc, xk,
             jnp.array(278.0), jnp.array(101325.0),
             jnp.array(BOXVOL), jnp.array(0.8),
@@ -242,7 +242,7 @@ class TestScanTfl:
             nsteps=10,
             prod_rate=prod_rate,
         )
-        assert N_hist.shape == (10,)
+        assert hist.shape == (10, 3)
         assert not jnp.any(jnp.isnan(Nk_f))
 
     def test_scan_vs_loop(self, xk, lognormal_state):

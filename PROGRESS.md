@@ -4,6 +4,316 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-05 (Wed) — Modular Process Orchestrator for condensation.py
+
+**Time**: ~16:00 PST
+
+### Summary
+
+Refactored `tomas_jax/solvers/condensation.py` from 769 lines of duplicated code to ~430 lines using layered core helpers + thin wrappers. Added `make_step()` composable API for easy process reordering.
+
+### Changes
+
+1. **`tomas_jax/solvers/condensation.py`** (primary — 769 → ~430 lines):
+   - Added `_condensation_step_core(ezcond_fn)` — single implementation for both PPM and TFL JIT paths
+   - Added `_combined_step_core()` — coag + cond parameterized by ezcond_fn
+   - Added `_full_step_core()` — nucl + coag + cond parameterized by ezcond_fn
+   - Added `_run_scan()` — single scan implementation replacing 6 copy-pasted loops
+   - Added `make_step(processes, cond_method)` — public composable API
+   - Fixed `condensation_step_with_nucleation_jax` — was running BOTH TFL and PPM then selecting via `jnp.where`; now uses Python-level dispatch (no double compute)
+   - All 15+ existing function names preserved as thin wrappers for backward compatibility
+
+2. **`benchmarks/python/run_24h_scenarios.py`**: Changed `use_tfl=jnp.asarray(val)` → `use_tfl=val` (Python float for static dispatch)
+
+3. **`benchmarks/python/time_single_scenario.py`**: Changed `use_tfl=jnp.float64(1.0)` → `use_tfl=1.0`
+
+4. **`run_box_model.py`**: Added `--make-step` flag to demo `make_step()` composable API
+
+### Verification
+- All 28 condensation tests pass (TFL JIT + PPM JIT)
+- All 24 nucleation tests pass
+- `make_step()` import and creation verified
+
+### Known Issues
+- `use_tfl` parameter is now Python float (not JAX array) — minor breaking change for callers that pass `jnp.asarray()`. All in-repo callers updated.
+
+---
+
+## 2026-03-05 (Wed) — Add Coag+Cond Combined Mode to Convergence Benchmark
+
+**Time**: ~12:00 PST
+
+### Summary
+
+Extended the convergence benchmark to support combined coagulation+condensation at multiple resolutions (36/72/144 bins). Added `--mode combined` CLI flag to `convergence_test.py` and updated the Fortran harness with a `do_coag` toggle.
+
+### Changes
+
+1. **`benchmarks/python/convergence_test.py`**:
+   - Added `--mode {cond_only,combined}` CLI argument (default: cond_only)
+   - Imported `run_combined_scan_tfl`, `run_combined_scan_ppm`, `combined_step_tfl_jax`, `combined_step_ppm_jax` from `solvers/condensation.py`
+   - Added `_run_constant_gc_combined_scan_tfl()` and `_run_constant_gc_combined_scan_ppm()` for constant-gas mode with coagulation
+   - Mode branching in `_run_tfl()` and `_run_ppm()` inner functions
+   - Plot titles include process label ("Coag+Cond" vs "Condensation")
+   - Fortran overlay labels update to "Fortran Coag+Cond" in combined mode
+   - Output filenames get `_combined` suffix in combined mode
+   - `load_fortran_results()` accepts `mode` parameter for mode-dependent filenames
+
+2. **`tomas_fortran/harness/benchmark_constgc.f`**:
+   - Added `do_coag` logical parameter (set to `.true.` for combined mode)
+   - Calls `multicoag(dt)` + `mnfix(Nk, Mk)` before condensation when `do_coag=.true.`
+   - Output filenames use `constgc_combined_` prefix when `do_coag=.true.`
+
+### Results
+
+- Combined mode (dt=60s): Coagulation reduces N by ~10% (1.0e9 → 9.0e8) over 24h
+- JAX TFL 36-bin vs Fortran 36-bin: N agreement ~0.2%
+- PPM converges well across resolutions: N varies <0.1% from 72→144 bins
+- Fortran combined: 0.28s, JAX TFL combined: 1.32s, JAX PPM combined: 1.05s (36 bins)
+- Backward compatibility: `--mode cond_only` produces identical results to before
+
+### Output
+
+- 7 plots per mode in `benchmarks/results/convergence/` (with `_combined` suffix)
+- Fortran output in `tomas_fortran/output/constgc/` (constgc_combined_* and constgc_* files)
+
+---
+
+## 2026-03-03 (Mon) — Configurable NBINS + TFL vs PPM Convergence Test
+
+**Time**: ~15:00 PST
+
+### Summary
+
+Made the number of size bins (NBINS) a runtime parameter instead of a hardcoded constant. Both TFL and PPM condensation now work at arbitrary bin resolutions (36, 72, 144+). Created a multi-resolution convergence benchmark that runs both methods at 3 grid configurations.
+
+### Changes
+
+1. **`make_grid()` function** (`core/config.py`): Creates bin boundaries for arbitrary resolution. Accepts `nbins`, `xk0` (lower boundary), and `doubling_factor`. Refactored existing `xk_boundaries()` to delegate to it.
+
+2. **Removed NBINS hardcoding** (`core/state.py`): Replaced `assert Nk.shape[0] == NBINS` with shape consistency checks (Nk 1D, Mk bins == Nk bins).
+
+3. **Cleaned NBINS imports from 8 physics files**: All JIT-compiled functions now derive bin count from array shapes (`Nk.shape[0]`) instead of importing the config constant. Removed unused NBINS imports from `condensation_sink.py`, `condensation_ppm.py`, `condensation_tfl_jax.py`, `ezcond_ppm_jax.py`, `nucleation.py`.
+
+4. **`condensation_sink.py` xk parameter**: Added explicit `xk` parameter (default None, falls back to `xk_boundaries()`). Updated all 8 call sites to pass `xk=xk` explicitly.
+
+5. **PPM adaptive delta_xi** (`condensation_ppm.py`): Parameterized all PPM internals by `delta_xi = ln(doubling_factor)` instead of hardcoded `ln(2)`. Added `_compute_moment_integrals(a)` for dynamic I0/I1/I2 computation. PPM now works correctly at any bin resolution.
+
+6. **Convergence benchmark** (`benchmarks/python/convergence_test.py`): New script running condensation-only at 3 resolutions (36×2, 72×√2, 144×2^¼) starting from 1.7nm. Generates 4 figures: size distributions, zoomed comparison, integral convergence, timing.
+
+### Key Results
+
+| Config | TFL time | TFL M_dry | PPM time | PPM M_dry |
+|--------|----------|-----------|----------|-----------|
+| 36 bins (×2) | 0.48s | 6.32e-7 | 0.20s | 6.32e-7 |
+| 72 bins (×√2) | 1.14s | 1.06e-6 | 0.59s | 6.31e-7 |
+| 144 bins (×2^¼) | 3.72s | 1.09e-6 | 2.07s | 6.29e-7 |
+
+- **PPM M_dry is resolution-stable** (0.5% variation) while TFL M_dry diverges 72% at finer grids (S01)
+- **PPM is ~1.8x faster** than TFL at every resolution
+- TFL shows oscillation artifacts at 144 bins; PPM stays smooth
+- For well-contained distributions (S05), both methods converge identically
+
+### Files Modified
+- `tomas_jax/core/config.py` — Added `make_grid()`
+- `tomas_jax/core/state.py` — Shape consistency checks
+- `tomas_jax/physics/ezcond.py`, `ezcond_ppm.py`, `condensation.py` — `ibins = Nk.shape[0]`
+- `tomas_jax/physics/condensation_sink.py` — Added `xk` parameter
+- `tomas_jax/physics/condensation_ppm.py` — Adaptive `delta_xi`
+- `tomas_jax/physics/condensation_tfl_jax.py`, `ezcond_ppm_jax.py`, `nucleation.py` — Removed unused imports
+- `tomas_jax/solvers/condensation.py` — Pass `xk=xk` to condensation_sink calls
+- `benchmarks/python/convergence_test.py` — **New**
+
+### Plots
+- `benchmarks/results/convergence/convergence_sizedist_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_zoomed_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_totals_S{01,05}.png`
+- `benchmarks/results/convergence/convergence_timing_S{01,05}.png`
+
+---
+
+## 2026-03-03 (Mon) — Solver Cleanup + Clean Timing Benchmark
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Cleaned up solver code accumulated during nucleation debugging: restored degraded Tsit5 parameters, renamed misnamed `coag_rk4_step` → `coag_euler_step`, documented all 6 scan-fused functions, and wrote a clean single-scenario timing benchmark script.
+
+### Changes
+
+1. **Restored `diffrax_step` parameters** (`solvers/diffrax.py`): rtol 1e-3→1e-4, atol 1.0→1e-10, max_steps 500→5000. These were loosened during debugging and never restored.
+
+2. **Renamed `coag_rk4_step` → `coag_euler_step`** (`solvers/diffrax.py`, `solvers/condensation.py`): The function was always forward Euler, not RK4. Added deprecated alias for backward compatibility. Updated all callers and docstrings.
+
+3. **Documented scan-fused functions** (`solvers/condensation.py`): Added table at top of module docstring listing all 6 scan functions with their coag/cond/nucl capabilities.
+
+4. **New timing benchmark** (`benchmarks/python/time_single_scenario.py`): Clean script that times all 8 solver combinations for a single scenario with JIT warmup, median of 3 runs, and Fortran comparison table.
+
+### Fresh Timing Results (S01, 24h, M1 Pro)
+
+| Test | JAX (s) | Fortran (s) | Ratio |
+|------|---------|-------------|-------|
+| Tsit5 coag-only | 4.144 | 0.256 | 16.2x |
+| Euler coag-only | 0.346 | 0.256 | 1.35x |
+| PPM cond-only | 0.213 | 0.086 | 2.47x |
+| TFL cond-only | 0.488 | 0.086 | 5.66x |
+| Euler+PPM combined | 0.579 | 0.328 | 1.76x |
+| Euler+TFL combined | 0.828 | 0.328 | 2.52x |
+| Nucl+TFL cond | 0.701 | — | — |
+| Full (nucl+coag+cond) | 1.673 | — | — |
+
+### Key Observations
+
+- Tsit5 with restored tolerances (atol=1e-10) is 16x slower than Fortran — the loose atol=1.0 was what made it fast before
+- Euler coag is only 1.35x slower than Fortran — competitive
+- PPM cond is the fastest JAX condensation path (2.5x Fortran)
+- Euler+PPM combined is the best full JAX path (1.76x Fortran)
+
+### Files Modified
+- `tomas_jax/solvers/diffrax.py` — parameters + rename
+- `tomas_jax/solvers/condensation.py` — updated imports/calls + docstring table
+- `benchmarks/python/time_single_scenario.py` — new timing script
+
+---
+
+## 2026-03-03 (Mon) — Full-Mode Stability Fixes + Benchmark Plots
+
+**Time**: ~14:00 PST
+
+### Summary
+
+Fixed critical stability issues in full-mode (nucleation+coagulation+condensation) that caused NaN divergence in 13/50 scenarios. Root cause: unclamped organic mass in nucleation when H2SO4 gas is exhausted. Also replaced RK4 coagulation solver with forward Euler (matches Fortran approach). Generated comprehensive 8-figure benchmark comparison for all 5 modes.
+
+### Bugs Fixed
+
+1. **Nucleation organic mass clamping** (`nucleation.py`): When H2SO4 gas supply is exhausted (`need_clamp=True`), number and SO4 mass were clamped but organic mass was left at the full nucleation rate. This created particles with avg mass 80,000x above bin 0 boundary (e.g., mass=3.08e-19 in bin 0 where xk[0]=1.6e-23). The misalignment caused catastrophic cascading rates in TFL coagulation. Fix: `dM_org_clamped = dN_clamped * 0.1 * _MNUC` — clamp organic proportionally.
+
+2. **RK4 intermediate-stage amplification** (`diffrax.py`): RK4 intermediate stages (k2/k3/k4) amplify N^2 coagulation rates through positive feedback when particle counts are high (cold scenarios with strong nucleation). Replaced with forward Euler (single RHS evaluation per substep + positivity clipping + MNFIX). This matches Fortran's explicit approach and is more stable.
+
+3. **Fortran CSV missing-E exponent** (`utils.py`): Fortran writes very small numbers like `0.1024186408109169-238` (missing 'E' before exponent). Added `_fix_fortran_float()` regex to insert 'E'.
+
+### Results (All 5 modes, 50 scenarios, TFL vs Fortran at hour 24)
+
+| Mode | N Scenarios | N<1% | N<5% | N Med Err | N Max Err | M Med Err | M Max Err |
+|------|-------------|------|------|-----------|-----------|-----------|-----------|
+| Coag Only | 42 | 39 | 42 | 1.37e-3 | 2.59e-2 | 3.15e-7 | 4.82e-3 |
+| Cond Only | 42 | 42 | 42 | 9.97e-7 | 1.01e-3 | 2.64e-6 | 1.00e+0 |
+| Coag+Cond | 41 | 34 | 40 | 1.30e-3 | 7.74e-2 | 3.47e-6 | 4.82e-3 |
+| Nucl+Cond | 50 | 33 | 41 | 2.14e-3 | 2.48e-1 | 1.22e-5 | 4.33e-3 |
+| Full | 50 | 16 | 24 | 8.06e-2 | 9.95e-1 | 8.21e-4 | 1.00e+0 |
+
+Note: Coag/Cond/Combined have 42/41 scenarios because Fortran S50 crashes (known ezcond STOP). Full mode has higher errors due to organic clamping divergence from Fortran (intentional fix for JAX stability).
+
+### Files Modified
+- `tomas_jax/physics/nucleation.py` — Added organic mass clamping in gas-limited path
+- `tomas_jax/solvers/diffrax.py` — Replaced RK4 with forward Euler coagulation solver
+- `tomas_jax/solvers/condensation.py` — n_substeps=10, removed dual TFL/PPM computation in full_step_jax
+- `benchmarks/python/utils.py` — Fixed Fortran CSV parser for missing-E exponents
+
+### Files Created
+- `benchmarks/python/plot_all_modes.py` — 8-figure comprehensive benchmark comparison
+- `benchmarks/results/nucleation_benchmark/` — 8 PNG figures (timeseries, error evolution, scatter, heatmap, summary)
+
+---
+
+## 2026-03-02 (Sun) — Nucleation Benchmark: Fortran vs JAX Verification
+
+**Time**: ~21:00 PST
+
+### Summary
+
+Two-phase nucleation benchmark comparing JAX vs Fortran for Riccobono 2014 and Dunne 2016 parameterizations.
+
+### Phase 1: Parameterization-Level (Option A)
+
+20 test cases (10 Riccobono + 10 Dunne) with varying T, H2SO4, org, NH3, fion. All match Fortran to machine precision (max relative error < 1e-12).
+
+**Files created:**
+- `tomas_fortran/src/ricco_nucl.f`, `tomas_fortran/src/dunne_inorg_nucl.f` — copied from TRACER_SOM-TOMAS (prints stripped)
+- `tomas_fortran/harness/benchmark_nucleation.f` — standalone Fortran benchmark
+- `benchmarks/python/compare_nucleation.py` — JAX vs Fortran comparison
+
+### Phase 2: Full 24h Driver (Option B)
+
+50 scenarios × nucl_cond and full modes, comparing hourly output over 24 hours.
+
+**Key bugs found and fixed:**
+1. **Gas depletion MW correction**: JAX had `gas_depleted = dM_so4 * (98/96)`, Fortran depletes Gc by SO4 mass directly (no correction). Fixed.
+2. **Organic mass clamping**: When H2SO4 gas is exhausted, Fortran does NOT revert the organic mass to bin 0. JAX was reverting it. Fixed to match Fortran.
+3. **MNFIX multi-bin shift**: JAX MNFIX only handled 1-2 bin shifts. Nucleated particles with large organic mass need to jump 12+ bins. Fixed with analytical log2 computation: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
+
+**Results (nucl_cond mode, 50 scenarios):**
+- N_tot median error: 0.2%, max 25% (33/50 < 1%, 41/50 < 5%)
+- M_tot max error: 0.43%, median 1.2e-5
+- Residual N errors from MNFIX partial-transfer differences compounding over 1440 steps
+
+**Files created:**
+- `tomas_fortran/src/nucleation_driver.f` — 24h nucleation driver subroutine
+- Fortran output: `tomas_fortran/output/24h/` (50 scenarios × 5 modes × 24 hours)
+
+**Files modified:**
+- `tomas_jax/physics/nucleation.py` — Fixed gas depletion and organic clamping
+- `tomas_jax/core/mnfix_jax.py` — Fixed multi-bin shift with analytical computation
+- `tomas_jax/solvers/condensation.py` — Added `full_step_jax`, `run_full_scan` (scan-fused nucleation+coagulation+condensation)
+- `tomas_fortran/harness/benchmark_24h.f` — Added modes 4 (nucl_cond) and 5 (full)
+- `tomas_fortran/Makefile` — Added nucleation objects
+- `benchmarks/python/run_24h_scenarios.py` — Added nucl_cond and full modes with scan-fused paths, hourly snapshots
+- `benchmarks/python/compare_24h.py` — Added nucl_cond and full modes, fixed FORTRAN_DIR path
+- `tests/test_nucleation.py` — Updated mass balance test
+
+### Performance
+- JAX nucl_cond (scan-fused): ~0.5s/scenario (24×60-step scans)
+- JAX full (scan-fused with diffrax): ~5-13s/scenario (adaptive ODE stepping)
+- Fortran combined: ~0.33s/scenario
+
+---
+
+## 2026-03-02 (Sun) — Add Nucleation (Riccobono 2014 + Dunne 2016)
+
+**Time**: ~22:00 PST
+
+### Summary
+
+Implemented nucleation parameterizations ported from TRACER_SOM-TOMAS Fortran. Two schemes: Riccobono 2014 organic nucleation (with Yu 2017 temperature correction) and Dunne 2016 inorganic nucleation (4 mechanisms: binary/ternary x neutral/ion-induced). All functions are pure-JAX and JIT-compilable.
+
+### Files Created
+- `tomas_jax/physics/nucleation.py` — 3 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `nucleation_step`
+- `tests/test_nucleation.py` — 24 unit tests (all passing)
+- `docs/nucleation.md` — Algorithm documentation
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `condensation_step_with_nucleation_jax`, `run_nucleation_condensation_scan`
+- `run_box_model.py` — Nucleation in time loop (after H2SO4 production, before coagulation), `--no-nucleation` CLI flag
+- `CLAUDE.md` — Updated file layout, operator-split order, Fortran source mapping
+- `PROGRESS.md` — This entry
+
+### Key Details
+- Nucleation cluster: r=0.85nm, rho=1350 kg/m3, composition 90% SO4 + 10% organic
+- Cluster mass (~3.47e-24 kg) < XK0 (1.6e-23 kg), always placed in bin 0
+- Gas depletion: SO4 mass subtracted directly from Gc[SRTSO4] (no 98/96 MW correction), with clamping
+- In clamped path (gas exhausted): SO4 mass = Gc * 96/98, organic mass NOT reverted (matches Fortran)
+- Enable/disable flags use multiplicative float masks (0.0/1.0) to avoid JIT recompilation
+- Operator splitting order: H2SO4 production -> nucleation -> coagulation -> condensation
+
+### Verification
+- Riccobono at T=278K, h2so4=1e7, org=1e7: J = 3.27 cm^-3 s^-1 (exact)
+- Dunne with nh3=0, fion=0: only Jbn > 0 (correct)
+- Mass balance: aerosol SO4 gained * 98/96 = gas H2SO4 lost (within 1e-6 relative)
+- All 24 tests passing, JIT compilation verified
+
+### Known Limitations
+- Coagulation-sink survival fraction (Kerminen-Kulmala) not implemented (commented out in Fortran too)
+- Organic vapor (org_conc) is an external input, not coupled to the gas-phase chemistry
+- No nuc_bin search — always bin 0 (valid since mnuc < XK0)
+
+### Next Steps
+- Run 24h benchmark with nucleation enabled
+- Compare nucleation event banana plots with observations
+- Consider coupling organic vapor to gas-phase chemistry
+
+---
+
 ## 2026-03-02 (Sun) — Fortran TFL vs PPM 24h Benchmark Comparison
 
 **Time**: ~14:30 PST

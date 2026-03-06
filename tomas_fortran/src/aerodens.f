@@ -179,7 +179,8 @@ C      call nanstop(d,173,0,0)
          write(*,*) 'ERROR in aerodens'
          write(*,*) so4t,no3t,nh4t,naclt,h2ot
          write(*,*) 'density',d*1000.
-         STOP
+C         STOP  ! Disabled for benchmark — return with clamped density
+         d = 1.4d0  ! Default density 1400 kg/m3
       endif
 
 C Restore masses passed

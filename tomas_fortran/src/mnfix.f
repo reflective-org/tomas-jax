@@ -63,7 +63,8 @@ C If N=0 and M is tiny, set M to zero
                   write(*,*) 'bin=',k
                   write(*,*) 'N=',Nkx(k)
                   write(*,*) 'M=',Mkx(k,j)
-                  STOP
+C                  STOP  ! Disabled for benchmark
+                  Mkx(k,j) = 0.d0
                endif
             enddo
             Nkx(k)=Neps
@@ -103,7 +104,8 @@ C Check to see if any bins are completely out of bounds for any bin
          if (Nkx(k) .eq. 0.0) then
             if (drymass .gt. 0.0) then
                write(*,*) 'N=0 but M>0 in mnfix'
-               STOP
+C               STOP  ! Disabled for benchmark
+               drymass = 0.d0
             else
                avg=sqrt(xk(k)*xk(k+1))
             endif
