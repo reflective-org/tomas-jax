@@ -106,8 +106,6 @@ def make_grid(nbins=36, xk0=XK0, doubling_factor=2.0):
         xk: Bin boundaries, shape (nbins+1,), JAX float64 array
     """
     import jax.numpy as jnp
-    xk = jnp.zeros(nbins + 1)
-    xk = xk.at[0].set(xk0)
-    for k in range(nbins):
-        xk = xk.at[k + 1].set(doubling_factor * xk[k])
+    exponents = jnp.arange(nbins + 1, dtype=jnp.float64)
+    xk = xk0 * jnp.power(doubling_factor, exponents)
     return xk
