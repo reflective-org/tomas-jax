@@ -704,9 +704,9 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
         '_prod_rate_kg': float(prod_val),
     }
 
-    # Load Fortran results if requested
+    # Load Fortran results if requested (no Fortran coag-only reference available)
     fortran_data = None
-    if include_fortran:
+    if include_fortran and mode != 'coag_only':
         fortran_label = "Fortran Coag+Cond" if mode == 'combined' else "Fortran TFL"
         print(f"\n--- Loading {fortran_label} results (36 bins, standard grid) ---")
         fortran_data = load_fortran_results(use_dt, mode=mode)
