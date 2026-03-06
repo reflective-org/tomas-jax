@@ -128,7 +128,7 @@ def ezcond_ppm_jax(
 
         def significant_path(args):
             return jax.lax.cond(
-                mcond > tot_m * 1.0e-3,
+                mcond > 0.0,
                 ppm_path,
                 simple_add_path,
                 args
