@@ -1147,6 +1147,75 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     plt.close(fig)
     print(f"Saved: {path5}")
 
+    # =====================================================================
+    # Figure 8: Combined presentation — all methods on same axes
+    # =====================================================================
+    # Two panels: dN/dlogDp (left) and dM/dlogDp (right)
+    # Shows: Initial (gray), TFL (solid), PPM (dashed), Fortran (dotted green)
+    fig, (ax_n, ax_m) = plt.subplots(1, 2, figsize=(14, 6), facecolor=_BG)
+    fig.suptitle(f'Size & Mass Distribution ({process_label})  /  {display_tag}',
+                 fontsize=13, color=_TEXT, fontweight='bold',
+                 x=0.02, ha='left', y=0.98)
+
+    # Plot initial (gray, thick)
+    for nbins_key in sorted_keys:
+        r = results[nbins_key]
+        Dp_n, dN_init = compute_dNdlogDp(r['Nk_init'], r['xk'])
+        Dp_m, dM_init = compute_dMdlogDp(r['Mk_init'], r['xk'])
+        ax_n.plot(Dp_n, dN_init, color='#AAAAAA', lw=2.0, ls='-',
+                  label=f'Initial ({r["label"]})' if nbins_key == sorted_keys[0] else None)
+        ax_m.plot(Dp_m, dM_init, color='#AAAAAA', lw=2.0, ls='-',
+                  label=f'Initial ({r["label"]})' if nbins_key == sorted_keys[0] else None)
+        # Only show one initial curve since they're nearly identical at different resolutions
+        break
+
+    # Plot TFL (solid) and PPM (dashed) for each resolution
+    for nbins_key in sorted_keys:
+        r = results[nbins_key]
+        c = _color(nbins_key)
+        lw = _lw(nbins_key)
+
+        # TFL — solid
+        if 'tfl_Nk' in r:
+            Dp, dN = compute_dNdlogDp(r['tfl_Nk'], r['xk'])
+            ax_n.plot(Dp, dN, color=c, lw=lw, ls='-',
+                      label=f'TFL {r["label"]}')
+            Dp, dM = compute_dMdlogDp(r['tfl_Mk'], r['xk'])
+            ax_m.plot(Dp, dM, color=c, lw=lw, ls='-',
+                      label=f'TFL {r["label"]}')
+
+        # PPM — dashed
+        if 'ppm_Nk' in r:
+            Dp, dN = compute_dNdlogDp(r['ppm_Nk'], r['xk'])
+            ax_n.plot(Dp, dN, color=c, lw=lw, ls='--',
+                      label=f'PPM {r["label"]}')
+            Dp, dM = compute_dMdlogDp(r['ppm_Mk'], r['xk'])
+            ax_m.plot(Dp, dM, color=c, lw=lw, ls='--',
+                      label=f'PPM {r["label"]}')
+
+    # Fortran overlay
+    if fortran_data is not None:
+        Dp_f, dN_f = compute_dNdlogDp(fortran_data['Nk'], fortran_data['xk'])
+        ax_n.plot(Dp_f, dN_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
+                  ls=_FORTRAN_LS, label=fortran_legend)
+        Dp_f, dM_f = compute_dMdlogDp(fortran_data['Mk'], fortran_data['xk'])
+        ax_m.plot(Dp_f, dM_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
+                  ls=_FORTRAN_LS, label=fortran_legend)
+
+    xlim = _get_xlim_from_ppm(results, sorted_keys)
+    for ax, ylabel in [(ax_n, 'dN/dlog Dp  [cm$^{-3}$]'),
+                        (ax_m, 'dM/dlog Dp  [$\\mu$g m$^{-3}$]')]:
+        _nyt_ax(ax, xlabel='Diameter [nm]', ylabel=ylabel)
+        _nyt_legend(ax, loc='upper right')
+        ax.set_xlim(xlim)
+
+    _add_info_box(fig, info_text)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    path8 = os.path.join(outdir, f'convergence_presentation_{tag}.png')
+    fig.savefig(path8, dpi=180, bbox_inches='tight', facecolor=_BG)
+    plt.close(fig)
+    print(f"Saved: {path8}")
+
     # -----------------------------------------------------------------
     # Shared legend helper for time-series figures (Figs 6 & 7)
     # Convention: solid = TFL, dashed = PPM; color = resolution
