@@ -10,10 +10,10 @@ Orchestrates the full condensation pipeline in sequence:
 This is called once per model timestep, after the coagulation step.
 
 Condensation methods:
+    - method='ppm_jit': Fully JIT-compiled PPM pipeline (default, fastest)
+    - method='tfl_jit': Fully JIT-compiled TFL (Fortran-matching)
     - method='tfl': Sequential (non-JIT), Fortran-faithful TFL algorithm
-    - method='tfl_jit': Fully JIT-compiled TFL (Fortran-matching, recommended)
     - method='ppm': Sequential wrapper, PPM advection (JIT internally)
-    - method='ppm_jit': Fully JIT-compiled PPM pipeline
 
 Scan-fused time loops (single XLA program, zero Python dispatch):
 
@@ -72,7 +72,7 @@ def condensation_step(
     rh: float,
     alpha: float,
     dt: float,
-    method: str = 'tfl'
+    method: str = 'ppm_jit'
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Execute one condensation operator-split step.
 
@@ -93,7 +93,7 @@ def condensation_step(
         rh: Relative humidity [fraction 0-1]
         alpha: Accommodation coefficient
         dt: Timestep [s]
-        method: Condensation method - 'tfl' (default), 'ppm', or 'ppm_jit'
+        method: Condensation method - 'ppm_jit' (default), 'tfl', 'ppm', or 'tfl_jit'
 
     Returns:
         Nk_new: Updated number concentration

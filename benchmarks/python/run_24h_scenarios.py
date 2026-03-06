@@ -93,7 +93,7 @@ def init_lognormal_scenario(N_total, Dp_gmd_um, sigma_gsd, xk):
     return Nk, Mk
 
 
-def run_scenario(scenario, mode, method='tfl', verbose=False):
+def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
     """Run one 24-hour simulation.
 
     Args:

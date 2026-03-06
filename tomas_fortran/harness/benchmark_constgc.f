@@ -42,7 +42,7 @@ C     Physical parameters
       parameter(temp_val=298.0d0)
       parameter(pres_val=101325.0d0)
       parameter(rh_val=0.30d0)
-      parameter(N_total=1.0d3)
+      parameter(N_total=1.0d4)
       parameter(Dp_gmd=0.02d0)
       parameter(sigma_gsd=1.6d0)
       parameter(dens_init=1770.0d0)

@@ -159,12 +159,12 @@ def dp_nm_to_xk0(dp_nm):
     """Convert a diameter in nm to the corresponding xk0 mass in kg."""
     return (np.pi / 6.0) * (dp_nm * 1e-9) ** 3 * DENS_INIT
 
-# Grid configurations: (label, nbins, doubling_factor)
-# Extra bins offset with --extra-bins N (e.g., +4 → 40/80/160 for 1nm start)
+# Grid configurations: (nbins, doubling_factor, label)
+# 40 bins (×2) covers the same mass range as 36 bins with 4 extra bins on top.
+# 80 bins (×√2) doubles the resolution while spanning the same range.
 BASE_GRID_CONFIGS = [
-    (36, 2.0,       "×2"),
-    (72, 2.0**0.5,  "×√2"),
-    (144, 2.0**0.25, "×2^¼"),
+    (40, 2.0,       "×2"),
+    (80, 2.0**0.5,  "×√2"),
 ]
 
 
@@ -172,7 +172,7 @@ def _make_grid_configs(extra_bins=0):
     """Build GRID_CONFIGS with optional extra bins per resolution."""
     configs = []
     for base_n, factor, factor_label in BASE_GRID_CONFIGS:
-        n = base_n + extra_bins * int(round(base_n / 36))
+        n = base_n + extra_bins * int(round(base_n / 40))
         configs.append((f"{n} bins ({factor_label})", n, factor))
     return configs
 

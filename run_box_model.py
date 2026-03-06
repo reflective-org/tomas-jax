@@ -103,7 +103,7 @@ def molec_cm3_to_kg_gridcell(conc_molec_cm3: float, boxvol_cm3: float) -> float:
 # 2. Main Simulation Loop
 # =========================================================================
 
-def run_box_model(enable_condensation: bool = True, method: str = 'tfl',
+def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                    enable_nucleation: bool = True):
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
@@ -342,8 +342,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'tfl',
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="TOMAS Box Model")
-    parser.add_argument('--method', choices=['tfl', 'tfl_jit', 'ppm', 'ppm_jit'], default='tfl',
-                        help='Condensation method: tfl (default), ppm, or ppm_jit')
+    parser.add_argument('--method', choices=['tfl', 'tfl_jit', 'ppm', 'ppm_jit'], default='ppm_jit',
+                        help='Condensation method: ppm_jit (default), tfl_jit, tfl, or ppm')
     parser.add_argument('--no-condensation', action='store_true',
                         help='Disable condensation')
     parser.add_argument('--no-nucleation', action='store_true',
