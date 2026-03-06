@@ -1,8 +1,9 @@
 """TFL vs PPM convergence test at multiple bin resolutions.
 
-Runs condensation-only for a single scenario at 36/72/144 bins to test
-whether TFL and PPM distributions converge at higher resolution.
-Both methods are run at all resolutions (PPM delta_xi is adaptive).
+Runs condensation-only, coag+cond combined, or coag-only for a single
+scenario at 36/72/144 bins to test whether distributions converge at
+higher resolution. TFL and PPM are compared for condensation modes;
+coag-only uses Euler + MNFIX (single method).
 
 Usage::
 
@@ -10,6 +11,8 @@ Usage::
     python -m benchmarks.python.convergence_test
     python -m benchmarks.python.convergence_test --scenario 5
     python -m benchmarks.python.convergence_test --no-plots
+    python -m benchmarks.python.convergence_test --mode combined --constant-gc
+    python -m benchmarks.python.convergence_test --mode coag_only --dt 60
 """
 import os
 import sys
@@ -28,9 +31,14 @@ from tomas_jax.core.config import (
 from tomas_jax.solvers.condensation import (
     run_condensation_scan_tfl,
     run_condensation_scan,
+    run_combined_scan_tfl,
+    run_combined_scan_ppm,
     condensation_step_tfl_jax,
     condensation_step_jax,
+    combined_step_tfl_jax,
+    combined_step_ppm_jax,
 )
+from tomas_jax.solvers.diffrax import coag_euler_step
 from benchmarks.python.scenarios import get_scenarios
 
 from functools import partial
@@ -76,6 +84,64 @@ def _run_constant_gc_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
     return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps)
 
 
+def _run_constant_gc_combined_scan_tfl(Nk, Mk, Gc, xk, temp, pres, boxvol,
+                                        rh, alpha, dt, nsteps):
+    """Coag + TFL condensation scan with Gc reset to initial value each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = combined_step_tfl_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps)
+
+
+def _run_constant_gc_combined_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol,
+                                        rh, alpha, dt, nsteps):
+    """Coag + PPM condensation scan with Gc reset to initial value each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = combined_step_ppm_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps)
+
+
+def _run_coag_only_scan(Nk, Mk, xk, temp, pres, boxvol, dt, nsteps,
+                        n_substeps=3):
+    """Coag-only scan: Euler + MNFIX per timestep."""
+    @partial(jax.jit, static_argnums=(7, 8))
+    def _scan(Nk, Mk, xk, temp, pres, boxvol, dt, nsteps, n_substeps):
+        def step(carry, _):
+            Nk_c, Mk_c = carry
+            Nk_c, Mk_c = coag_euler_step(Nk_c, Mk_c, xk, temp, pres, boxvol,
+                                          dt=dt, n_substeps=n_substeps)
+            diag = jnp.array([jnp.sum(Nk_c),
+                              jnp.sum(Mk_c[:, :SRTH2O]),
+                              0.0])
+            return (Nk_c, Mk_c), diag
+        (Nk_f, Mk_f), hist = jax.lax.scan(step, (Nk, Mk), None, length=nsteps)
+        return Nk_f, Mk_f, hist
+    return _scan(Nk, Mk, xk, temp, pres, boxvol, dt, nsteps, n_substeps)
+
+
 # Physical constants matching Fortran harness
 PI = 3.141592654
 DENS_INIT = 1770.0  # kg/m3 (sulfate density)
@@ -88,12 +154,30 @@ NSTEPS = 1440  # 24 hours
 XK0_17NM = (np.pi / 6.0) * (1.7e-9) ** 3 * DENS_INIT  # 1.7nm start
 XK0_STANDARD = 1.0e-21 * 2.0 ** (-6)  # standard TOMAS (Mo ≈ 1.5625e-23, ~3.2nm)
 
+
+def dp_nm_to_xk0(dp_nm):
+    """Convert a diameter in nm to the corresponding xk0 mass in kg."""
+    return (np.pi / 6.0) * (dp_nm * 1e-9) ** 3 * DENS_INIT
+
 # Grid configurations: (label, nbins, doubling_factor)
-GRID_CONFIGS = [
-    ("36 bins (×2)",   36, 2.0),
-    ("72 bins (×√2)",  72, 2.0 ** 0.5),
-    ("144 bins (×2^¼)", 144, 2.0 ** 0.25),
+# Extra bins offset with --extra-bins N (e.g., +4 → 40/80/160 for 1nm start)
+BASE_GRID_CONFIGS = [
+    (36, 2.0,       "×2"),
+    (72, 2.0**0.5,  "×√2"),
+    (144, 2.0**0.25, "×2^¼"),
 ]
+
+
+def _make_grid_configs(extra_bins=0):
+    """Build GRID_CONFIGS with optional extra bins per resolution."""
+    configs = []
+    for base_n, factor, factor_label in BASE_GRID_CONFIGS:
+        n = base_n + extra_bins * int(round(base_n / 36))
+        configs.append((f"{n} bins ({factor_label})", n, factor))
+    return configs
+
+
+GRID_CONFIGS = _make_grid_configs(0)
 
 # Fortran output directory (relative to tomas_fortran/)
 FORTRAN_DIR = os.path.join(os.path.dirname(__file__), '..', '..',
@@ -148,7 +232,7 @@ def _fix_fortran_float(s):
     return re.sub(r'(\d)([\+\-])(\d)', r'\1E\2\3', s.strip())
 
 
-def load_fortran_results(dt_val, fortran_dir=None):
+def load_fortran_results(dt_val, fortran_dir=None, mode='cond_only'):
     """Load Fortran Nk/Mk output for a given dt value.
 
     Returns dict with keys: Nk, Mk, xk (standard 36-bin grid), or None if not found.
@@ -157,8 +241,9 @@ def load_fortran_results(dt_val, fortran_dir=None):
         fortran_dir = FORTRAN_DIR
     dt_int = int(dt_val)
 
-    nk_path = os.path.join(fortran_dir, f'constgc_dt{dt_int:02d}_final_Nk.csv')
-    mk_path = os.path.join(fortran_dir, f'constgc_dt{dt_int:02d}_final_Mk.csv')
+    prefix = 'constgc_combined' if mode == 'combined' else 'constgc'
+    nk_path = os.path.join(fortran_dir, f'{prefix}_dt{dt_int:02d}_final_Nk.csv')
+    mk_path = os.path.join(fortran_dir, f'{prefix}_dt{dt_int:02d}_final_Mk.csv')
     xk_path = os.path.join(fortran_dir, 'constgc_xk.csv')
 
     if not os.path.exists(nk_path):
@@ -268,7 +353,8 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
                     n_total_override=None, gmd_override=None,
                     gsd_override=None, temp_override=None,
                     pres_override=None, standard_grid=False,
-                    include_fortran=False):
+                    include_fortran=False, mode='cond_only',
+                    xk0_dp_nm=None, extra_bins=0):
     """Run TFL vs PPM convergence test at multiple resolutions.
 
     Args:
@@ -285,6 +371,8 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
         pres_override: Override pressure [Pa] (default: use scenario value)
         standard_grid: Use standard TOMAS grid (xk0=1.5625e-23, ~3.2nm)
         include_fortran: Load and overlay Fortran TFL results at 36 bins
+        mode: 'cond_only' (default) or 'combined' (coag+cond)
+        xk0_dp_nm: First bin edge diameter [nm] (overrides --standard-grid)
 
     Returns:
         results: dict of results per grid config
@@ -308,23 +396,30 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     # Convert H2SO4 molec/cm3 to kg/grid cell
     h2so4_kg = h2so4_molec_cm3 * BOXVOL * (MW_H2SO4 / 1000.0) / AVOGADRO
 
+    if mode == 'combined':
+        mode_label = 'Coag+Cond'
+    elif mode == 'coag_only':
+        mode_label = 'Coag-only'
+    else:
+        mode_label = 'Cond-only'
+
     if constant_gc_mode:
         prod_val = 0.0
         gc_so4 = h2so4_kg
-        print(f"=== Convergence Test: Constant Gas Mode ===")
+        print(f"=== Convergence Test: Constant Gas Mode ({mode_label}) ===")
         print(f"  H2SO4 = {h2so4_molec_cm3:.1e} molec/cm3 "
               f"= {h2so4_kg:.2e} kg/cell (held constant)")
     elif depletion_mode:
         prod_val = 0.0
         gc_so4 = h2so4_kg
-        print(f"=== Convergence Test: Depletion Mode ===")
+        print(f"=== Convergence Test: Depletion Mode ({mode_label}) ===")
         print(f"  Initial H2SO4 = {h2so4_molec_cm3:.1e} molec/cm3 "
               f"= {h2so4_kg:.2e} kg/cell")
         print(f"  Production = 0 (pure depletion)")
     else:
         prod_val = sc['h2so4_prod_kg_per_s']
         gc_so4 = sc['Gc_SO4_kg']
-        print(f"=== Convergence Test: Scenario S{sid:02d} ===")
+        print(f"=== Convergence Test: Scenario S{sid:02d} ({mode_label}) ===")
         print(f"  Gc_SO4={gc_so4:.2e} kg/cell, "
               f"prod={sc['h2so4_prod']:.1e} molec/cm3/s")
 
@@ -333,8 +428,15 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     print(f"  T={sc['temp']:.0f} K, P={sc['pres']:.0f} Pa, RH={sc['RH']:.2f}")
 
     # Grid starting point
-    xk0 = XK0_STANDARD if standard_grid else XK0_17NM
-    grid_label = "standard TOMAS (~3.2nm)" if standard_grid else "1.7nm"
+    if xk0_dp_nm is not None:
+        xk0 = dp_nm_to_xk0(xk0_dp_nm)
+        grid_label = f"{xk0_dp_nm:.1f}nm"
+    elif standard_grid:
+        xk0 = XK0_STANDARD
+        grid_label = "standard TOMAS (~3.2nm)"
+    else:
+        xk0 = XK0_17NM
+        grid_label = "1.7nm"
     print(f"  Grid: {grid_label}, xk0={xk0:.4e} kg")
 
     # Timestep configuration
@@ -343,9 +445,10 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     print(f"  dt={use_dt:.1f}s, nsteps={nsteps}")
     print()
 
+    grid_configs = _make_grid_configs(extra_bins)
     results = {}
 
-    for label, nbins, factor in GRID_CONFIGS:
+    for label, nbins, factor in grid_configs:
         print(f"--- {label} ---")
         xk = make_grid(nbins=nbins, xk0=xk0, doubling_factor=factor)
 
@@ -380,8 +483,66 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
             'M_total_init': M_total_init,
         }
 
+        # --- Coag-only shortcut ---
+        if mode == 'coag_only':
+            # No gas involvement — total init mass is aerosol only
+            entry['M_total_init'] = M_aer_init
+
+            # Scale substeps with bin refinement: narrower bins need more
+            # substeps to prevent Euler overshoot across bin boundaries
+            n_sub = max(3, int(round(3 * nbins / 36)))
+
+            print(f"  Coag ({n_sub} substeps): compiling...",
+                  end="", flush=True)
+            _ = _run_coag_only_scan(Nk_jax, Mk_jax, xk_jax,
+                                    temp, pres, boxvol, dt, nsteps,
+                                    n_substeps=n_sub)
+            jax.block_until_ready(_)
+
+            print(f" running...", end="", flush=True)
+            t0 = time.perf_counter()
+            Nk_f, Mk_f, hist_coag = _run_coag_only_scan(
+                Nk_jax, Mk_jax, xk_jax, temp, pres, boxvol, dt, nsteps,
+                n_substeps=n_sub)
+            jax.block_until_ready(Nk_f)
+            t_coag = time.perf_counter() - t0
+
+            M_aer_coag = float(jnp.sum(Mk_f[:, :SRTH2O]))
+
+            entry['tfl_Nk'] = np.array(Nk_f)
+            entry['tfl_Mk'] = np.array(Mk_f)
+            entry['tfl_Gc'] = np.zeros(N_GAS_SPECIES)
+            entry['tfl_hist'] = np.array(hist_coag)
+            entry['tfl_time'] = t_coag
+            entry['tfl_N_tot'] = float(jnp.sum(Nk_f))
+            entry['tfl_M_dry'] = M_aer_coag
+            entry['tfl_M_gas'] = 0.0
+            entry['tfl_M_total'] = M_aer_coag
+            entry['tfl_mass_err'] = abs(M_aer_coag - M_aer_init) / max(M_aer_init, 1e-30)
+            print(f" {t_coag:.2f}s  N={entry['tfl_N_tot']:.4e}  "
+                  f"M_cons={entry['tfl_mass_err']:.2e}")
+
+            results[nbins] = entry
+            continue
+
         # --- TFL ---
         def _run_tfl():
+            if mode == 'combined':
+                if constant_gc_mode:
+                    return _run_constant_gc_combined_scan_tfl(
+                        Nk_jax, Mk_jax, Gc_jax, xk_jax,
+                        temp, pres, boxvol, rh, alpha, dt, nsteps)
+                # run_combined_scan_tfl returns N_history (1D);
+                # repack as 3-col for compatibility
+                Nk_f, Mk_f, Gc_f, N_hist = run_combined_scan_tfl(
+                    Nk_jax, Mk_jax, Gc_jax, xk_jax,
+                    temp, pres, boxvol, rh, alpha, dt, nsteps, prod_rate)
+                # N_hist is (nsteps,), wrap as (nsteps, 3) [N_tot, M_dry=0, Gc=0]
+                # (time-series plots disabled for this path — use dummy)
+                hist = jnp.stack([N_hist,
+                                  jnp.zeros_like(N_hist),
+                                  jnp.zeros_like(N_hist)], axis=1)
+                return Nk_f, Mk_f, Gc_f, hist
             if constant_gc_mode:
                 return _run_constant_gc_scan_tfl(
                     Nk_jax, Mk_jax, Gc_jax, xk_jax,
@@ -419,6 +580,18 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
 
         # --- PPM ---
         def _run_ppm():
+            if mode == 'combined':
+                if constant_gc_mode:
+                    return _run_constant_gc_combined_scan_ppm(
+                        Nk_jax, Mk_jax, Gc_jax, xk_jax,
+                        temp, pres, boxvol, rh, alpha, dt, nsteps)
+                Nk_f, Mk_f, Gc_f, N_hist = run_combined_scan_ppm(
+                    Nk_jax, Mk_jax, Gc_jax, xk_jax,
+                    temp, pres, boxvol, rh, alpha, dt, nsteps, prod_rate)
+                hist = jnp.stack([N_hist,
+                                  jnp.zeros_like(N_hist),
+                                  jnp.zeros_like(N_hist)], axis=1)
+                return Nk_f, Mk_f, Gc_f, hist
             if constant_gc_mode:
                 return _run_constant_gc_scan_ppm(
                     Nk_jax, Mk_jax, Gc_jax, xk_jax,
@@ -458,17 +631,27 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
 
     # --- Summary table ---
     print("\n=== Summary ===")
-    hdr = (f"{'Config':<22s} {'TFL time':>9s} {'TFL N_tot':>12s} {'TFL M_aer':>12s}"
-           f" {'TFL M_cons':>10s} {'PPM N_tot':>12s} {'PPM M_aer':>12s}"
-           f" {'PPM M_cons':>10s}")
+    has_ppm = 'ppm_N_tot' in results[sorted(results.keys())[0]]
+    if has_ppm:
+        hdr = (f"{'Config':<22s} {'TFL time':>9s} {'TFL N_tot':>12s} {'TFL M_aer':>12s}"
+               f" {'TFL M_cons':>10s} {'PPM N_tot':>12s} {'PPM M_aer':>12s}"
+               f" {'PPM M_cons':>10s}")
+    else:
+        method_lbl = 'Coag' if mode == 'coag_only' else 'TFL'
+        hdr = (f"{'Config':<22s} {'Time':>9s} {method_lbl+' N_tot':>12s} "
+               f"{method_lbl+' M_aer':>12s} {method_lbl+' M_cons':>10s}")
     print(hdr)
     print("-" * len(hdr))
     for nbins_key in sorted(results.keys()):
         r = results[nbins_key]
-        print(f"{r['label']:<22s} {r['tfl_time']:>8.2f}s {r['tfl_N_tot']:>12.4e} "
-              f"{r['tfl_M_dry']:>12.4e} {r['tfl_mass_err']:>10.2e} "
-              f"{r['ppm_N_tot']:>12.4e} {r['ppm_M_dry']:>12.4e} "
-              f"{r['ppm_mass_err']:>10.2e}")
+        if has_ppm:
+            print(f"{r['label']:<22s} {r['tfl_time']:>8.2f}s {r['tfl_N_tot']:>12.4e} "
+                  f"{r['tfl_M_dry']:>12.4e} {r['tfl_mass_err']:>10.2e} "
+                  f"{r['ppm_N_tot']:>12.4e} {r['ppm_M_dry']:>12.4e} "
+                  f"{r['ppm_mass_err']:>10.2e}")
+        else:
+            print(f"{r['label']:<22s} {r['tfl_time']:>8.2f}s {r['tfl_N_tot']:>12.4e} "
+                  f"{r['tfl_M_dry']:>12.4e} {r['tfl_mass_err']:>10.2e}")
 
     # Mass in μg/m³ (boxvol = 1e6 cm³ = 1 m³, so kg/cell = kg/m³; × 1e9 = μg/m³)
     KG_TO_UG = 1.0e9
@@ -485,16 +668,20 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
         print(f"    TFL final: aerosol={r['tfl_M_dry']*KG_TO_UG:.4f}, "
               f"gas={r['tfl_M_gas']*KG_TO_UG:.6f}, "
               f"total={r['tfl_M_total']*KG_TO_UG:.4f} μg/m³")
-        print(f"    PPM final: aerosol={r['ppm_M_dry']*KG_TO_UG:.4f}, "
-              f"gas={r['ppm_M_gas']*KG_TO_UG:.6f}, "
-              f"total={r['ppm_M_total']*KG_TO_UG:.4f} μg/m³")
+        if has_ppm:
+            print(f"    PPM final: aerosol={r['ppm_M_dry']*KG_TO_UG:.4f}, "
+                  f"gas={r['ppm_M_gas']*KG_TO_UG:.6f}, "
+                  f"total={r['ppm_M_total']*KG_TO_UG:.4f} μg/m³")
 
     if depletion_mode:
         print(f"\n  Initial total mass (gas+aerosol): {results[sorted(results.keys())[0]]['M_total_init']:.6e} kg")
         for nbins_key in sorted(results.keys()):
             r = results[nbins_key]
-            print(f"  {r['label']}: TFL gas_left={r['tfl_M_gas']:.4e}  "
-                  f"PPM gas_left={r['ppm_M_gas']:.4e}")
+            if has_ppm:
+                print(f"  {r['label']}: TFL gas_left={r['tfl_M_gas']:.4e}  "
+                      f"PPM gas_left={r['ppm_M_gas']:.4e}")
+            else:
+                print(f"  {r['label']}: gas_left={r['tfl_M_gas']:.4e}")
 
     # Store metadata for plots
     meta = {
@@ -508,6 +695,7 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
         'h2so4_molec_cm3': h2so4_molec_cm3 if (depletion_mode or constant_gc_mode) else None,
         'depletion_mode': depletion_mode,
         'constant_gc_mode': constant_gc_mode,
+        'mode': mode,
         'dt': use_dt,
         'nsteps': nsteps,
         'M_aer_init_ug': M_aer_init_ug,
@@ -519,19 +707,26 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     # Load Fortran results if requested
     fortran_data = None
     if include_fortran:
-        print(f"\n--- Loading Fortran TFL results (36 bins, standard grid) ---")
-        fortran_data = load_fortran_results(use_dt)
+        fortran_label = "Fortran Coag+Cond" if mode == 'combined' else "Fortran TFL"
+        print(f"\n--- Loading {fortran_label} results (36 bins, standard grid) ---")
+        fortran_data = load_fortran_results(use_dt, mode=mode)
         if fortran_data is not None:
             f_Nk = fortran_data['Nk']
             f_Mk = fortran_data['Mk']
             f_M_dry = float(np.sum(f_Mk[:, :SRTH2O]))
-            print(f"  Fortran N_tot={np.sum(f_Nk):.4e}  "
+            print(f"  {fortran_label} N_tot={np.sum(f_Nk):.4e}  "
                   f"M_dry={f_M_dry:.4e}  ({f_M_dry*KG_TO_UG:.4f} μg/m³)")
 
     # Build unique filename tag from simulation parameters
     file_tag = _build_file_tag(meta, n_total_override, gmd_override,
                                gsd_override, dt_override,
                                temp_override, pres_override)
+    if xk0_dp_nm is not None:
+        file_tag = file_tag + f'_xk0-{xk0_dp_nm:g}nm'
+    if mode == 'combined':
+        file_tag = file_tag + '_combined'
+    elif mode == 'coag_only':
+        file_tag = file_tag + '_coag'
 
     # --- Plots ---
     if make_plots:
@@ -561,6 +756,15 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     tag = scenario_id_or_label              # for filenames (e.g., S01_N1e4)
     display_tag = tag.replace("_", " ")     # for plot titles (e.g., S01 N1e4)
     sorted_keys = sorted(results.keys())
+    is_combined = meta is not None and meta.get('mode') == 'combined'
+    is_coag_only = meta is not None and meta.get('mode') == 'coag_only'
+    if is_combined:
+        process_label = 'Coag+Cond'
+    elif is_coag_only:
+        process_label = 'Coagulation'
+    else:
+        process_label = 'Condensation'
+    fortran_legend = 'Fortran Coag+Cond' if is_combined else 'Fortran TFL'
 
     # Build info string for plot annotations
     KG_TO_UG = 1.0e9
@@ -570,8 +774,10 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
                  f"GMD = {meta['GMD_um']:.3f} μm, GSD = {meta['GSD']:.2f}")
 
         # Line 2: Environment + simulation setup
+        mode_info = f"  |  Mode: {process_label}"
         line2 = (f"Environment: T = {meta['temp']:.0f} K, "
-                 f"P = {meta['pres']:.0f} Pa, RH = {meta['RH']:.0%}")
+                 f"P = {meta['pres']:.0f} Pa, RH = {meta['RH']:.0%}"
+                 f"{mode_info}")
 
         # Line 3: Gas + simulation timing
         if meta.get('constant_gc_mode'):
@@ -594,10 +800,16 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
         for nbins_key in sorted_keys:
             r = results[nbins_key]
             tfl_m = r['tfl_M_dry'] * KG_TO_UG
-            ppm_m = r['ppm_M_dry'] * KG_TO_UG
-            mass_lines.append(
-                f"  {r['label']:<20s}  TFL = {tfl_m:.4f},  PPM = {ppm_m:.4f}"
-            )
+            if 'ppm_M_dry' in r:
+                ppm_m = r['ppm_M_dry'] * KG_TO_UG
+                mass_lines.append(
+                    f"  {r['label']:<20s}  TFL = {tfl_m:.4f},  PPM = {ppm_m:.4f}"
+                )
+            else:
+                method_lbl = 'Coag' if is_coag_only else 'TFL'
+                mass_lines.append(
+                    f"  {r['label']:<20s}  {method_lbl} = {tfl_m:.4f}"
+                )
 
         info_text = "\n".join([line1, line2, line3, line4] + mass_lines)
     else:
@@ -619,11 +831,14 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     # Muted, high-contrast palette — distinguishable in print & on screen
     _PALETTE = {
         36:  '#1A1A2E',   # near-black (anchor)
+        40:  '#1A1A2E',   # near-black (anchor, +4 variant)
         72:  '#C44E52',   # muted red
+        80:  '#C44E52',   # muted red (+4 variant)
         144: '#4C72B0',   # steel blue
+        160: '#4C72B0',   # steel blue (+4 variant)
         108: '#8172B2',   # muted purple
     }
-    _LW = {36: 2.2, 72: 1.8, 144: 1.5, 108: 1.5}
+    _LW = {36: 2.2, 40: 2.2, 72: 1.8, 80: 1.8, 144: 1.5, 160: 1.5, 108: 1.5}
 
     def _color(nbins_key):
         return _PALETTE.get(nbins_key, '#555555')
@@ -689,17 +904,24 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
                                edgecolor='#E0E0E0', linewidth=0.5))
 
     # =====================================================================
-    # Figure 1: Size distributions — 1x3 (Initial, Final TFL, Final PPM)
+    # Figure 1: Size distributions
     # =====================================================================
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5), facecolor=_BG,
+    if is_coag_only:
+        fig1_panels = [('Initial', 'Nk_init'), ('After 24 h', 'tfl_Nk')]
+    else:
+        fig1_panels = [('Initial', 'Nk_init'),
+                       ('After 24 h — TFL', 'tfl_Nk'),
+                       ('After 24 h — PPM', 'ppm_Nk')]
+    n_fig1 = len(fig1_panels)
+    fig, axes = plt.subplots(1, n_fig1, figsize=(6 * n_fig1, 5), facecolor=_BG,
                              sharey=True)
-    fig.suptitle(f'Size Distribution Convergence  /  {display_tag}',
+    if n_fig1 == 1:
+        axes = [axes]
+    fig.suptitle(f'Size Distribution Convergence ({process_label})  /  {display_tag}',
                  fontsize=13, color=_TEXT, fontweight='bold',
                  x=0.02, ha='left', y=0.98)
 
-    for panel_idx, (ax, panel_title, nk_key) in enumerate(zip(
-            axes, ['Initial', 'After 24 h — TFL', 'After 24 h — PPM'],
-            ['Nk_init', 'tfl_Nk', 'ppm_Nk'])):
+    for panel_idx, (ax, (panel_title, nk_key)) in enumerate(zip(axes, fig1_panels)):
         for nbins_key in sorted_keys:
             r = results[nbins_key]
             if nk_key not in r:
@@ -712,7 +934,7 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             Dp_f, dN_f = compute_dNdlogDp(fortran_data['Nk'],
                                            fortran_data['xk'])
             ax.plot(Dp_f, dN_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
-                    ls=_FORTRAN_LS, label='Fortran TFL')
+                    ls=_FORTRAN_LS, label=fortran_legend)
         _nyt_ax(ax, xlabel='Diameter [nm]',
                 ylabel='dN/dlog Dp  [cm$^{-3}$]' if panel_idx == 0 else '',
                 title=panel_title)
@@ -730,17 +952,23 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     print(f"\nSaved: {path1}")
 
     # =====================================================================
-    # Figure 2: Zoomed — 1x2 (TFL left, PPM right), shared y-axis
+    # Figure 2: Zoomed comparison
     # =====================================================================
     xlim = _get_xlim_from_ppm(results, sorted_keys)
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.5), facecolor=_BG,
+    if is_coag_only:
+        fig2_panels = [('After 24 h', 'tfl_Nk')]
+    else:
+        fig2_panels = [('TFL', 'tfl_Nk'), ('PPM', 'ppm_Nk')]
+    n_fig2 = len(fig2_panels)
+    fig, axes = plt.subplots(1, n_fig2, figsize=(7 * n_fig2, 5.5), facecolor=_BG,
                              sharey=True)
-    fig.suptitle(f'Zoomed Comparison  /  {display_tag}',
+    if n_fig2 == 1:
+        axes = [axes]
+    fig.suptitle(f'Zoomed Comparison ({process_label})  /  {display_tag}',
                  fontsize=13, color=_TEXT, fontweight='bold',
                  x=0.02, ha='left', y=0.98)
 
-    for panel_idx, (ax, panel_title, nk_key) in enumerate(zip(
-            axes, ['TFL', 'PPM'], ['tfl_Nk', 'ppm_Nk'])):
+    for panel_idx, (ax, (panel_title, nk_key)) in enumerate(zip(axes, fig2_panels)):
         for nbins_key in sorted_keys:
             r = results[nbins_key]
             if nk_key not in r:
@@ -752,7 +980,7 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             Dp_f, dN_f = compute_dNdlogDp(fortran_data['Nk'],
                                            fortran_data['xk'])
             ax.plot(Dp_f, dN_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
-                    ls=_FORTRAN_LS, label='Fortran TFL')
+                    ls=_FORTRAN_LS, label=fortran_legend)
         _nyt_ax(ax, xlabel='Diameter [nm]',
                 ylabel='dN/dlog Dp  [cm$^{-3}$]' if panel_idx == 0 else '',
                 title=panel_title)
@@ -838,17 +1066,24 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     ppm_times = [results[n].get('ppm_time', 0) for n in nbins_list]
 
     y = np.arange(len(labels_list))
-    h = 0.35
-    ax.barh(y + h / 2, tfl_times, h, color=_TFL_C, alpha=0.85, label='TFL')
-    ax.barh(y - h / 2, ppm_times, h, color=_PPM_C, alpha=0.85, label='PPM')
-
-    for i, t in enumerate(tfl_times):
-        ax.text(t + 0.08, y[i] + h / 2, f'{t:.2f}s',
-                va='center', ha='left', fontsize=8.5, color=_TEXT)
-    for i, t in enumerate(ppm_times):
-        if t > 0:
-            ax.text(t + 0.08, y[i] - h / 2, f'{t:.2f}s',
+    if is_coag_only:
+        h = 0.5
+        bar_label = 'Coag (Euler)'
+        ax.barh(y, tfl_times, h, color=_TFL_C, alpha=0.85, label=bar_label)
+        for i, t in enumerate(tfl_times):
+            ax.text(t + 0.08, y[i], f'{t:.2f}s',
                     va='center', ha='left', fontsize=8.5, color=_TEXT)
+    else:
+        h = 0.35
+        ax.barh(y + h / 2, tfl_times, h, color=_TFL_C, alpha=0.85, label='TFL')
+        ax.barh(y - h / 2, ppm_times, h, color=_PPM_C, alpha=0.85, label='PPM')
+        for i, t in enumerate(tfl_times):
+            ax.text(t + 0.08, y[i] + h / 2, f'{t:.2f}s',
+                    va='center', ha='left', fontsize=8.5, color=_TEXT)
+        for i, t in enumerate(ppm_times):
+            if t > 0:
+                ax.text(t + 0.08, y[i] - h / 2, f'{t:.2f}s',
+                        va='center', ha='left', fontsize=8.5, color=_TEXT)
 
     ax.set_yticks(y)
     ax.set_yticklabels(labels_list, fontsize=10)
@@ -866,17 +1101,24 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     print(f"Saved: {path4}")
 
     # =====================================================================
-    # Figure 5: Mass distribution — 1x3 (Initial, TFL, PPM), shared y
+    # Figure 5: Mass distribution
     # =====================================================================
-    fig, axes = plt.subplots(1, 3, figsize=(17, 5), facecolor=_BG,
+    if is_coag_only:
+        fig5_panels = [('Initial', 'Mk_init'), ('After 24 h', 'tfl_Mk')]
+    else:
+        fig5_panels = [('Initial', 'Mk_init'),
+                       ('After 24 h — TFL', 'tfl_Mk'),
+                       ('After 24 h — PPM', 'ppm_Mk')]
+    n_fig5 = len(fig5_panels)
+    fig, axes = plt.subplots(1, n_fig5, figsize=(6 * n_fig5, 5), facecolor=_BG,
                              sharey=True)
-    fig.suptitle(f'Mass Distribution Convergence  /  {display_tag}',
+    if n_fig5 == 1:
+        axes = [axes]
+    fig.suptitle(f'Mass Distribution Convergence ({process_label})  /  {display_tag}',
                  fontsize=13, color=_TEXT, fontweight='bold',
                  x=0.02, ha='left', y=0.98)
 
-    for panel_idx, (ax, panel_title, mk_key) in enumerate(zip(
-            axes, ['Initial', 'After 24 h — TFL', 'After 24 h — PPM'],
-            ['Mk_init', 'tfl_Mk', 'ppm_Mk'])):
+    for panel_idx, (ax, (panel_title, mk_key)) in enumerate(zip(axes, fig5_panels)):
         for nbins_key in sorted_keys:
             r = results[nbins_key]
             if mk_key not in r:
@@ -888,7 +1130,7 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             Dp_f, dM_f = compute_dMdlogDp(fortran_data['Mk'],
                                            fortran_data['xk'])
             ax.plot(Dp_f, dM_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
-                    ls=_FORTRAN_LS, label='Fortran TFL')
+                    ls=_FORTRAN_LS, label=fortran_legend)
         _nyt_ax(ax, xlabel='Diameter [nm]',
                 ylabel='dM/dlog Dp  [$\\mu$g m$^{-3}$]' if panel_idx == 0 else '',
                 title=panel_title)
@@ -917,13 +1159,15 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             r = results[nbins_key]
             handles.append(Line2D([0], [0], color=_color(nbins_key),
                                   lw=1.8, label=r['label']))
-        # Style indicators
-        handles.append(Line2D([0], [0], color='#888888', lw=1.5,
-                              ls='-', label='TFL (solid)'))
-        handles.append(Line2D([0], [0], color='#888888', lw=1.5,
-                              ls='--', label='PPM (dashed)'))
+        # Style indicators — only show TFL/PPM distinction when both present
+        if not is_coag_only:
+            handles.append(Line2D([0], [0], color='#888888', lw=1.5,
+                                  ls='-', label='TFL (solid)'))
+            handles.append(Line2D([0], [0], color='#888888', lw=1.5,
+                                  ls='--', label='PPM (dashed)'))
         fig.legend(handles=handles, loc='upper right',
-                   bbox_to_anchor=(0.98, 0.97), ncol=len(sorted_keys) + 2,
+                   bbox_to_anchor=(0.98, 0.97),
+                   ncol=len(sorted_keys) + (0 if is_coag_only else 2),
                    fontsize=8, frameon=False, labelcolor=_TEXT)
 
     def _plot_timeseries_panel(ax, results, sorted_keys, t_hours,
@@ -933,6 +1177,8 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             r = results[nbins_key]
             c = _color(nbins_key)
             for method, ls_val in [('tfl', '-'), ('ppm', '--')]:
+                if f'{method}_hist' not in r:
+                    continue
                 h = r[f'{method}_hist']
                 if col_idx is not None:
                     y = h[:, col_idx]
@@ -1005,6 +1251,8 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             r = results[nbins_key]
             c = _color(nbins_key)
             for method, ls_val in [('tfl', '-'), ('ppm', '--')]:
+                if f'{method}_hist' not in r:
+                    continue
                 h = r[f'{method}_hist']
                 safe_N = np.maximum(h[:, 0], 1e-30)
                 Dp_mean = 1e9 * ((6.0 * h[:, 1])
@@ -1020,6 +1268,8 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
             c = _color(nbins_key)
             M_init_k = r['M_total_init']
             for method, ls_val in [('tfl', '-'), ('ppm', '--')]:
+                if f'{method}_hist' not in r:
+                    continue
                 h = r[f'{method}_hist']
                 M_total_t = h[:, 1] + h[:, 2]
                 if meta.get('depletion_mode'):
@@ -1069,10 +1319,17 @@ def main():
                         help='Override pressure [Pa] (default: use scenario value)')
     parser.add_argument('--standard-grid', action='store_true',
                         help='Use standard TOMAS grid (~3.2nm) instead of 1.7nm')
+    parser.add_argument('--xk0-dp', type=float, default=None,
+                        help='First bin edge diameter [nm] (overrides --standard-grid)')
     parser.add_argument('--fortran', action='store_true',
                         help='Load and overlay Fortran TFL results (36 bins)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip plot generation')
+    parser.add_argument('--mode', choices=['cond_only', 'combined', 'coag_only'],
+                        default='cond_only',
+                        help='Mode: cond_only (default), combined (coag+cond), or coag_only')
+    parser.add_argument('--extra-bins', type=int, default=0,
+                        help='Extra bins per resolution (e.g., 4 → 40/80/160 for 1nm start)')
     args = parser.parse_args()
 
     run_convergence(
@@ -1089,6 +1346,9 @@ def main():
         pres_override=args.pres,
         standard_grid=args.standard_grid,
         include_fortran=args.fortran,
+        mode=args.mode,
+        xk0_dp_nm=args.xk0_dp,
+        extra_bins=args.extra_bins,
     )
 
 

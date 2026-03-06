@@ -4,6 +4,46 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-05 (Wed) — Add Coag+Cond Combined Mode to Convergence Benchmark
+
+**Time**: ~12:00 PST
+
+### Summary
+
+Extended the convergence benchmark to support combined coagulation+condensation at multiple resolutions (36/72/144 bins). Added `--mode combined` CLI flag to `convergence_test.py` and updated the Fortran harness with a `do_coag` toggle.
+
+### Changes
+
+1. **`benchmarks/python/convergence_test.py`**:
+   - Added `--mode {cond_only,combined}` CLI argument (default: cond_only)
+   - Imported `run_combined_scan_tfl`, `run_combined_scan_ppm`, `combined_step_tfl_jax`, `combined_step_ppm_jax` from `solvers/condensation.py`
+   - Added `_run_constant_gc_combined_scan_tfl()` and `_run_constant_gc_combined_scan_ppm()` for constant-gas mode with coagulation
+   - Mode branching in `_run_tfl()` and `_run_ppm()` inner functions
+   - Plot titles include process label ("Coag+Cond" vs "Condensation")
+   - Fortran overlay labels update to "Fortran Coag+Cond" in combined mode
+   - Output filenames get `_combined` suffix in combined mode
+   - `load_fortran_results()` accepts `mode` parameter for mode-dependent filenames
+
+2. **`tomas_fortran/harness/benchmark_constgc.f`**:
+   - Added `do_coag` logical parameter (set to `.true.` for combined mode)
+   - Calls `multicoag(dt)` + `mnfix(Nk, Mk)` before condensation when `do_coag=.true.`
+   - Output filenames use `constgc_combined_` prefix when `do_coag=.true.`
+
+### Results
+
+- Combined mode (dt=60s): Coagulation reduces N by ~10% (1.0e9 → 9.0e8) over 24h
+- JAX TFL 36-bin vs Fortran 36-bin: N agreement ~0.2%
+- PPM converges well across resolutions: N varies <0.1% from 72→144 bins
+- Fortran combined: 0.28s, JAX TFL combined: 1.32s, JAX PPM combined: 1.05s (36 bins)
+- Backward compatibility: `--mode cond_only` produces identical results to before
+
+### Output
+
+- 7 plots per mode in `benchmarks/results/convergence/` (with `_combined` suffix)
+- Fortran output in `tomas_fortran/output/constgc/` (constgc_combined_* and constgc_* files)
+
+---
+
 ## 2026-03-03 (Mon) — Configurable NBINS + TFL vs PPM Convergence Test
 
 **Time**: ~15:00 PST

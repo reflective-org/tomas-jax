@@ -1,18 +1,21 @@
 C     **************************************************
-C     *  Constant-Gas Condensation Benchmark            *
+C     *  Constant-Gas Condensation/Combined Benchmark  *
 C     **************************************************
 C
-C     Runs condensation-only with constant H2SO4 gas for 24 hours.
+C     Runs condensation-only or coag+cond with constant H2SO4 gas for 24h.
 C     Tests multiple timestep values (20, 30, 60 seconds).
-C     Uses 1.7nm starting grid for compatibility with JAX convergence test.
+C     Uses standard TOMAS grid for compatibility with JAX convergence test.
 C
 C     Parameters are hardcoded (not read from CSV):
 C       N=1000 #/cm3, GMD=0.02 um, GSD=1.6
-C       T=293.15 K, P=101325 Pa, RH=0.30
+C       T=298 K, P=101325 Pa, RH=0.30
 C       H2SO4 = 1e7 molec/cm3 (held constant)
 C
 C     Output: CSV files in output/constgc/ directory
-C       constgc_dt{20|30|60}_final_{Nk|Mk}.csv
+C       constgc_dt{20|30|60}_final_{Nk|Mk}.csv          (cond-only)
+C       constgc_combined_dt{20|30|60}_final_{Nk|Mk}.csv (combined)
+C
+C     Set do_coag = .true. to enable coagulation before condensation.
 
       PROGRAM benchmark_constgc
 
@@ -62,16 +65,29 @@ C     Working variables
       double precision Nkf(ibins), Mkf(ibins,icomp)
       double precision Gc_init
 
+C     Coagulation toggle
+      logical do_coag
+      parameter(do_coag=.true.)
+
 C     Timing
       double precision t_start, t_end
 
       character*200 fname
+      character*20 prefix
 
 C-----INITIALIZATION---------------------------------------------------
 
-      write(*,*) '========================================'
-      write(*,*) 'Constant-Gas Condensation Benchmark'
-      write(*,*) '========================================'
+      if (do_coag) then
+         write(*,*) '========================================'
+         write(*,*) 'Constant-Gas Coag+Cond Benchmark'
+         write(*,*) '========================================'
+         prefix = 'constgc_combined'
+      else
+         write(*,*) '========================================'
+         write(*,*) 'Constant-Gas Condensation Benchmark'
+         write(*,*) '========================================'
+         prefix = 'constgc'
+      endif
 
 C     Compute H2SO4 in kg/cell
       h2so4_kg = 1.0d7 * BOXVOL_VAL * (MW_H2SO4/1000.0d0) / AVOGADRO
@@ -80,6 +96,7 @@ C     Standard TOMAS grid: Mo = 1e-21 * 2^(-6) = 1.5625e-23
       XK0_17NM = 1.0d-21 * 2.0d0**(-6)
       write(*,'(A,E12.4,A)') '  XK0 = ', XK0_17NM, ' kg (standard)'
       write(*,'(A,E12.4,A)') '  H2SO4 = ', h2so4_kg, ' kg/cell'
+      write(*,'(A,L1)') '  Coagulation: ', do_coag
       write(*,*) ''
 
 C-----LOOP OVER DT VALUES---------------------------------------------
@@ -152,6 +169,12 @@ C-----TIME LOOP (constant gas)----------------------------------------
 C           Reset gas to constant value
             Gc(srtso4) = Gc_init
 
+C           Coagulation (before condensation, matching JAX operator split)
+            if (do_coag) then
+               call multicoag(dt)
+               call mnfix(Nk, Mk)
+            endif
+
 C           Condensation sink
             call getCondSink(Nk, Mk, srtso4, CS, sinkfrac)
 
@@ -191,8 +214,9 @@ C           Equilibria + MNFIX
 C-----WRITE OUTPUT-----------------------------------------------------
 
 C        Write final Nk
-         write(fname,'(A,I2.2,A)')
-     &        'output/constgc/constgc_dt',nint(dt),'_final_Nk.csv'
+         write(fname,'(A,A,A,I2.2,A)')
+     &        'output/constgc/',trim(prefix),'_dt',nint(dt),
+     &        '_final_Nk.csv'
          open(unit=10, file=fname, status='replace')
          do k=1,ibins
             write(10,'(E25.16)') Nk(k)
@@ -201,8 +225,9 @@ C        Write final Nk
          write(*,'(A,A)') '  Wrote: ', trim(fname)
 
 C        Write final Mk
-         write(fname,'(A,I2.2,A)')
-     &        'output/constgc/constgc_dt',nint(dt),'_final_Mk.csv'
+         write(fname,'(A,A,A,I2.2,A)')
+     &        'output/constgc/',trim(prefix),'_dt',nint(dt),
+     &        '_final_Mk.csv'
          open(unit=10, file=fname, status='replace')
          do k=1,ibins
             do j=1,icomp
@@ -231,7 +256,7 @@ C        Write xk boundaries (for verification)
       enddo  ! idt
 
       write(*,*) '========================================'
-      write(*,*) 'Constant-gas benchmark complete!'
+      write(*,*) 'Benchmark complete!'
       write(*,*) 'Output in output/constgc/'
       write(*,*) '========================================'
 
