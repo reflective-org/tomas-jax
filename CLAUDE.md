@@ -28,7 +28,8 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **Coagulation has two solvers:** `diffrax_step` (Tsit5 adaptive ODE, rtol=1e-4, atol=1e-10, for standalone coagulation) and `coag_euler_step` (forward Euler + MNFIX, for scan-fused loops). The forward Euler solver is more stable for high-N scenarios — higher-order methods amplify N^2 coagulation rates. Legacy alias `coag_rk4_step` still works. The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
 - **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). Both TFL_JIT and PPM_JIT are fast paths. PPM_JIT uses analytical mass-weighted fluxes for exact conservation and is ~1.8x faster than TFL_JIT for condensation-only. TFL matches Fortran output exactly. Use `run_condensation_scan_tfl()` or `run_condensation_scan()` for scan-fused time loops.
 - **Nucleation is JIT-compiled** with two parameterizations: Riccobono 2014 (organic, `ricco_nucleation_rate`) and Dunne 2016 (inorganic, 4 mechanisms, `dunne_nucleation_rate`). Enable/disable via float masks (0.0/1.0) to avoid recompilation. Nucleated clusters go to bin 0 (90% SO4, 10% organic). Gas depletion: SO4 mass subtracted directly from Gc (no 98/96 MW correction). Organic mass is clamped proportionally when gas is exhausted (diverges from Fortran, but necessary for JAX coagulation stability).
-- **Operator splitting:** Each timestep runs: (1) H2SO4 production, (2) nucleation, (3) coagulation (JIT), (4) condensation independently.
+- **Operator splitting:** Each timestep runs: (1) H2SO4 production, (2) nucleation, (3) coagulation (JIT), (4) condensation independently. Use `make_step(['nucleation', 'coagulation', 'condensation'], cond_method='ppm_jit')` for composable process ordering.
+- **Condensation orchestrator uses layered cores:** `_condensation_step_core(ezcond_fn)` is the single implementation for PPM/TFL; `_combined_step_core()` adds coag; `_full_step_core()` adds nucl+coag; `_run_scan()` is the single scan loop. All public functions are thin wrappers.
 - **MNFIX multi-bin shift:** Uses analytical log2 computation to find target bin for large mass shifts (e.g., nucleated particles jumping 12+ bins). Formula: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
 - **Scan-fused modes:** `run_condensation_scan_tfl()` (cond-only), `run_nucleation_condensation_scan()` (nucl+cond), `run_full_scan()` (nucl+coag+cond). All compile into single XLA programs for zero Python dispatch overhead.
 
@@ -51,7 +52,7 @@ tomas_jax/
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
   physics/nucleation.py       — Nucleation: Riccobono 2014 + Dunne 2016 (JIT-compilable)
   solvers/diffrax.py          — Coagulation solvers: Tsit5 adaptive (diffrax_step), forward Euler (coag_euler_step)
-  solvers/condensation.py     — Condensation driver + nucleation+condensation + full (nucl+coag+cond) scan-fused loops
+  solvers/condensation.py     — Process orchestrator: core helpers + thin wrappers + make_step() composable API + scan-fused loops
 
 benchmarks/
   fortran/benchmark_24h.f     — Fortran 24h benchmark harness
@@ -86,6 +87,7 @@ docs/
   ppm_condensation.md         — PPM algorithm documentation
   24h_benchmark.md            — 24h benchmark suite documentation
   nucleation.md               — Nucleation algorithm documentation
+  future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```
 
 ## Species Indices (0-based)

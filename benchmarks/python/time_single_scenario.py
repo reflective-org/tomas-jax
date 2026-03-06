@@ -155,7 +155,7 @@ def main():
     enable_org = jnp.float64(1.0)
     enable_inorg = jnp.float64(1.0)
     fn_scale = jnp.float64(1.0)
-    use_tfl = jnp.float64(1.0)
+    use_tfl = 1.0
 
     results = {}
 

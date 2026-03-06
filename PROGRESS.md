@@ -4,6 +4,41 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-05 (Wed) — Modular Process Orchestrator for condensation.py
+
+**Time**: ~16:00 PST
+
+### Summary
+
+Refactored `tomas_jax/solvers/condensation.py` from 769 lines of duplicated code to ~430 lines using layered core helpers + thin wrappers. Added `make_step()` composable API for easy process reordering.
+
+### Changes
+
+1. **`tomas_jax/solvers/condensation.py`** (primary — 769 → ~430 lines):
+   - Added `_condensation_step_core(ezcond_fn)` — single implementation for both PPM and TFL JIT paths
+   - Added `_combined_step_core()` — coag + cond parameterized by ezcond_fn
+   - Added `_full_step_core()` — nucl + coag + cond parameterized by ezcond_fn
+   - Added `_run_scan()` — single scan implementation replacing 6 copy-pasted loops
+   - Added `make_step(processes, cond_method)` — public composable API
+   - Fixed `condensation_step_with_nucleation_jax` — was running BOTH TFL and PPM then selecting via `jnp.where`; now uses Python-level dispatch (no double compute)
+   - All 15+ existing function names preserved as thin wrappers for backward compatibility
+
+2. **`benchmarks/python/run_24h_scenarios.py`**: Changed `use_tfl=jnp.asarray(val)` → `use_tfl=val` (Python float for static dispatch)
+
+3. **`benchmarks/python/time_single_scenario.py`**: Changed `use_tfl=jnp.float64(1.0)` → `use_tfl=1.0`
+
+4. **`run_box_model.py`**: Added `--make-step` flag to demo `make_step()` composable API
+
+### Verification
+- All 28 condensation tests pass (TFL JIT + PPM JIT)
+- All 24 nucleation tests pass
+- `make_step()` import and creation verified
+
+### Known Issues
+- `use_tfl` parameter is now Python float (not JAX array) — minor breaking change for callers that pass `jnp.asarray()`. All in-repo callers updated.
+
+---
+
 ## 2026-03-05 (Wed) — Add Coag+Cond Combined Mode to Convergence Benchmark
 
 **Time**: ~12:00 PST

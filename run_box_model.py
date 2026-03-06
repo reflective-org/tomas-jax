@@ -27,7 +27,7 @@ from tomas_jax.core.config import (
 
 from tomas_jax.core.state import TomasState
 from tomas_jax.solvers.diffrax import diffrax_step
-from tomas_jax.solvers.condensation import condensation_step
+from tomas_jax.solvers.condensation import condensation_step, make_step
 from tomas_jax.physics.nucleation import nucleation_step
 from tomas_jax.utils import plotting
 from tomas_jax.utils.diagnostics import get_coagulation_rates
@@ -104,7 +104,7 @@ def molec_cm3_to_kg_gridcell(conc_molec_cm3: float, boxvol_cm3: float) -> float:
 # =========================================================================
 
 def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
-                   enable_nucleation: bool = True):
+                   enable_nucleation: bool = True, use_make_step: bool = False):
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
     print(f"   Bins: {NBINS}, Components: {ICOMP}")
@@ -165,17 +165,35 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     print(f"Initial Total Particles: {total_N_init:.4e}")
     print(f"Initial Aerosol Mass:    {jnp.sum(Mk):.4e} kg")
 
-    # --- D. Prepare Coagulation Solver ---
-    print("\n[System] JIT Compiling Coagulation Solver... (this happens once)")
+    # --- D. Prepare Solvers ---
+    if use_make_step:
+        processes = []
+        if enable_nucleation:
+            processes.append('nucleation')
+        processes.append('coagulation')
+        if enable_condensation:
+            processes.append('condensation')
+        step_fn = make_step(processes, cond_method=method)
+        step_fn_jit = jax.jit(step_fn)
+        print(f"\n[System] Using make_step({processes})")
+        # Warmup
+        _kw = dict(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion) if enable_nucleation else {}
+        _ = step_fn_jit(Nk, Mk, Gc, xk,
+                        jnp.float64(temp), jnp.float64(pres),
+                        jnp.float64(boxvol), jnp.float64(rh),
+                        jnp.float64(alpha), jnp.float64(0.01), **_kw)
+        print("[System] make_step JIT Compilation Complete.")
+    else:
+        print("\n[System] JIT Compiling Coagulation Solver... (this happens once)")
 
-    solver_jit = jax.jit(
-        diffrax_step,
-        static_argnames=['icomp_nodiag']
-    )
+        solver_jit = jax.jit(
+            diffrax_step,
+            static_argnames=['icomp_nodiag']
+        )
 
-    # Trigger compilation
-    _ = solver_jit(Nk, Mk, xk, temp, pres, boxvol, 0.01, ICOMP_NODIAG)
-    print("[System] Compilation Complete.")
+        # Trigger compilation
+        _ = solver_jit(Nk, Mk, xk, temp, pres, boxvol, 0.01, ICOMP_NODIAG)
+        print("[System] Compilation Complete.")
 
     # --- E. Time Loop ---
     total_time = 3600.0 * 24   # 24 hour simulation
@@ -210,33 +228,45 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         # 1. Add H2SO4 production (constant source)
         Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + h2so4_prod_rate_kg_s * dt_model)
 
-        # 2. Nucleation (creates particles, depletes gas)
-        if enable_nucleation:
-            Nk, Mk, Gc = nucleation_step(
+        if use_make_step:
+            # Composable path: single step_fn handles all enabled processes
+            kw = {}
+            if enable_nucleation:
+                kw.update(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+            Nk, Mk, Gc = step_fn_jit(
                 Nk, Mk, Gc, xk,
                 jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
-                jnp.float64(dt_model),
-                org_conc, nh3_conc, fion,
-                enable_organic=1.0, enable_inorganic=1.0,
-                fn_scale=float(fn_scale),
+                jnp.float64(rh), jnp.float64(alpha), jnp.float64(dt_model),
+                **kw,
             )
+        else:
+            # 2. Nucleation (creates particles, depletes gas)
+            if enable_nucleation:
+                Nk, Mk, Gc = nucleation_step(
+                    Nk, Mk, Gc, xk,
+                    jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+                    jnp.float64(dt_model),
+                    org_conc, nh3_conc, fion,
+                    enable_organic=1.0, enable_inorganic=1.0,
+                    fn_scale=float(fn_scale),
+                )
 
-        # 3. Run Coagulation Step
-        Nk, Mk = solver_jit(
-            Nk, Mk, xk,
-            temp, pres, boxvol,
-            dt=dt_model,
-            icomp_nodiag=ICOMP_NODIAG
-        )
-
-        # 4. Run Condensation Step (operator split)
-        if enable_condensation:
-            Nk, Mk, Gc = condensation_step(
-                Nk, Mk, Gc, xk,
+            # 3. Run Coagulation Step
+            Nk, Mk = solver_jit(
+                Nk, Mk, xk,
                 temp, pres, boxvol,
-                rh, alpha, dt_model,
-                method=method
+                dt=dt_model,
+                icomp_nodiag=ICOMP_NODIAG
             )
+
+            # 4. Run Condensation Step (operator split)
+            if enable_condensation:
+                Nk, Mk, Gc = condensation_step(
+                    Nk, Mk, Gc, xk,
+                    temp, pres, boxvol,
+                    rh, alpha, dt_model,
+                    method=method
+                )
 
         # 5. DIAGNOSE: Calculate coagulation rates
         dNdt, dMdt = get_coagulation_rates(
@@ -348,9 +378,12 @@ if __name__ == "__main__":
                         help='Disable condensation')
     parser.add_argument('--no-nucleation', action='store_true',
                         help='Disable nucleation')
+    parser.add_argument('--make-step', action='store_true',
+                        help='Use make_step() composable API instead of manual operator splitting')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
         method=args.method,
         enable_nucleation=not args.no_nucleation,
+        use_make_step=args.make_step,
     )

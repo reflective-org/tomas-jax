@@ -212,7 +212,7 @@ def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
                 enable_organic=jnp.asarray(1.0),
                 enable_inorganic=jnp.asarray(1.0),
                 fn_scale=jnp.asarray(NUC_FN_SCALE),
-                use_tfl=jnp.asarray(use_tfl_val),
+                use_tfl=use_tfl_val,
             )
         if verbose:
             print("    JIT warmup (nucleation) complete")
@@ -280,7 +280,7 @@ def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
                 enable_organic=jnp.asarray(1.0),
                 enable_inorganic=jnp.asarray(1.0),
                 fn_scale=jnp.asarray(NUC_FN_SCALE),
-                use_tfl=jnp.asarray(use_tfl_val),
+                use_tfl=use_tfl_val,
             )
             Nk_hourly[ihour] = np.array(Nk_cur)
             Mk_hourly[ihour] = np.array(Mk_cur).flatten()
@@ -328,7 +328,7 @@ def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
                 enable_organic=jnp.asarray(1.0),
                 enable_inorganic=jnp.asarray(1.0),
                 fn_scale=jnp.asarray(NUC_FN_SCALE),
-                use_tfl=jnp.asarray(use_tfl_val),
+                use_tfl=use_tfl_val,
             )
             Nk_hourly[ihour] = np.array(Nk_cur)
             Mk_hourly[ihour] = np.array(Mk_cur).flatten()
