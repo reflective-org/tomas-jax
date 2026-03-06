@@ -4,6 +4,44 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-06 (Thu) — Code Review Fixes, PPM Threshold Bug Fix, Branch Merge
+
+**Time**: ~09:00 PST
+
+### Summary
+
+Applied code review fixes across 5 source files, identified and fixed a critical PPM condensation bug where `ezcond_ppm_jax` was falling through to `simple_add_path` instead of the PPM advection algorithm. Cleaned up 10 stale files. Merged `configurable-nbins` into `dev`.
+
+### Bug Fix: PPM Condensation Threshold
+
+**Root cause**: `ezcond_ppm_jax.py` line 131 had `mcond > tot_m * 1e-3` (should be `mcond > 0.0`). For scenarios where total particle mass was large relative to condensed mass, this threshold evaluated False, routing to `simple_add_path` (proportional mass distribution identical to TFL) instead of the actual PPM advection. Result: PPM produced TFL-identical jagged distributions instead of its own smooth, resolution-stable output.
+
+**Fix**: Reverted threshold to `mcond > 0.0` — any positive condensation triggers PPM advection.
+
+### Code Review Changes
+
+1. **`tomas_jax/physics/properties.py`**: Safe division fix (`jnp.maximum(Nk, 1e-20)` before division to prevent NaN in XLA select), removed dead `Kn2` variable, Horner form for denominator
+2. **`tomas_jax/core/config.py`**: Vectorized `make_grid()` — geometric progression via `jnp.power` instead of sequential loop
+3. **`tomas_jax/solvers/diffrax.py`**: Removed TomasState from ODE state (was polluting PID error norm), replaced `try/except TypeError` tracing trap with explicit `n_substeps: int` parameter
+4. **`tomas_jax/solvers/euler.py`**: Empty bin mask fix in adaptive dt — bins with `Nk < 1e-15` or `Mk < 1e-25` get `dt=inf` instead of near-zero dt (prevented death spiral)
+5. **`tomas_jax/physics/ezcond_ppm_jax.py`**: PPM threshold fix (see above)
+
+### Cleanup
+
+Deleted 10 orphaned files: `diffrax_original.py`, `tomas_jax/config.py`, `tomas_jax/plotting.py`, `tomas_jax/production_driver.py`, `main.py`, `diagnose_errors.py`, `diagnose_ppm_n_loss.py`, `run_sensitivity_analysis.py`, `run_temp_sensitivity.py`, `run_mode_dp_sensitivity.py`
+
+### Branch Merge
+
+Merged `configurable-nbins` into `dev`. Resolved add/add conflicts in Fortran source files and PROGRESS.md by taking `configurable-nbins` versions.
+
+### Verification
+
+- 28 condensation tests pass (TFL JIT + PPM JIT)
+- Convergence benchmark (constant Gc, H2SO4=1e7, N=1e4, GMD=0.02, GSD=1.6): PPM smooth and resolution-stable at 40/80 bins, TFL shows expected bin-doubling artifacts
+- PPM ≠ TFL confirmed numerically (PPM N=4.892e9 vs TFL N=4.757e9 at 40 bins combined)
+
+---
+
 ## 2026-03-05 (Wed) — Modular Process Orchestrator for condensation.py
 
 **Time**: ~16:00 PST

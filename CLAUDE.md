@@ -137,6 +137,8 @@ When modifying condensation code, verify:
 1. `dmdt_int`: grows with TAU>0, shrinks with TAU<0, unchanged at TAU=0
 2. H2SO4 diffusivity at 298K should be ~1.15e-5 m^2/s
 3. Mass conservation: aerosol gained = gas lost (check after ezcond correction)
+4. PPM ≠ TFL: PPM must produce different (smoother) distributions than TFL. If PPM=TFL, check `ezcond_ppm_jax.py` threshold (`mcond > 0.0` triggers PPM; `mcond > tot_m * 1e-3` is WRONG — causes fallthrough to simple_add_path)
+5. Convergence benchmark: `python -m benchmarks.python.convergence_test --constant-gc --h2so4 1e7 --n-total 1e4 --gmd 0.02 --gsd 1.6 --temp 298 --pres 101325 --mode cond_only` (PPM should be smooth and resolution-stable at 40/80 bins)
 4. Coagulation mass error should remain < 1e-13 relative
 
 ## Documentation Requirements
