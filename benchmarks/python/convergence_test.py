@@ -163,8 +163,9 @@ def dp_nm_to_xk0(dp_nm):
 # 40 bins (×2) covers the same mass range as 36 bins with 4 extra bins on top.
 # 80 bins (×√2) doubles the resolution while spanning the same range.
 BASE_GRID_CONFIGS = [
-    (40, 2.0,       "×2"),
-    (80, 2.0**0.5,  "×√2"),
+    (40, 2.0,         "×2"),
+    (80, 2.0**0.5,    "×√2"),
+    (160, 2.0**0.25,  "×2^¼"),
 ]
 
 
