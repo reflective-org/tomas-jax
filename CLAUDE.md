@@ -65,7 +65,8 @@ benchmarks/
   python/plot_all_modes.py    — 8 benchmark plots for all 5 modes (incl. nucleation)
   python/plot_24h_timing.py   — Timing comparison plots
   python/time_single_scenario.py — Clean single-scenario timing benchmark (all solver combos vs Fortran)
-  python/convergence_test.py  — Multi-resolution TFL vs PPM convergence (36/72/144 bins)
+  python/convergence_test.py  — Multi-resolution TFL vs PPM convergence (40/80 bins)
+  python/benchmark_nucleation_constgc.py — Nucleation full-mode benchmark (constant-gas + fixed-production)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -76,21 +77,11 @@ tomas_fortran/
   harness/benchmark_24h_ppm.f — 24h PPM benchmark driver
   harness/benchmark_harness.f     — Single-scenario benchmark driver
   harness/benchmark_nucleation.f  — Nucleation parameterization benchmark
+  harness/benchmark_constgc.f     — Constant-gas full-mode benchmark (nucl+coag+cond)
   src/ricco_nucl.f                — Riccobono 2014 nucleation (from TRACER_SOM-TOMAS)
   src/dunne_inorg_nucl.f          — Dunne 2016 inorganic nucleation
   src/nucleation_driver.f         — Nucleation driver for 24h harness
   Makefile                        — Self-contained build (no external paths)
-  README.md                   — Build instructions and file descriptions
-
-tomas_fortran/
-  src/                        — 14 core TOMAS Fortran source files (TFL condensation)
-  src_ppm/tmcond_ppm.f        — PPM condensation (8 subroutines, ported from JAX)
-  src_ppm/ezcond_ppm.f        — PPM-aware ezcond driver
-  include/sizecode.COM        — Common block definitions
-  harness/benchmark_24h.f     — 24h TFL benchmark driver
-  harness/benchmark_24h_ppm.f — 24h PPM benchmark driver
-  harness/benchmark_harness.f — Single-scenario benchmark driver
-  Makefile                    — Self-contained build (no external paths)
   README.md                   — Build instructions and file descriptions
 
 docs/

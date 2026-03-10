@@ -183,3 +183,47 @@ Files: `tomas_fortran/harness/benchmark_nucleation.f`, `benchmarks/python/compar
 - fig6: Per-scenario error bars (nucl_cond and full)
 - fig7: Error heatmap (scenario × hour)
 - fig8: Summary statistics table
+
+## Constant-Gas vs Fixed-Production Benchmark
+
+Dedicated full-mode benchmark comparing JAX PPM (40/80 bins) vs Fortran TFL (36 bins) over 24 hours with nucleation + coagulation + condensation.
+
+**Script:** `benchmarks/python/benchmark_nucleation_constgc.py`
+**Fortran harness:** `tomas_fortran/harness/benchmark_constgc.f`
+
+### Two Modes
+
+1. **Constant-gas** (`--h2so4 1e7`): H2SO4 reset to fixed concentration each timestep. Open-loop — condensation sink (CS) differences between resolutions compound without feedback, causing 30-67% mass divergence between 40/80 bins.
+
+2. **Fixed-production** (`--prod-rate 1e7`): Constant H2SO4 production rate, gas consumed by condensation. Closed-loop — at steady state, `mcond ≈ prod × dt` regardless of CS, because higher CS → faster gas depletion → lower equilibrium gas → same total condensation. Result: 40-bin and 80-bin M_dry match to **0.0003%**.
+
+### Why Constant-Gas Diverges
+
+The condensation rate is `mcond = Gc * (1 - exp(-CS * dt))`. When gas is held constant:
+- Different resolutions produce different CS values (different bin widths → different sinkfrac distributions)
+- Higher CS → more mass condensed per step → larger particles → even higher CS → divergence compounds
+
+When production rate is fixed:
+- Gas reaches quasi-steady state where `production ≈ CS * Gc`
+- At steady state: `Gc_ss = prod / CS`, so `mcond = prod * dt` (CS cancels)
+- Resolution-dependent CS differences cancel out in the product `CS * Gc_ss`
+
+### Usage
+
+```bash
+# Constant-gas mode (H2SO4 = 1e7 molec/cm3, held constant)
+python -m benchmarks.python.benchmark_nucleation_constgc --h2so4 1e7
+
+# Fixed-production mode (H2SO4 production = 1e7 molec/cm3/s)
+python -m benchmarks.python.benchmark_nucleation_constgc --prod-rate 1e7
+```
+
+## Organic Nucleation Concentration
+
+In real atmospheric models, the organic concentration for Riccobono 2014 nucleation is **not hardcoded**. It is computed dynamically from gas-phase chemistry:
+
+- **SOM-TOMAS**: `org_conc` is computed from the SOMGC array (Secondary Organic Model gas-phase concentrations). The CALC_JNUC function extracts ELVOC from a specific SOM grid species.
+- **Original TOMAS (box.f)**: Uses a simple user-entered constant nucleation rate; does not implement Riccobono/Dunne at all.
+- **Our Fortran harness**: `nucleation_driver.f` takes `org_conc` as a subroutine argument — the caller provides it.
+
+For benchmarks, we use hardcoded values (e.g., `org_conc = 1e7 molec/cm3`). In a real application, `org_conc` should come from the atmospheric model's gas-phase chemistry module.
