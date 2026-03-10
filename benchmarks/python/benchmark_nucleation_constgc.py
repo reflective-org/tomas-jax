@@ -1,14 +1,20 @@
-"""Constant-gas nucleation + coagulation + condensation benchmark.
+"""Nucleation + coagulation + condensation benchmark.
 
-Compares JAX (PPM, 40/80 bins) vs Fortran (TFL, 36 bins standard grid)
-with constant H2SO4 = 1e7 molec/cm3 over 24 hours.
+Two modes:
+  1. Constant-gas: H2SO4 held fixed each step (default, --h2so4 <conc>)
+  2. Fixed-production: H2SO4 produced at constant rate, consumed by condensation
+     (--prod-rate <rate>).  Gas concentration evolves freely.
+
+Compares JAX (PPM, 40/80 bins) vs Fortran (TFL, 36 bins standard grid).
 
 Usage::
 
     source .venv/bin/activate
-    python -m benchmarks.python.benchmark_nucleation_constgc
-    python -m benchmarks.python.benchmark_nucleation_constgc --fortran
-    python -m benchmarks.python.benchmark_nucleation_constgc --dt 30
+    # Constant-gas mode (default)
+    python -m benchmarks.python.benchmark_nucleation_constgc --h2so4 1e8
+    # Fixed-production mode
+    python -m benchmarks.python.benchmark_nucleation_constgc --prod-rate 1e7
+    python -m benchmarks.python.benchmark_nucleation_constgc --fortran --dt 10
 """
 import os
 import sys
@@ -89,6 +95,52 @@ def _run_full_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 
     return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
                  org_conc, nh3_conc, fion, enable_organic)
+
+
+# ---------------------------------------------------------------------------
+# Scan function: fixed-production full mode (nucl + coag + cond with PPM)
+# ---------------------------------------------------------------------------
+def _run_full_scan_ppm_prod(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                            nsteps, org_conc, nh3_conc, fion,
+                            prod_rate_kg_s, enable_organic=1.0):
+    """Nucl + Coag + PPM condensation scan with fixed H2SO4 production rate.
+
+    Gas is NOT reset — production adds mass each step, condensation removes it.
+    This is the physically self-consistent mode where CS differences between
+    resolutions are self-correcting (higher CS → faster depletion → less gas).
+
+    Args:
+        prod_rate_kg_s: H2SO4 production rate [kg/s per grid cell]
+
+    Returns (Nk_f, Mk_f, Gc_f, hist, Nk_history) where:
+        hist:       (nsteps, 3) — [N_tot, M_dry, Gc_SO4] per step
+        Nk_history: (nsteps, nbins) — full Nk at each step (for banana plot)
+    """
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+              org_conc, nh3_conc, fion, prod_rate_kg_s, enable_organic):
+
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            # Add H2SO4 production
+            Gc_c = Gc_c.at[SRTSO4].add(prod_rate_kg_s * dt)
+            # Full step: nucleation → coagulation → condensation (depletes gas)
+            Nk_c, Mk_c, Gc_c = full_step_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
+                org_conc, nh3_conc, fion,
+                enable_organic=enable_organic, enable_inorganic=1.0,
+                fn_scale=1.0, use_tfl=0.0)
+            scalar_diag = jnp.array([jnp.sum(Nk_c),
+                                      jnp.sum(Mk_c[:, :SRTH2O]),
+                                      Gc_c[SRTSO4]])
+            return (Nk_c, Mk_c, Gc_c), (scalar_diag, Nk_c)
+
+        (Nk_f, Mk_f, Gc_f), (hist, Nk_history) = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist, Nk_history
+
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+                 org_conc, nh3_conc, fion, prod_rate_kg_s, enable_organic)
 
 
 # ---------------------------------------------------------------------------
@@ -209,18 +261,37 @@ def compute_dMdlogDp(Mk, xk):
 def run_benchmark(dt_val=60.0, n_total=1e4, gmd_um=0.02, gsd=1.6,
                   temp_val=298.0, pres_val=101325.0, rh_val=0.30,
                   h2so4_molec_cm3=1e7, include_fortran=False,
-                  make_plots=True, enable_organic_nuc=True):
-    """Run nucleation + coag + cond benchmark with constant H2SO4."""
+                  make_plots=True, enable_organic_nuc=True,
+                  prod_rate_molec_cm3_s=None):
+    """Run nucleation + coag + cond benchmark.
+
+    Two modes:
+      - Constant-gas (default): H2SO4 reset to h2so4_molec_cm3 each step
+      - Fixed-production (prod_rate_molec_cm3_s is set): H2SO4 produced at
+        constant rate, consumed by condensation. Gas evolves freely.
+    """
+    use_prod_mode = prod_rate_molec_cm3_s is not None
 
     nsteps = int(86400.0 / dt_val)
     h2so4_kg = h2so4_molec_cm3 * BOXVOL * (MW_H2SO4 / 1000.0) / AVOGADRO
 
+    if use_prod_mode:
+        prod_rate_kg_s = (prod_rate_molec_cm3_s * BOXVOL
+                          * (MW_H2SO4 / 1000.0) / AVOGADRO)
+        mode_str = "Fixed-Production"
+        gas_str = (f"H₂SO₄ prod = {prod_rate_molec_cm3_s:.0e} molec/cm³/s, "
+                   f"init = {h2so4_molec_cm3:.0e} molec/cm³")
+    else:
+        prod_rate_kg_s = 0.0
+        mode_str = "Constant-Gas"
+        gas_str = f"H₂SO₄ = {h2so4_molec_cm3:.0e} molec/cm³ (held constant)"
+
     print("=" * 60)
-    print("Constant-Gas Full Benchmark (Nucl + Coag + PPM Cond)")
+    print(f"{mode_str} Full Benchmark (Nucl + Coag + PPM Cond)")
     print("=" * 60)
     print(f"  N = {n_total:.0e} #/cm3, GMD = {gmd_um} um, GSD = {gsd}")
     print(f"  T = {temp_val} K, P = {pres_val} Pa, RH = {rh_val}")
-    print(f"  H2SO4 = {h2so4_molec_cm3:.0e} molec/cm3 (held constant)")
+    print(f"  {gas_str}")
     org_flag = 1.0 if enable_organic_nuc else 0.0
     nuc_schemes = []
     if enable_organic_nuc:
@@ -265,23 +336,31 @@ def run_benchmark(dt_val=60.0, n_total=1e4, gmd_um=0.02, gsd=1.6,
             'M_aer_init': M_aer_init,
         }
 
+        # Build scan args
+        scan_args = dict(
+            Nk=Nk_jax, Mk=Mk_jax, Gc=Gc_jax, xk=xk_jax,
+            temp=temp, pres=pres, boxvol=boxvol, rh=rh, alpha=alpha,
+            dt=dt, nsteps=nsteps,
+            org_conc=jnp.float64(NUC_ORG_CONC),
+            nh3_conc=jnp.float64(NUC_NH3_CONC),
+            fion=jnp.float64(NUC_FION),
+            enable_organic=org_flag,
+        )
+        if use_prod_mode:
+            scan_fn = _run_full_scan_ppm_prod
+            scan_args['prod_rate_kg_s'] = jnp.float64(prod_rate_kg_s)
+        else:
+            scan_fn = _run_full_scan_ppm
+
         # Compile
         print(f"  PPM (full): compiling...", end="", flush=True)
-        _ = _run_full_scan_ppm(
-            Nk_jax, Mk_jax, Gc_jax, xk_jax,
-            temp, pres, boxvol, rh, alpha, dt, nsteps,
-            jnp.float64(NUC_ORG_CONC), jnp.float64(NUC_NH3_CONC),
-            jnp.float64(NUC_FION), enable_organic=org_flag)
+        _ = scan_fn(**scan_args)
         jax.block_until_ready(_)
 
         # Run
         print(f" running...", end="", flush=True)
         t0 = time.perf_counter()
-        Nk_f, Mk_f, Gc_f, hist, Nk_history = _run_full_scan_ppm(
-            Nk_jax, Mk_jax, Gc_jax, xk_jax,
-            temp, pres, boxvol, rh, alpha, dt, nsteps,
-            jnp.float64(NUC_ORG_CONC), jnp.float64(NUC_NH3_CONC),
-            jnp.float64(NUC_FION), enable_organic=org_flag)
+        Nk_f, Mk_f, Gc_f, hist, Nk_history = scan_fn(**scan_args)
         jax.block_until_ready(Nk_f)
         wall_time = time.perf_counter() - t0
 
@@ -302,6 +381,10 @@ def run_benchmark(dt_val=60.0, n_total=1e4, gmd_um=0.02, gsd=1.6,
               f"(+{(N_f - N_init) / max(N_init, 1e-30) * 100:.1f}%)")
         print(f"    M_dry: {M_aer_init * 1e9:.4f} → {M_aer_f * 1e9:.4f} μg/m³  "
               f"(+{(M_aer_f - M_aer_init) / max(M_aer_init, 1e-30) * 100:.1f}%)")
+        if use_prod_mode:
+            Gc_so4_final_molec = (float(Gc_f[SRTSO4]) / BOXVOL
+                                  / (MW_H2SO4 / 1000.0) * AVOGADRO)
+            print(f"    Gc_SO4: {Gc_so4_final_molec:.4e} molec/cm³ (equilibrium)")
 
         results[nbins] = entry
 
@@ -335,22 +418,28 @@ def run_benchmark(dt_val=60.0, n_total=1e4, gmd_um=0.02, gsd=1.6,
     # --- Plots ---
     if make_plots:
         plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
-                       temp_val, pres_val, h2so4_molec_cm3)
+                       temp_val, pres_val, h2so4_molec_cm3,
+                       prod_rate_molec_cm3_s=prod_rate_molec_cm3_s)
 
     return results, fortran_data
 
 
 def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
-                   temp_val, pres_val, h2so4_molec_cm3):
+                   temp_val, pres_val, h2so4_molec_cm3,
+                   prod_rate_molec_cm3_s=None):
     """Generate benchmark comparison plots."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
+    use_prod_mode = prod_rate_molec_cm3_s is not None
     outdir = os.path.join(os.path.dirname(__file__), '..', 'results', 'nucleation_constgc')
     os.makedirs(outdir, exist_ok=True)
 
     sorted_keys = sorted(results.keys())
+
+    # File prefix for production vs constant-gas plots
+    fprefix = 'full_prod' if use_prod_mode else 'full_constgc'
 
     # Style
     _TEXT = '#333333'
@@ -363,12 +452,20 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
     def _color(n): return _PALETTE.get(n, '#555555')
     def _lw(n): return _LW.get(n, 1.5)
 
+    if use_prod_mode:
+        gas_line = (f"Gas: H₂SO₄ prod = {prod_rate_molec_cm3_s:.0e} molec/cm³/s, "
+                    f"init = {h2so4_molec_cm3:.0e}")
+        mode_line = "Mode: Fixed-Production | Nucl + Coag + PPM Cond"
+    else:
+        gas_line = f"Gas: H₂SO₄ = {h2so4_molec_cm3:.0e} molec/cm³ (constant)"
+        mode_line = "Mode: Constant-Gas | Nucl + Coag + PPM Cond"
+
     info_text = (
         f"Aerosol: N₀ = {n_total:.0e} #/cm³, GMD = {gmd_um} μm, GSD = {gsd}\n"
         f"Environment: T = {temp_val:.0f} K, P = {pres_val:.0f} Pa\n"
-        f"Gas: H₂SO₄ = {h2so4_molec_cm3:.0e} molec/cm³ (constant)  |  "
+        f"{gas_line}  |  "
         f"Nucleation: org = {NUC_ORG_CONC:.0e}, NH₃ = {NUC_NH3_CONC:.0e}\n"
-        f"dt = {dt_val:.0f}s, 24h  |  Mode: Nucl + Coag + PPM Cond"
+        f"dt = {dt_val:.0f}s, 24h  |  {mode_line}"
     )
 
     def _style_ax(ax, xlabel='', ylabel='', title=''):
@@ -419,7 +516,7 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
              bbox=dict(boxstyle='round,pad=0.5', facecolor='#F7F7F7',
                        edgecolor='#E0E0E0', linewidth=0.5))
     fig.tight_layout(rect=[0, 0.06, 1, 0.95])
-    path1 = os.path.join(outdir, f'full_constgc_dt{int(dt_val)}_dN.png')
+    path1 = os.path.join(outdir, f'{fprefix}_dt{int(dt_val)}_dN.png')
     fig.savefig(path1, dpi=150, bbox_inches='tight')
     print(f"  Saved: {path1}")
     plt.close(fig)
@@ -455,15 +552,22 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
              bbox=dict(boxstyle='round,pad=0.5', facecolor='#F7F7F7',
                        edgecolor='#E0E0E0', linewidth=0.5))
     fig.tight_layout(rect=[0, 0.06, 1, 0.95])
-    path2 = os.path.join(outdir, f'full_constgc_dt{int(dt_val)}_dM.png')
+    path2 = os.path.join(outdir, f'{fprefix}_dt{int(dt_val)}_dM.png')
     fig.savefig(path2, dpi=150, bbox_inches='tight')
     print(f"  Saved: {path2}")
     plt.close(fig)
 
     # =====================================================================
-    # Figure 3: N and M time series (from scan history)
+    # Figure 3: N, M, and Gc time series (from scan history)
     # =====================================================================
-    fig, (ax_n, ax_m) = plt.subplots(1, 2, figsize=(14, 5))
+    n_ts_panels = 3 if use_prod_mode else 2
+    fig, axes = plt.subplots(1, n_ts_panels, figsize=(7 * n_ts_panels, 5))
+    if n_ts_panels == 2:
+        ax_n, ax_m = axes
+        ax_g = None
+    else:
+        ax_n, ax_m, ax_g = axes
+
     fig.suptitle('Nucleation Benchmark — Time Evolution',
                  fontsize=13, color=_TEXT, fontweight='bold', x=0.02, ha='left')
 
@@ -475,8 +579,14 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
                   lw=_lw(nbins_key), label=r['label'])
         ax_m.plot(hours, hist[:, 1] * 1e9, color=_color(nbins_key),
                   lw=_lw(nbins_key), label=r['label'])
+        if ax_g is not None:
+            # Convert Gc_SO4 [kg/cell] → molec/cm3
+            gc_molec = (hist[:, 2] / BOXVOL / (MW_H2SO4 / 1000.0) * AVOGADRO)
+            ax_g.plot(hours, gc_molec, color=_color(nbins_key),
+                      lw=_lw(nbins_key), label=r['label'])
 
-    for ax in (ax_n, ax_m):
+    all_axes = [ax_n, ax_m] + ([ax_g] if ax_g is not None else [])
+    for ax in all_axes:
         ax.set_xscale('linear')
         ax.minorticks_on()
         for sp in ax.spines.values():
@@ -494,6 +604,11 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
     ax_m.set_ylabel('M_dry [μg/m³]', fontsize=10, color=_TEXT)
     ax_m.set_title('Total Dry Mass', fontsize=12, color=_TEXT, fontweight='bold',
                    loc='left')
+    if ax_g is not None:
+        ax_g.set_ylabel('H₂SO₄ [molec/cm³]', fontsize=10, color=_TEXT)
+        ax_g.set_title('Gas-phase H₂SO₄', fontsize=12, color=_TEXT,
+                        fontweight='bold', loc='left')
+        ax_g.legend(fontsize=8.5, frameon=False)
     ax_n.legend(fontsize=8.5, frameon=False)
     ax_m.legend(fontsize=8.5, frameon=False)
 
@@ -502,7 +617,7 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
              bbox=dict(boxstyle='round,pad=0.5', facecolor='#F7F7F7',
                        edgecolor='#E0E0E0', linewidth=0.5))
     fig.tight_layout(rect=[0, 0.06, 1, 0.95])
-    path3 = os.path.join(outdir, f'full_constgc_dt{int(dt_val)}_timeseries.png')
+    path3 = os.path.join(outdir, f'{fprefix}_dt{int(dt_val)}_timeseries.png')
     fig.savefig(path3, dpi=150, bbox_inches='tight')
     print(f"  Saved: {path3}")
     plt.close(fig)
@@ -584,7 +699,7 @@ def plot_benchmark(results, fortran_data, dt_val, n_total, gmd_um, gsd,
                  bbox=dict(boxstyle='round,pad=0.5', facecolor='#F7F7F7',
                            edgecolor='#E0E0E0', linewidth=0.5))
         fig.tight_layout(rect=[0, 0.06, 1, 0.93])
-        path4 = os.path.join(outdir, f'full_constgc_dt{int(dt_val)}_banana.png')
+        path4 = os.path.join(outdir, f'{fprefix}_dt{int(dt_val)}_banana.png')
         fig.savefig(path4, dpi=150, bbox_inches='tight')
         print(f"  Saved: {path4}")
         plt.close(fig)
@@ -616,6 +731,10 @@ def main():
                         help='Skip plot generation')
     parser.add_argument('--no-organic-nuc', action='store_true',
                         help='Disable Riccobono organic nucleation (Dunne only)')
+    parser.add_argument('--prod-rate', type=float, default=None,
+                        help='H2SO4 production rate [molec/cm3/s]. When set, '
+                             'uses fixed-production mode instead of constant-gas. '
+                             'Gas evolves freely (produced and consumed).')
     args = parser.parse_args()
 
     run_benchmark(
@@ -629,6 +748,7 @@ def main():
         include_fortran=args.fortran,
         make_plots=not args.no_plots,
         enable_organic_nuc=not args.no_organic_nuc,
+        prod_rate_molec_cm3_s=args.prod_rate,
     )
 
 
