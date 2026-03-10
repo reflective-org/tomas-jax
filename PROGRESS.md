@@ -4,6 +4,34 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-10 (Tue) — Web Interface Architecture Specification
+
+**Time**: ~PST
+
+### Summary
+
+Created comprehensive architecture and implementation specification for a public web interface to the TOMAS-JAX box model. Document covers full-stack design: FastAPI backend wrapping existing JAX solvers, React frontend with scientific visualizations, deployment strategy, security, and a phased development roadmap.
+
+### Files Created
+- `docs/web_interface_spec.md` — Full specification covering:
+  - Two-repository architecture (tomas-api + tomas-web)
+  - REST API design (4 endpoints: simulate, results, presets, health)
+  - Async job queue for long-running simulations (full mode: 5–13s)
+  - JIT warmup strategy to avoid 60s cold starts
+  - Frontend layout with 4 visualization types (size distribution, banana plot, time series, conservation)
+  - 6 curated preset scenarios for researchers
+  - Deployment options (Fly.io/Cloud Run + Vercel, ~$8–16/month)
+  - Security: rate limiting, input validation, DoS mitigation
+  - 4-phase development roadmap (MVP in 2–3 weeks)
+  - Risk matrix and complete parameter reference
+
+### Next Steps
+- Decide on monorepo vs two-repo approach
+- Scaffold backend and frontend repositories
+- Implement Phase 1 MVP
+
+---
+
 ## 2026-03-10 (Mon) — Constant-Gas Full-Mode Benchmark + Fixed-Production Mode
 
 **Time**: ~15:00 PST
