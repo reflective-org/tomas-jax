@@ -2,20 +2,23 @@ C     **************************************************
 C     *  Constant-Gas Condensation/Combined Benchmark  *
 C     **************************************************
 C
-C     Runs condensation-only or coag+cond with constant H2SO4 gas for 24h.
+C     Runs condensation-only, coag+cond, or full (nucl+coag+cond)
+C     with constant H2SO4 gas for 24h.
 C     Tests multiple timestep values (20, 30, 60 seconds).
-C     Uses standard TOMAS grid for compatibility with JAX convergence test.
+C     Uses standard TOMAS grid for compatibility with JAX benchmark.
 C
 C     Parameters are hardcoded (not read from CSV):
-C       N=1000 #/cm3, GMD=0.02 um, GSD=1.6
+C       N=1e4 #/cm3, GMD=0.02 um, GSD=1.6
 C       T=298 K, P=101325 Pa, RH=0.30
 C       H2SO4 = 1e7 molec/cm3 (held constant)
 C
 C     Output: CSV files in output/constgc/ directory
-C       constgc_dt{20|30|60}_final_{Nk|Mk}.csv          (cond-only)
-C       constgc_combined_dt{20|30|60}_final_{Nk|Mk}.csv (combined)
+C       constgc_dt{20|30|60}_final_{Nk|Mk}.csv               (cond-only)
+C       constgc_combined_dt{20|30|60}_final_{Nk|Mk}.csv      (combined)
+C       constgc_full_dt{20|30|60}_final_{Nk|Mk}.csv          (full)
 C
-C     Set do_coag = .true. to enable coagulation before condensation.
+C     Set do_coag = .true. to enable coagulation.
+C     Set do_nucl = .true. to enable nucleation (requires do_coag=.true.).
 
       PROGRAM benchmark_constgc
 
@@ -23,13 +26,13 @@ C     Set do_coag = .true. to enable coagulation before condensation.
       include 'sizecode.COM'
 
 C-----VARIABLE DECLARATIONS-------------------------------------------
-      integer k, j, istep, idt
+      integer k, j, istep, idt, ihour, steps_per_hour
       double precision dt
 
       integer ndt
-      parameter(ndt=3)
+      parameter(ndt=4)
       double precision dt_vals(ndt)
-      data dt_vals /20.0d0, 30.0d0, 60.0d0/
+      data dt_vals /10.0d0, 20.0d0, 30.0d0, 60.0d0/
 
       integer nsteps
 
@@ -63,11 +66,21 @@ C     Working variables
       double precision CS, sinkfrac(ibins)
       double precision mcond_so4
       double precision Nkf(ibins), Mkf(ibins,icomp)
+      double precision Gcf(icomp-1)
       double precision Gc_init
 
-C     Coagulation toggle
-      logical do_coag
+C     Process toggles
+      logical do_coag, do_nucl
       parameter(do_coag=.true.)
+      parameter(do_nucl=.true.)
+
+C     Nucleation parameters (matching 24h harness)
+      double precision nuc_org_conc, nuc_nh3_conc, nuc_fion
+      double precision nuc_fn_scale
+      parameter(nuc_org_conc=1.0d7)
+      parameter(nuc_nh3_conc=1.0d9)
+      parameter(nuc_fion=3.0d0)
+      parameter(nuc_fn_scale=1.0d0)
 
 C     Timing
       double precision t_start, t_end
@@ -77,7 +90,13 @@ C     Timing
 
 C-----INITIALIZATION---------------------------------------------------
 
-      if (do_coag) then
+      if (do_nucl .and. do_coag) then
+         write(*,*) '========================================'
+         write(*,*) 'Constant-Gas Full Benchmark'
+         write(*,*) '  (Nucl + Coag + Cond)'
+         write(*,*) '========================================'
+         prefix = 'constgc_full'
+      elseif (do_coag) then
          write(*,*) '========================================'
          write(*,*) 'Constant-Gas Coag+Cond Benchmark'
          write(*,*) '========================================'
@@ -90,13 +109,20 @@ C-----INITIALIZATION---------------------------------------------------
       endif
 
 C     Compute H2SO4 in kg/cell
-      h2so4_kg = 1.0d7 * BOXVOL_VAL * (MW_H2SO4/1000.0d0) / AVOGADRO
+      h2so4_kg = 1.0d8 * BOXVOL_VAL * (MW_H2SO4/1000.0d0) / AVOGADRO
 
 C     Standard TOMAS grid: Mo = 1e-21 * 2^(-6) = 1.5625e-23
       XK0_17NM = 1.0d-21 * 2.0d0**(-6)
       write(*,'(A,E12.4,A)') '  XK0 = ', XK0_17NM, ' kg (standard)'
       write(*,'(A,E12.4,A)') '  H2SO4 = ', h2so4_kg, ' kg/cell'
       write(*,'(A,L1)') '  Coagulation: ', do_coag
+      write(*,'(A,L1)') '  Nucleation:  ', do_nucl
+      if (do_nucl) then
+         write(*,'(A,E10.2,A,E10.2,A,F4.1)')
+     &        '  Nuc params: org=', nuc_org_conc,
+     &        ' NH3=', nuc_nh3_conc,
+     &        ' fion=', nuc_fion
+      endif
       write(*,*) ''
 
 C-----LOOP OVER DT VALUES---------------------------------------------
@@ -169,6 +195,23 @@ C-----TIME LOOP (constant gas)----------------------------------------
 C           Reset gas to constant value
             Gc(srtso4) = Gc_init
 
+C           Nucleation (before coagulation, matching JAX operator split)
+            if (do_nucl) then
+               call nucleation_driver(Nk, Mk, Gc, Nkf, Mkf, Gcf,
+     &              dt, nuc_org_conc, nuc_nh3_conc, nuc_fion,
+     &              0, 1, nuc_fn_scale)
+               do k=1,ibins
+                  Nk(k) = Nkf(k)
+                  do j=1,icomp
+                     Mk(k,j) = Mkf(k,j)
+                  enddo
+               enddo
+               do j=1,icomp-1
+                  Gc(j) = Gcf(j)
+               enddo
+               call mnfix(Nk, Mk)
+            endif
+
 C           Coagulation (before condensation, matching JAX operator split)
             if (do_coag) then
                call multicoag(dt)
@@ -204,6 +247,20 @@ C           Equilibria + MNFIX
             call eznh3eqm(Gc, Mk)
             call ezwatereqm(Mk)
             call mnfix(Nk, Mk)
+
+C           Write hourly Nk snapshots
+            steps_per_hour = nint(3600.0d0 / dt)
+            if (mod(istep, steps_per_hour) .eq. 0) then
+               ihour = istep / steps_per_hour
+               write(fname,'(A,A,A,I2.2,A,I2.2,A)')
+     &              'output/constgc/',trim(prefix),'_dt',nint(dt),
+     &              '_hour',ihour,'_Nk.csv'
+               open(unit=11, file=fname, status='replace')
+               do k=1,ibins
+                  write(11,'(E25.16)') Nk(k)
+               enddo
+               close(11)
+            endif
 
          enddo
 

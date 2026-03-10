@@ -37,6 +37,7 @@ from tomas_jax.solvers.condensation import (
     condensation_step_jax,
     combined_step_tfl_jax,
     combined_step_ppm_jax,
+    full_step_jax,
 )
 from tomas_jax.solvers.diffrax import coag_euler_step
 from benchmarks.python.scenarios import get_scenarios
@@ -124,6 +125,58 @@ def _run_constant_gc_combined_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol,
     return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps)
 
 
+def _run_constant_gc_full_scan_tfl(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
+                                    alpha, dt, nsteps, org_conc, nh3_conc,
+                                    fion):
+    """Nucl + Coag + TFL condensation scan with Gc reset each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+              org_conc, nh3_conc, fion):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = full_step_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
+                org_conc, nh3_conc, fion,
+                enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
+                use_tfl=1.0)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+                 org_conc, nh3_conc, fion)
+
+
+def _run_constant_gc_full_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
+                                    alpha, dt, nsteps, org_conc, nh3_conc,
+                                    fion):
+    """Nucl + Coag + PPM condensation scan with Gc reset each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+              org_conc, nh3_conc, fion):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = full_step_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
+                org_conc, nh3_conc, fion,
+                enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
+                use_tfl=0.0)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+                 org_conc, nh3_conc, fion)
+
+
 def _run_coag_only_scan(Nk, Mk, xk, temp, pres, boxvol, dt, nsteps,
                         n_substeps=3):
     """Coag-only scan: Euler + MNFIX per timestep."""
@@ -165,7 +218,7 @@ def dp_nm_to_xk0(dp_nm):
 BASE_GRID_CONFIGS = [
     (40, 2.0,         "×2"),
     (80, 2.0**0.5,    "×√2"),
-    (160, 2.0**0.25,  "×2^¼"),
+    # (160, 2.0**0.25,  "×2^¼"),  # uncomment when coag jaggedness is resolved
 ]
 
 
@@ -397,12 +450,19 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     # Convert H2SO4 molec/cm3 to kg/grid cell
     h2so4_kg = h2so4_molec_cm3 * BOXVOL * (MW_H2SO4 / 1000.0) / AVOGADRO
 
-    if mode == 'combined':
+    if mode == 'full':
+        mode_label = 'Nucl+Coag+Cond'
+    elif mode == 'combined':
         mode_label = 'Coag+Cond'
     elif mode == 'coag_only':
         mode_label = 'Coag-only'
     else:
         mode_label = 'Cond-only'
+
+    # Nucleation parameters (matching Fortran/run_24h_scenarios)
+    NUC_ORG_CONC = 1e7   # organic vapor [molec/cm3]
+    NUC_NH3_CONC = 1e9   # NH3 [molec/cm3]
+    NUC_FION = 3.0       # ion formation rate [pairs/cm3/s]
 
     if constant_gc_mode:
         prod_val = 0.0
@@ -1395,9 +1455,9 @@ def main():
                         help='Load and overlay Fortran TFL results (36 bins)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip plot generation')
-    parser.add_argument('--mode', choices=['cond_only', 'combined', 'coag_only'],
+    parser.add_argument('--mode', choices=['cond_only', 'combined', 'coag_only', 'full'],
                         default='cond_only',
-                        help='Mode: cond_only (default), combined (coag+cond), or coag_only')
+                        help='Mode: cond_only (default), combined (coag+cond), coag_only, or full (nucl+coag+cond)')
     parser.add_argument('--extra-bins', type=int, default=0,
                         help='Extra bins per resolution (e.g., 4 → 40/80/160 for 1nm start)')
     args = parser.parse_args()
