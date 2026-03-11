@@ -58,7 +58,9 @@ from ..core.config import (
     SRTSO4, SRTNH4, SRTH2O, ICOMP_NODIAG,
     MW_H2SO4, SV_H2SO4, CS_EPS,
 )
-from ..physics.nucleation import nucleation_step
+from ..physics.nucleation import (
+    nucleation_step, estimate_nucleation_rate, compute_nucleation_substeps,
+)
 from ..physics.condensation_sink import calc_condensation_sink
 from ..physics.ezcond import ezcond
 from ..physics.ezcond_ppm_jax import ezcond_ppm_jax
@@ -331,16 +333,40 @@ def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     ezcond_fn, org_conc, nh3_conc, fion,
                     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
-                    icomp_nodiag=42, n_coag_substeps=10):
-    """Nucleation + coagulation + condensation in one step."""
+                    icomp_nodiag=42, n_coag_substeps=10,
+                    max_nucleation_frac=0.5, max_nuc_substeps=20):
+    """Nucleation + coagulation + condensation in one step.
+
+    Nucleation uses adaptive sub-stepping: when dN would exceed
+    max_nucleation_frac * N_total, the nucleation timestep is subdivided
+    (up to max_nuc_substeps) with MNFIX between substeps.
+    """
     from .diffrax import coag_euler_step
 
-    # 1. Nucleation
-    Nk, Mk, Gc = nucleation_step(
-        Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
+    # 1. Adaptive nucleation sub-stepping
+    fn = estimate_nucleation_rate(
+        Gc, temp, pres, boxvol,
         org_conc, nh3_conc, fion,
         enable_organic, enable_inorganic, fn_scale,
     )
+    N_total = jnp.sum(Nk)
+    n_nuc = compute_nucleation_substeps(
+        fn, boxvol, dt, N_total,
+        max_nucleation_frac, max_nuc_substeps,
+    )
+    dt_nuc = dt / n_nuc
+
+    def nuc_body(i, carry):
+        Nk_s, Mk_s, Gc_s = carry
+        Nk_s, Mk_s, Gc_s = nucleation_step(
+            Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+            org_conc, nh3_conc, fion,
+            enable_organic, enable_inorganic, fn_scale,
+        )
+        Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, icomp_nodiag)
+        return (Nk_s, Mk_s, Gc_s)
+
+    Nk, Mk, Gc = jax.lax.fori_loop(0, n_nuc, nuc_body, (Nk, Mk, Gc))
 
     # 2. Coagulation (forward Euler + MNFIX)
     Nk, Mk = coag_euler_step(
@@ -389,21 +415,42 @@ def condensation_step_with_nucleation_jax(
     org_conc, nh3_conc, fion,
     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
     use_tfl=1.0,
+    max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Nucleation then condensation in one JIT-compilable step.
 
     Args:
         use_tfl: 1.0 for TFL condensation, 0.0 for PPM (Python-level dispatch)
+        max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
+        max_nuc_substeps: Hard cap on nucleation substeps
     """
     # Python-level dispatch — no double compute
     ezcond_fn = ezcond_tfl_jax if float(use_tfl) > 0.5 else ezcond_ppm_jax
 
-    # 1. Nucleation
-    Nk, Mk, Gc = nucleation_step(
-        Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
+    # 1. Adaptive nucleation sub-stepping
+    fn = estimate_nucleation_rate(
+        Gc, temp, pres, boxvol,
         org_conc, nh3_conc, fion,
         enable_organic, enable_inorganic, fn_scale,
     )
+    N_total = jnp.sum(Nk)
+    n_nuc = compute_nucleation_substeps(
+        fn, boxvol, dt, N_total,
+        max_nucleation_frac, max_nuc_substeps,
+    )
+    dt_nuc = dt / n_nuc
+
+    def nuc_body(i, carry):
+        Nk_s, Mk_s, Gc_s = carry
+        Nk_s, Mk_s, Gc_s = nucleation_step(
+            Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+            org_conc, nh3_conc, fion,
+            enable_organic, enable_inorganic, fn_scale,
+        )
+        Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
+        return (Nk_s, Mk_s, Gc_s)
+
+    Nk, Mk, Gc = jax.lax.fori_loop(0, n_nuc, nuc_body, (Nk, Mk, Gc))
 
     # 2. Condensation
     return _condensation_step_core(
@@ -415,6 +462,7 @@ def condensation_step_with_nucleation_jax(
 condensation_step_with_nucleation_jit = jax.jit(
     condensation_step_with_nucleation_jax,
     static_argnums=(16,),  # use_tfl must be static for Python-level dispatch
+    # max_nucleation_frac (17) and max_nuc_substeps (18) are captured as tracers
 )
 
 
@@ -423,10 +471,12 @@ def full_step_jax(
     org_conc, nh3_conc, fion,
     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
     use_tfl=1.0, icomp_nodiag=42,
+    max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Full step: nucleation + coagulation + condensation (JIT-compilable).
 
     Uses fixed-step forward Euler coagulation (no diffrax) for minimal XLA overhead.
+    Nucleation uses adaptive sub-stepping when dN would exceed max_nucleation_frac * N_total.
     """
     ezcond_fn = ezcond_tfl_jax if float(use_tfl) > 0.5 else ezcond_ppm_jax
     return _full_step_core(
@@ -435,6 +485,8 @@ def full_step_jax(
         org_conc=org_conc, nh3_conc=nh3_conc, fion=fion,
         enable_organic=enable_organic, enable_inorganic=enable_inorganic,
         fn_scale=fn_scale, icomp_nodiag=icomp_nodiag, n_coag_substeps=10,
+        max_nucleation_frac=max_nucleation_frac,
+        max_nuc_substeps=max_nuc_substeps,
     )
 
 
@@ -572,16 +624,38 @@ def run_nucleation_condensation_scan(
     org_conc, nh3_conc, fion,
     enable_organic, enable_inorganic, fn_scale,
     use_tfl,
+    max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Scan-fused nucleation + condensation loop."""
+    """Scan-fused nucleation + condensation loop with adaptive sub-stepping."""
     ezcond_fn = ezcond_tfl_jax if float(use_tfl) > 0.5 else ezcond_ppm_jax
 
     def step_fn(Nk_c, Mk_c, Gc_c):
-        Nk_c, Mk_c, Gc_c = nucleation_step(
-            Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, dt,
+        # Adaptive nucleation sub-stepping
+        fn = estimate_nucleation_rate(
+            Gc_c, temp, pres, boxvol,
             org_conc, nh3_conc, fion,
             enable_organic, enable_inorganic, fn_scale,
         )
+        N_total = jnp.sum(Nk_c)
+        n_nuc = compute_nucleation_substeps(
+            fn, boxvol, dt, N_total,
+            max_nucleation_frac, max_nuc_substeps,
+        )
+        dt_nuc = dt / n_nuc
+
+        def nuc_body(i, carry):
+            Nk_s, Mk_s, Gc_s = carry
+            Nk_s, Mk_s, Gc_s = nucleation_step(
+                Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+                org_conc, nh3_conc, fion,
+                enable_organic, enable_inorganic, fn_scale,
+            )
+            Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
+            return (Nk_s, Mk_s, Gc_s)
+
+        Nk_c, Mk_c, Gc_c = jax.lax.fori_loop(
+            0, n_nuc, nuc_body, (Nk_c, Mk_c, Gc_c))
+
         return _condensation_step_core(
             Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
             ezcond_fn=ezcond_fn,
@@ -601,8 +675,9 @@ def run_full_scan(
     org_conc, nh3_conc, fion,
     enable_organic, enable_inorganic, fn_scale,
     use_tfl,
+    max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Scan-fused nucleation + coagulation + condensation loop."""
+    """Scan-fused nucleation + coagulation + condensation loop with adaptive sub-stepping."""
     ezcond_fn = ezcond_tfl_jax if float(use_tfl) > 0.5 else ezcond_ppm_jax
 
     def step_fn(Nk_c, Mk_c, Gc_c):
@@ -612,6 +687,8 @@ def run_full_scan(
             org_conc=org_conc, nh3_conc=nh3_conc, fion=fion,
             enable_organic=enable_organic, enable_inorganic=enable_inorganic,
             fn_scale=fn_scale,
+            max_nucleation_frac=max_nucleation_frac,
+            max_nuc_substeps=max_nuc_substeps,
         )
 
     (Nk_f, Mk_f, Gc_f), history = _run_scan(
@@ -624,7 +701,8 @@ def run_full_scan(
 # Layer 4: make_step() — public composable API
 # =========================================================================
 
-def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10):
+def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
+              max_nucleation_frac=0.5, max_nuc_substeps=20):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
@@ -634,11 +712,16 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10):
     The ``for process in processes`` loop is Python-level — unrolled at JAX
     trace time. This makes it trivial to reorder, skip, or add processes.
 
+    Nucleation uses adaptive sub-stepping: when dN would exceed
+    max_nucleation_frac * N_total, the nucleation timestep is subdivided.
+
     Args:
         processes: Ordered list of process names, e.g.
             ['nucleation', 'coagulation', 'condensation']
         cond_method: 'ppm_jit' or 'tfl_jit'
         n_coag_substeps: Number of forward-Euler substeps for coagulation
+        max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
+        max_nuc_substeps: Hard cap on nucleation substeps
 
     Returns:
         A callable step function.
@@ -660,13 +743,36 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10):
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
         for process in processes:
             if process == 'nucleation':
-                Nk, Mk, Gc = nucleation_step(
-                    Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
+                # Adaptive nucleation sub-stepping
+                fn = estimate_nucleation_rate(
+                    Gc, temp, pres, boxvol,
                     kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
                     kwargs.get('enable_organic', 1.0),
                     kwargs.get('enable_inorganic', 1.0),
                     kwargs.get('fn_scale', 1.0),
                 )
+                N_total = jnp.sum(Nk)
+                n_nuc = compute_nucleation_substeps(
+                    fn, boxvol, dt, N_total,
+                    max_nucleation_frac, max_nuc_substeps,
+                )
+                dt_nuc = dt / n_nuc
+
+                def nuc_body(i, carry):
+                    Nk_s, Mk_s, Gc_s = carry
+                    Nk_s, Mk_s, Gc_s = nucleation_step(
+                        Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+                        kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
+                        kwargs.get('enable_organic', 1.0),
+                        kwargs.get('enable_inorganic', 1.0),
+                        kwargs.get('fn_scale', 1.0),
+                    )
+                    Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
+                    return (Nk_s, Mk_s, Gc_s)
+
+                Nk, Mk, Gc = jax.lax.fori_loop(
+                    0, n_nuc, nuc_body, (Nk, Mk, Gc))
+
             elif process == 'coagulation':
                 from .diffrax import coag_euler_step
                 Nk, Mk = coag_euler_step(

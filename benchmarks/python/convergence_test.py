@@ -37,6 +37,7 @@ from tomas_jax.solvers.condensation import (
     condensation_step_jax,
     combined_step_tfl_jax,
     combined_step_ppm_jax,
+    full_step_jax,
 )
 from tomas_jax.solvers.diffrax import coag_euler_step
 from benchmarks.python.scenarios import get_scenarios
@@ -124,6 +125,58 @@ def _run_constant_gc_combined_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol,
     return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps)
 
 
+def _run_constant_gc_full_scan_tfl(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
+                                    alpha, dt, nsteps, org_conc, nh3_conc,
+                                    fion):
+    """Nucl + Coag + TFL condensation scan with Gc reset each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+              org_conc, nh3_conc, fion):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = full_step_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
+                org_conc, nh3_conc, fion,
+                enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
+                use_tfl=1.0)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+                 org_conc, nh3_conc, fion)
+
+
+def _run_constant_gc_full_scan_ppm(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
+                                    alpha, dt, nsteps, org_conc, nh3_conc,
+                                    fion):
+    """Nucl + Coag + PPM condensation scan with Gc reset each step."""
+    @partial(jax.jit, static_argnums=(10,))
+    def _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+              org_conc, nh3_conc, fion):
+        Gc0 = Gc.copy()
+        def step(carry, _):
+            Nk_c, Mk_c, Gc_c = carry
+            Nk_c, Mk_c, _ = full_step_jax(
+                Nk_c, Mk_c, Gc_c, xk, temp, pres, boxvol, rh, alpha, dt,
+                org_conc, nh3_conc, fion,
+                enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
+                use_tfl=0.0)
+            diag = jnp.array([jnp.sum(Nk_c),
+                               jnp.sum(Mk_c[:, :SRTH2O]),
+                               Gc0[SRTSO4]])
+            return (Nk_c, Mk_c, Gc0), diag
+        (Nk_f, Mk_f, Gc_f), hist = jax.lax.scan(
+            step, (Nk, Mk, Gc), None, length=nsteps)
+        return Nk_f, Mk_f, Gc_f, hist
+    return _scan(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, nsteps,
+                 org_conc, nh3_conc, fion)
+
+
 def _run_coag_only_scan(Nk, Mk, xk, temp, pres, boxvol, dt, nsteps,
                         n_substeps=3):
     """Coag-only scan: Euler + MNFIX per timestep."""
@@ -151,7 +204,7 @@ DT = 60.0
 NSTEPS = 1440  # 24 hours
 
 # Grid starting points
-XK0_17NM = (np.pi / 6.0) * (1.7e-9) ** 3 * DENS_INIT  # 1.7nm start
+XK0_17NM = (np.pi / 6.0) * (1.7e-9) ** 3 * DENS_INIT  # 1.7nm start (Dunne 2016 cluster)
 XK0_STANDARD = 1.0e-21 * 2.0 ** (-6)  # standard TOMAS (Mo ≈ 1.5625e-23, ~3.2nm)
 
 
@@ -163,8 +216,9 @@ def dp_nm_to_xk0(dp_nm):
 # 40 bins (×2) covers the same mass range as 36 bins with 4 extra bins on top.
 # 80 bins (×√2) doubles the resolution while spanning the same range.
 BASE_GRID_CONFIGS = [
-    (40, 2.0,       "×2"),
-    (80, 2.0**0.5,  "×√2"),
+    (40, 2.0,         "×2"),
+    (80, 2.0**0.5,    "×√2"),
+    # (160, 2.0**0.25,  "×2^¼"),  # uncomment when coag jaggedness is resolved
 ]
 
 
@@ -396,12 +450,19 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
     # Convert H2SO4 molec/cm3 to kg/grid cell
     h2so4_kg = h2so4_molec_cm3 * BOXVOL * (MW_H2SO4 / 1000.0) / AVOGADRO
 
-    if mode == 'combined':
+    if mode == 'full':
+        mode_label = 'Nucl+Coag+Cond'
+    elif mode == 'combined':
         mode_label = 'Coag+Cond'
     elif mode == 'coag_only':
         mode_label = 'Coag-only'
     else:
         mode_label = 'Cond-only'
+
+    # Nucleation parameters (matching Fortran/run_24h_scenarios)
+    NUC_ORG_CONC = 1e7   # organic vapor [molec/cm3]
+    NUC_NH3_CONC = 1e9   # NH3 [molec/cm3]
+    NUC_FION = 3.0       # ion formation rate [pairs/cm3/s]
 
     if constant_gc_mode:
         prod_val = 0.0
@@ -704,9 +765,9 @@ def run_convergence(scenario_idx=0, make_plots=True, dt_override=None,
         '_prod_rate_kg': float(prod_val),
     }
 
-    # Load Fortran results if requested
+    # Load Fortran results if requested (no Fortran coag-only reference available)
     fortran_data = None
-    if include_fortran:
+    if include_fortran and mode != 'coag_only':
         fortran_label = "Fortran Coag+Cond" if mode == 'combined' else "Fortran TFL"
         print(f"\n--- Loading {fortran_label} results (36 bins, standard grid) ---")
         fortran_data = load_fortran_results(use_dt, mode=mode)
@@ -1147,6 +1208,75 @@ def plot_convergence(results, scenario_id_or_label, meta=None,
     plt.close(fig)
     print(f"Saved: {path5}")
 
+    # =====================================================================
+    # Figure 8: Combined presentation — all methods on same axes
+    # =====================================================================
+    # Two panels: dN/dlogDp (left) and dM/dlogDp (right)
+    # Shows: Initial (gray), TFL (solid), PPM (dashed), Fortran (dotted green)
+    fig, (ax_n, ax_m) = plt.subplots(1, 2, figsize=(14, 6), facecolor=_BG)
+    fig.suptitle(f'Size & Mass Distribution ({process_label})  /  {display_tag}',
+                 fontsize=13, color=_TEXT, fontweight='bold',
+                 x=0.02, ha='left', y=0.98)
+
+    # Plot initial (gray, thick)
+    for nbins_key in sorted_keys:
+        r = results[nbins_key]
+        Dp_n, dN_init = compute_dNdlogDp(r['Nk_init'], r['xk'])
+        Dp_m, dM_init = compute_dMdlogDp(r['Mk_init'], r['xk'])
+        ax_n.plot(Dp_n, dN_init, color='#AAAAAA', lw=2.0, ls='-',
+                  label=f'Initial ({r["label"]})' if nbins_key == sorted_keys[0] else None)
+        ax_m.plot(Dp_m, dM_init, color='#AAAAAA', lw=2.0, ls='-',
+                  label=f'Initial ({r["label"]})' if nbins_key == sorted_keys[0] else None)
+        # Only show one initial curve since they're nearly identical at different resolutions
+        break
+
+    # Plot TFL (solid) and PPM (dashed) for each resolution
+    for nbins_key in sorted_keys:
+        r = results[nbins_key]
+        c = _color(nbins_key)
+        lw = _lw(nbins_key)
+
+        # TFL — solid
+        if 'tfl_Nk' in r:
+            Dp, dN = compute_dNdlogDp(r['tfl_Nk'], r['xk'])
+            ax_n.plot(Dp, dN, color=c, lw=lw, ls='-',
+                      label=f'TFL {r["label"]}')
+            Dp, dM = compute_dMdlogDp(r['tfl_Mk'], r['xk'])
+            ax_m.plot(Dp, dM, color=c, lw=lw, ls='-',
+                      label=f'TFL {r["label"]}')
+
+        # PPM — dashed
+        if 'ppm_Nk' in r:
+            Dp, dN = compute_dNdlogDp(r['ppm_Nk'], r['xk'])
+            ax_n.plot(Dp, dN, color=c, lw=lw, ls='--',
+                      label=f'PPM {r["label"]}')
+            Dp, dM = compute_dMdlogDp(r['ppm_Mk'], r['xk'])
+            ax_m.plot(Dp, dM, color=c, lw=lw, ls='--',
+                      label=f'PPM {r["label"]}')
+
+    # Fortran overlay
+    if fortran_data is not None:
+        Dp_f, dN_f = compute_dNdlogDp(fortran_data['Nk'], fortran_data['xk'])
+        ax_n.plot(Dp_f, dN_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
+                  ls=_FORTRAN_LS, label=fortran_legend)
+        Dp_f, dM_f = compute_dMdlogDp(fortran_data['Mk'], fortran_data['xk'])
+        ax_m.plot(Dp_f, dM_f, color=_FORTRAN_C, lw=_FORTRAN_LW,
+                  ls=_FORTRAN_LS, label=fortran_legend)
+
+    xlim = _get_xlim_from_ppm(results, sorted_keys)
+    for ax, ylabel in [(ax_n, 'dN/dlog Dp  [cm$^{-3}$]'),
+                        (ax_m, 'dM/dlog Dp  [$\\mu$g m$^{-3}$]')]:
+        _nyt_ax(ax, xlabel='Diameter [nm]', ylabel=ylabel)
+        _nyt_legend(ax, loc='upper right')
+        ax.set_xlim(xlim)
+
+    _add_info_box(fig, info_text)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    path8 = os.path.join(outdir, f'convergence_presentation_{tag}.png')
+    fig.savefig(path8, dpi=180, bbox_inches='tight', facecolor=_BG)
+    plt.close(fig)
+    print(f"Saved: {path8}")
+
     # -----------------------------------------------------------------
     # Shared legend helper for time-series figures (Figs 6 & 7)
     # Convention: solid = TFL, dashed = PPM; color = resolution
@@ -1325,9 +1455,9 @@ def main():
                         help='Load and overlay Fortran TFL results (36 bins)')
     parser.add_argument('--no-plots', action='store_true',
                         help='Skip plot generation')
-    parser.add_argument('--mode', choices=['cond_only', 'combined', 'coag_only'],
+    parser.add_argument('--mode', choices=['cond_only', 'combined', 'coag_only', 'full'],
                         default='cond_only',
-                        help='Mode: cond_only (default), combined (coag+cond), or coag_only')
+                        help='Mode: cond_only (default), combined (coag+cond), coag_only, or full (nucl+coag+cond)')
     parser.add_argument('--extra-bins', type=int, default=0,
                         help='Extra bins per resolution (e.g., 4 → 40/80/160 for 1nm start)')
     args = parser.parse_args()

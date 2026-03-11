@@ -80,6 +80,51 @@ k = exp(u - exp(v * (T/1000 - w)))
 - Always placed in bin 0 (mnuc < XK0 = 1.6e-23 kg)
 - Composition: 90% SO4, 10% organic (last organic species)
 
+## Adaptive Nucleation Sub-Stepping
+
+High nucleation rates (J > 100 cm⁻³s⁻¹) at H2SO4 ≥ 1e8 molec/cm³ can create dN ~ 2e10 particles in a single 60s timestep — comparable to the entire existing population. This sudden particle surge drives explosive N² coagulation rates in the subsequent operator-split step.
+
+### Algorithm
+
+Before nucleation, estimate the total rate and compute substeps:
+
+```
+fn = estimate_nucleation_rate(Gc, temp, pres, boxvol, org_conc, nh3_conc, fion, ...)
+dN_full = fn * boxvol * dt
+n_sub = ceil(dN_full / (max_frac * N_total))    # clamped to [1, max_substeps]
+dt_nuc = dt / n_sub
+```
+
+Then loop `n_sub` times, each calling `nucleation_step(dt_nuc)` + `mnfix_jax()`:
+- Each substep recalculates fn with updated (depleted) gas
+- When gas is exhausted in substep k, subsequent substeps see zero gas and add nothing
+- MNFIX between substeps redistributes particles to proper bins
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_nucleation_frac` | 0.5 | Max dN/N_total per substep (50%) |
+| `max_nuc_substeps` | 20 | Hard cap on number of substeps |
+
+### Typical Values
+
+- J ~ 3 cm⁻³s⁻¹ (H2SO4=1e7, org=1e7): n_sub = 1 (no overhead)
+- J ~ 363 cm⁻³s⁻¹ (H2SO4=1e8, org=1e7): n_sub = 5 at N_total=1e10, n_sub = 20 at N_total=1e8
+
+### JIT Compatibility
+
+- `n_nuc` is a JAX traced int → `fori_loop(0, n_nuc, ...)` compiles to XLA `while_loop`
+- `dt_nuc = dt / n_nuc` is a traced float → works inside JIT
+- `max_nucleation_frac`, `max_nuc_substeps` are Python constants captured in closure → no recompilation
+
+### Functions
+
+- `estimate_nucleation_rate()`: Computes J without mutating state (calls both ricco + dunne)
+- `compute_nucleation_substeps()`: Returns n_sub = ceil(dN / (frac * N_total)), clamped to [1, max]
+
+Both in `tomas_jax/physics/nucleation.py`, used by `_full_step_core()`, `condensation_step_with_nucleation_jax()`, `make_step()`, and all scan-fused loops.
+
 ## Integration in TOMAS-JAX
 
 ### Unit Conversions
@@ -120,7 +165,7 @@ Multiplicative float masks (0.0/1.0) avoid JIT recompilation:
 
 ## Files
 
-- `tomas_jax/physics/nucleation.py` — 3 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `nucleation_step`
+- `tomas_jax/physics/nucleation.py` — 5 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `estimate_nucleation_rate`, `compute_nucleation_substeps`, `nucleation_step`
 - `tomas_jax/solvers/condensation.py` — `condensation_step_with_nucleation_jax`, `run_nucleation_condensation_scan`
 - `tests/test_nucleation.py` — 24 unit tests
 - `run_box_model.py` — nucleation in time loop with `--no-nucleation` flag
@@ -183,3 +228,47 @@ Files: `tomas_fortran/harness/benchmark_nucleation.f`, `benchmarks/python/compar
 - fig6: Per-scenario error bars (nucl_cond and full)
 - fig7: Error heatmap (scenario × hour)
 - fig8: Summary statistics table
+
+## Constant-Gas vs Fixed-Production Benchmark
+
+Dedicated full-mode benchmark comparing JAX PPM (40/80 bins) vs Fortran TFL (36 bins) over 24 hours with nucleation + coagulation + condensation.
+
+**Script:** `benchmarks/python/benchmark_nucleation_constgc.py`
+**Fortran harness:** `tomas_fortran/harness/benchmark_constgc.f`
+
+### Two Modes
+
+1. **Constant-gas** (`--h2so4 1e7`): H2SO4 reset to fixed concentration each timestep. Open-loop — condensation sink (CS) differences between resolutions compound without feedback, causing 30-67% mass divergence between 40/80 bins.
+
+2. **Fixed-production** (`--prod-rate 1e7`): Constant H2SO4 production rate, gas consumed by condensation. Closed-loop — at steady state, `mcond ≈ prod × dt` regardless of CS, because higher CS → faster gas depletion → lower equilibrium gas → same total condensation. Result: 40-bin and 80-bin M_dry match to **0.0003%**.
+
+### Why Constant-Gas Diverges
+
+The condensation rate is `mcond = Gc * (1 - exp(-CS * dt))`. When gas is held constant:
+- Different resolutions produce different CS values (different bin widths → different sinkfrac distributions)
+- Higher CS → more mass condensed per step → larger particles → even higher CS → divergence compounds
+
+When production rate is fixed:
+- Gas reaches quasi-steady state where `production ≈ CS * Gc`
+- At steady state: `Gc_ss = prod / CS`, so `mcond = prod * dt` (CS cancels)
+- Resolution-dependent CS differences cancel out in the product `CS * Gc_ss`
+
+### Usage
+
+```bash
+# Constant-gas mode (H2SO4 = 1e7 molec/cm3, held constant)
+python -m benchmarks.python.benchmark_nucleation_constgc --h2so4 1e7
+
+# Fixed-production mode (H2SO4 production = 1e7 molec/cm3/s)
+python -m benchmarks.python.benchmark_nucleation_constgc --prod-rate 1e7
+```
+
+## Organic Nucleation Concentration
+
+In real atmospheric models, the organic concentration for Riccobono 2014 nucleation is **not hardcoded**. It is computed dynamically from gas-phase chemistry:
+
+- **SOM-TOMAS**: `org_conc` is computed from the SOMGC array (Secondary Organic Model gas-phase concentrations). The CALC_JNUC function extracts ELVOC from a specific SOM grid species.
+- **Original TOMAS (box.f)**: Uses a simple user-entered constant nucleation rate; does not implement Riccobono/Dunne at all.
+- **Our Fortran harness**: `nucleation_driver.f` takes `org_conc` as a subroutine argument — the caller provides it.
+
+For benchmarks, we use hardcoded values (e.g., `org_conc = 1e7 molec/cm3`). In a real application, `org_conc` should come from the atmospheric model's gas-phase chemistry module.

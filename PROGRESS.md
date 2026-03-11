@@ -4,6 +4,109 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-10 (Tue) — Adaptive Nucleation Sub-Stepping
+
+**Time**: ~PST
+
+### Summary
+
+Implemented adaptive nucleation sub-stepping to handle high nucleation rates (J > 100 cm⁻³s⁻¹) that can create dN comparable to the entire existing particle population in a single 60s timestep.
+
+### Files Modified
+- `tomas_jax/physics/nucleation.py` — Added `estimate_nucleation_rate()` and `compute_nucleation_substeps()` (two new JIT-compilable functions)
+- `tomas_jax/solvers/condensation.py` — Modified `_full_step_core()`, `condensation_step_with_nucleation_jax()`, `full_step_jax()`, `run_nucleation_condensation_scan()`, `run_full_scan()`, and `make_step()` to use adaptive nucleation sub-stepping via `fori_loop`
+- `docs/nucleation.md` — Documented adaptive sub-stepping algorithm and parameters
+
+### Algorithm
+- Before nucleation, estimate total rate J and compute `n_sub = ceil(dN / (max_frac * N_total))`, clamped to [1, max_substeps]
+- Loop `n_sub` times with `dt_nuc = dt / n_sub`, calling `nucleation_step` + `mnfix_jax` per substep
+- Dynamic `n_nuc` compiles to XLA `while_loop` via `jax.lax.fori_loop`
+- Default: `max_nucleation_frac=0.5` (50% per substep), `max_nuc_substeps=20`
+
+### Verification
+- All 83 core tests pass (nucleation: 24, PPM: 31, TFL: 15, coag: 13)
+- Smoke test: J=363 at H2SO4=1e8 gives n_sub=5 (N_total=1e10) or n_sub=20 (N_total=1e8)
+- With sub-stepping disabled (max_frac=1e10), matches original single-step output
+
+---
+
+## 2026-03-10 (Tue) — Web Interface Architecture Specification
+
+**Time**: ~PST
+
+### Summary
+
+Created comprehensive architecture and implementation specification for a public web interface to the TOMAS-JAX box model. Document covers full-stack design: FastAPI backend wrapping existing JAX solvers, React frontend with scientific visualizations, deployment strategy, security, and a phased development roadmap.
+
+### Files Created
+- `docs/web_interface_spec.md` — Full specification covering:
+  - Two-repository architecture (tomas-api + tomas-web)
+  - REST API design (4 endpoints: simulate, results, presets, health)
+  - Async job queue for long-running simulations (full mode: 5–13s)
+  - JIT warmup strategy to avoid 60s cold starts
+  - Frontend layout with 4 visualization types (size distribution, banana plot, time series, conservation)
+  - 6 curated preset scenarios for researchers
+  - Deployment options (Fly.io/Cloud Run + Vercel, ~$8–16/month)
+  - Security: rate limiting, input validation, DoS mitigation
+  - 4-phase development roadmap (MVP in 2–3 weeks)
+  - Risk matrix and complete parameter reference
+
+### Next Steps
+- Decide on monorepo vs two-repo approach
+- Scaffold backend and frontend repositories
+- Implement Phase 1 MVP
+
+---
+
+## 2026-03-10 (Mon) — Constant-Gas Full-Mode Benchmark + Fixed-Production Mode
+
+**Time**: ~15:00 PST
+
+### Summary
+
+Added dedicated nucleation+coagulation+condensation benchmark (`benchmark_nucleation_constgc.py`) comparing JAX PPM (40/80 bins) vs Fortran TFL (36 bins). Discovered and explained mass resolution dependence in constant-gas mode, then implemented fixed-production mode that eliminates it.
+
+### New Files
+
+- **`benchmarks/python/benchmark_nucleation_constgc.py`** — Full-mode benchmark with two gas modes:
+  - *Constant-gas* (`--h2so4 <conc>`): H2SO4 reset each step. Good for comparing against Fortran.
+  - *Fixed-production* (`--prod-rate <rate>`): H2SO4 produced at constant rate, consumed by condensation. Resolution-independent.
+  - Features: 4 figures (dN, dM, timeseries with Gc panel, 3-panel banana plot), Fortran overlay, `--no-organic-nuc` flag
+- **Fortran constgc harness updates**: Added nucleation support (do_nucl toggle, nucleation_driver call, hourly Nk snapshots, dt=10s option)
+- **Makefile**: constgc target now links NUC_OBJS + nucleation_driver.o
+- **convergence_test.py**: Added full-mode scan functions and `--mode full` flag
+
+### Key Finding: Constant-Gas vs Fixed-Production
+
+With **constant gas** (H2SO4 = 1e8, Dunne-only, dt=10s):
+- 40-bin M_dry = 11.35 μg/m³, 80-bin M_dry = 14.70 μg/m³ (**30% divergence**)
+- Cause: Different bin resolutions → different CS → different mcond per step. With gas held constant, CS differences compound without self-correction.
+
+With **fixed production** (prod = 1e7 molec/cm³/s, Dunne-only, dt=10s):
+- 40-bin M_dry = 140.7943 μg/m³, 80-bin M_dry = 140.7947 μg/m³ (**0.0003% match**)
+- Why: Higher CS → faster gas depletion → lower equilibrium gas → same total condensation. The CS cancels: `mcond ≈ CS × (prod/CS) × dt = prod × dt`.
+
+### Organic Nucleation Parameters
+
+Investigated how `org_conc` is handled in original models:
+- **TOMAS box.f**: Uses user-entered constant nucleation rate (no Riccobono/Dunne)
+- **SOM-TOMAS**: Organic concentration computed dynamically from gas-phase chemistry (SOMGC array → ELVOC sum)
+- **Our code**: `org_conc` is a subroutine argument — correct design. Hardcoded `1e7` in benchmarks is a test convenience, not model behavior.
+
+### Performance Audit (not yet implemented)
+
+Identified key bottlenecks for future optimization:
+1. MNFIX called ~12-15 times per timestep (Phases 1 & 2 could be vectorized)
+2. Redundant condensation_sink computation in ezcond (already computed in core)
+3. `n_coag_substeps=10` in full mode (Fortran uses 1; could reduce to 3)
+
+### Known Issues
+
+- Fortran constgc harness currently hardcoded at H2SO4 = 1e8 with organic nucleation disabled (temporary for benchmarking)
+- 160-bin grid commented out in convergence_test.py (coag jaggedness at fine resolution)
+
+---
+
 ## 2026-03-06 (Thu) — Code Review Fixes, PPM Threshold Bug Fix, Branch Merge
 
 **Time**: ~09:00 PST

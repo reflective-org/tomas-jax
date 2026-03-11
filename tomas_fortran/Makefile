@@ -100,7 +100,7 @@ $(TARGET_24H_PPM): benchmark_24h_ppm.o $(PPM_OBJS) $(SHARED_OBJS)
 $(TARGET_NUC): benchmark_nucleation.o $(NUC_OBJS)
 	$(FC) $(FFLAGS) -o $@ $^
 
-$(TARGET_CONSTGC): benchmark_constgc.o $(TOMAS_OBJS)
+$(TARGET_CONSTGC): benchmark_constgc.o $(TOMAS_OBJS) $(NUC_OBJS) nucleation_driver.o
 	$(FC) $(FFLAGS) -o $@ $^
 
 # Compile harness files
