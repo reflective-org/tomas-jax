@@ -305,7 +305,7 @@ def run_benchmark(dt_val=60.0, n_total=1e4, gmd_um=0.02, gsd=1.6,
 
     for label, nbins, factor in GRID_CONFIGS:
         print(f"--- {label} ---")
-        xk0 = (np.pi / 6.0) * (1.7e-9)**3 * DENS_INIT  # 1.7nm start
+        xk0 = (np.pi / 6.0) * (1.7e-9)**3 * DENS_INIT  # 1.7nm start (Dunne 2016 cluster)
         xk = make_grid(nbins=nbins, xk0=xk0, doubling_factor=factor)
 
         Nk, Mk = init_lognormal(n_total, gmd_um, gsd, xk)

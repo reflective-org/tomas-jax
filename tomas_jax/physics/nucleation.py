@@ -110,6 +110,48 @@ def dunne_nucleation_rate(temp, fion, h2so4, nh3, Mair):
     return fn_total, Jbn, Jtn, Jbi, Jti
 
 
+def estimate_nucleation_rate(Gc, temp, pres, boxvol,
+                              org_conc, nh3_conc, fion,
+                              enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0):
+    """Estimate total nucleation rate [cm^-3 s^-1] without mutating state.
+
+    Used by adaptive sub-stepping to decide how many substeps are needed.
+    """
+    h2so4 = Gc[SRTSO4] / boxvol * 1000.0 / 98.0 * AVOGADRO
+    Mair = 2.69e19 * 273.15 / temp * pres / 101325.0
+
+    fn_org = ricco_nucleation_rate(temp, h2so4, org_conc)
+    fn_inorg, _, _, _, _ = dunne_nucleation_rate(temp, fion, h2so4, nh3_conc, Mair)
+
+    return (fn_org * enable_organic + fn_inorg * enable_inorganic) * fn_scale
+
+
+def compute_nucleation_substeps(fn, boxvol, dt, N_total,
+                                 max_frac=0.5, max_substeps=20):
+    """Compute nucleation sub-step count.
+
+    Criterion: limit dN per substep to max_frac * N_total.
+
+    Args:
+        fn: Nucleation rate [cm^-3 s^-1]
+        boxvol: Grid cell volume [cm^3]
+        dt: Full timestep [s]
+        N_total: Current total particle number [#/cell]
+        max_frac: Max fractional increase per substep (default 0.5 = 50%)
+        max_substeps: Hard cap on number of substeps
+
+    Returns:
+        n_sub: int (JAX traced value, >= 1)
+    """
+    dN_full = fn * boxvol * dt
+    n_sub = jnp.where(
+        N_total > 1.0,
+        jnp.ceil(dN_full / (max_frac * N_total)),
+        1.0
+    ).astype(int)
+    return jnp.clip(n_sub, 1, max_substeps)
+
+
 def nucleation_step(
     Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
     org_conc, nh3_conc, fion,

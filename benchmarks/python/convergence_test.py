@@ -204,7 +204,7 @@ DT = 60.0
 NSTEPS = 1440  # 24 hours
 
 # Grid starting points
-XK0_17NM = (np.pi / 6.0) * (1.7e-9) ** 3 * DENS_INIT  # 1.7nm start
+XK0_17NM = (np.pi / 6.0) * (1.7e-9) ** 3 * DENS_INIT  # 1.7nm start (Dunne 2016 cluster)
 XK0_STANDARD = 1.0e-21 * 2.0 ** (-6)  # standard TOMAS (Mo ≈ 1.5625e-23, ~3.2nm)
 
 

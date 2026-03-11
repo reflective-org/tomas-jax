@@ -80,6 +80,51 @@ k = exp(u - exp(v * (T/1000 - w)))
 - Always placed in bin 0 (mnuc < XK0 = 1.6e-23 kg)
 - Composition: 90% SO4, 10% organic (last organic species)
 
+## Adaptive Nucleation Sub-Stepping
+
+High nucleation rates (J > 100 cm⁻³s⁻¹) at H2SO4 ≥ 1e8 molec/cm³ can create dN ~ 2e10 particles in a single 60s timestep — comparable to the entire existing population. This sudden particle surge drives explosive N² coagulation rates in the subsequent operator-split step.
+
+### Algorithm
+
+Before nucleation, estimate the total rate and compute substeps:
+
+```
+fn = estimate_nucleation_rate(Gc, temp, pres, boxvol, org_conc, nh3_conc, fion, ...)
+dN_full = fn * boxvol * dt
+n_sub = ceil(dN_full / (max_frac * N_total))    # clamped to [1, max_substeps]
+dt_nuc = dt / n_sub
+```
+
+Then loop `n_sub` times, each calling `nucleation_step(dt_nuc)` + `mnfix_jax()`:
+- Each substep recalculates fn with updated (depleted) gas
+- When gas is exhausted in substep k, subsequent substeps see zero gas and add nothing
+- MNFIX between substeps redistributes particles to proper bins
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_nucleation_frac` | 0.5 | Max dN/N_total per substep (50%) |
+| `max_nuc_substeps` | 20 | Hard cap on number of substeps |
+
+### Typical Values
+
+- J ~ 3 cm⁻³s⁻¹ (H2SO4=1e7, org=1e7): n_sub = 1 (no overhead)
+- J ~ 363 cm⁻³s⁻¹ (H2SO4=1e8, org=1e7): n_sub = 5 at N_total=1e10, n_sub = 20 at N_total=1e8
+
+### JIT Compatibility
+
+- `n_nuc` is a JAX traced int → `fori_loop(0, n_nuc, ...)` compiles to XLA `while_loop`
+- `dt_nuc = dt / n_nuc` is a traced float → works inside JIT
+- `max_nucleation_frac`, `max_nuc_substeps` are Python constants captured in closure → no recompilation
+
+### Functions
+
+- `estimate_nucleation_rate()`: Computes J without mutating state (calls both ricco + dunne)
+- `compute_nucleation_substeps()`: Returns n_sub = ceil(dN / (frac * N_total)), clamped to [1, max]
+
+Both in `tomas_jax/physics/nucleation.py`, used by `_full_step_core()`, `condensation_step_with_nucleation_jax()`, `make_step()`, and all scan-fused loops.
+
 ## Integration in TOMAS-JAX
 
 ### Unit Conversions
@@ -120,7 +165,7 @@ Multiplicative float masks (0.0/1.0) avoid JIT recompilation:
 
 ## Files
 
-- `tomas_jax/physics/nucleation.py` — 3 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `nucleation_step`
+- `tomas_jax/physics/nucleation.py` — 5 functions: `ricco_nucleation_rate`, `dunne_nucleation_rate`, `estimate_nucleation_rate`, `compute_nucleation_substeps`, `nucleation_step`
 - `tomas_jax/solvers/condensation.py` — `condensation_step_with_nucleation_jax`, `run_nucleation_condensation_scan`
 - `tests/test_nucleation.py` — 24 unit tests
 - `run_box_model.py` — nucleation in time loop with `--no-nucleation` flag

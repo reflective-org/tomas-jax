@@ -4,6 +4,32 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-10 (Tue) — Adaptive Nucleation Sub-Stepping
+
+**Time**: ~PST
+
+### Summary
+
+Implemented adaptive nucleation sub-stepping to handle high nucleation rates (J > 100 cm⁻³s⁻¹) that can create dN comparable to the entire existing particle population in a single 60s timestep.
+
+### Files Modified
+- `tomas_jax/physics/nucleation.py` — Added `estimate_nucleation_rate()` and `compute_nucleation_substeps()` (two new JIT-compilable functions)
+- `tomas_jax/solvers/condensation.py` — Modified `_full_step_core()`, `condensation_step_with_nucleation_jax()`, `full_step_jax()`, `run_nucleation_condensation_scan()`, `run_full_scan()`, and `make_step()` to use adaptive nucleation sub-stepping via `fori_loop`
+- `docs/nucleation.md` — Documented adaptive sub-stepping algorithm and parameters
+
+### Algorithm
+- Before nucleation, estimate total rate J and compute `n_sub = ceil(dN / (max_frac * N_total))`, clamped to [1, max_substeps]
+- Loop `n_sub` times with `dt_nuc = dt / n_sub`, calling `nucleation_step` + `mnfix_jax` per substep
+- Dynamic `n_nuc` compiles to XLA `while_loop` via `jax.lax.fori_loop`
+- Default: `max_nucleation_frac=0.5` (50% per substep), `max_nuc_substeps=20`
+
+### Verification
+- All 83 core tests pass (nucleation: 24, PPM: 31, TFL: 15, coag: 13)
+- Smoke test: J=363 at H2SO4=1e8 gives n_sub=5 (N_total=1e10) or n_sub=20 (N_total=1e8)
+- With sub-stepping disabled (max_frac=1e10), matches original single-step output
+
+---
+
 ## 2026-03-10 (Tue) — Web Interface Architecture Specification
 
 **Time**: ~PST
