@@ -114,8 +114,8 @@ tomas-api/
 │   └── test_presets.py
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt             # fastapi, uvicorn, jax[cpu], tomas-jax
-├── pyproject.toml
+├── pyproject.toml               # fastapi, uvicorn, jax[cpu], tomas-jax
+├── uv.lock                      # Pinned dependency lockfile
 └── README.md
 ```
 
@@ -426,20 +426,30 @@ class JobManager:
 
 ### 4.6 `tomas-jax` as a Dependency
 
-The API repo should install `tomas-jax` as a pip package:
-
-```
-# requirements.txt
-tomas-jax @ git+https://github.com/aliakherati/tomas-jax.git
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.0
-```
-
-Or, for development, pip install the local checkout:
+The API repo should install `tomas-jax` as a dependency. With uv:
 
 ```bash
-pip install -e /path/to/tomas-jax
+uv add tomas-jax @ git+https://github.com/aliakherati/tomas-jax.git
+uv add fastapi uvicorn[standard] pydantic
+```
+
+Or in `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    "tomas-jax @ git+https://github.com/aliakherati/tomas-jax.git",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.0",
+]
+```
+
+For development, install the local checkout:
+
+```bash
+uv pip install -e /path/to/tomas-jax
+# Or: pip install -e /path/to/tomas-jax
 ```
 
 **Precaution:** Pin the `tomas-jax` version/commit hash in production to avoid breaking changes.
@@ -784,8 +794,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN pip install uv && uv sync --frozen --no-dev
 
 # Copy app
 COPY app/ app/
@@ -1020,7 +1030,7 @@ JAX JIT compilation takes 30–60 seconds on first call. Strategies:
 |------|--------|------------|------------|
 | JAX cold start (60s) | Poor first-request UX | High | Warmup in lifespan; keep-alive pings; min-instances=1 |
 | Full-mode simulation timeout | User thinks it's broken | Medium | Show progress bar; set 120s timeout with clear message; default to fast modes |
-| JAX version mismatch | Subtle numerical differences | Low | Pin JAX version in requirements.txt; test in Docker locally |
+| JAX version mismatch | Subtle numerical differences | Low | Pin JAX version in uv.lock; test in Docker locally |
 | Memory leak from JIT cache | Server OOM after many unique shapes | Low | Only support NBINS=40/80; monitor memory; restart weekly |
 | Plotly.js bundle size (3.5 MB) | Slow frontend load | Medium | Use partial bundle (only scatter + heatmap); lazy-load |
 | Concurrent JAX on single CPU | Simulations interfere | Medium | Semaphore limits concurrency to 2; thread pool for isolation |

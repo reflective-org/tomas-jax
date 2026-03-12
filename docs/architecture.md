@@ -360,13 +360,15 @@ The naive `F_M = F_N * r_avg_donor` caused 81% N loss over 24h. Replaced with ex
 ### 8.1 Basic Usage
 
 ```bash
-# Install
-pip install -e .
+# Install (uv recommended)
+uv sync --extra dev
+# Or: pip install -e ".[dev]"
 
-# Box model (coagulation + condensation, 24h)
-python run_box_model.py                       # default: TFL sequential
-python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching, fast)
-python run_box_model.py --method ppm_jit      # PPM JIT (fastest condensation)
+# Box model (nucleation + coagulation + condensation, 24h)
+python run_box_model.py                       # default: PPM JIT
+python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching)
+python run_box_model.py --no-nucleation       # coag + cond only
+python run_box_model.py --no-nucleation --no-condensation  # coag only
 
 # Run all tests
 python -m pytest tests/ -v

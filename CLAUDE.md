@@ -7,8 +7,11 @@ TOMAS-JAX is a JAX re-implementation of the TOMAS (TwO-Moment Aerosol Sectional)
 ## Build & Run
 
 ```bash
-# Install
-pip install -e .
+# Install (uv recommended)
+uv sync --extra dev
+
+# Or with pip
+pip install -e ".[dev]"
 
 # Run box model
 python run_box_model.py
