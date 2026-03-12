@@ -22,7 +22,7 @@ jax.config.update("jax_enable_x64", True)
 # =========================================================================
 # 2. Model Dimensions (TOMAS Standard)
 # =========================================================================
-NBINS = 36          # Number of size bins
+NBINS = 40          # Number of size bins (1.7nm start, mass-doubling)
 ICOMP = 44          # Total number of mass tracking components (species)
 IDIAG = 2           # Number of diagnostic species (usually at the end)
 
@@ -82,8 +82,15 @@ TINY_M = 1.0e-25    # Threshold for mass
 # =========================================================================
 # 7. Bin Boundaries
 # =========================================================================
-# Mass-doubling grid: xk[k+1] = 2 * xk[k], starting at 1.6033e-23 kg.
-XK0 = 1.6033e-23    # Lower boundary of first bin [kg]
+# 1.7nm start grid (Dunne 2016 nucleation cluster size)
+# XK0 = (pi/6) * d^3 * rho, with d=1.7nm, rho=1770 kg/m3
+import numpy as _np
+_DENS_INIT = 1770.0  # kg/m3 (initial particle density)
+XK0 = (_np.pi / 6.0) * (1.7e-9)**3 * _DENS_INIT  # ~4.553e-24 kg
+
+# Legacy 36-bin grid (3.2nm start, for Fortran comparison benchmarks)
+XK0_LEGACY = 1.6033e-23  # Lower boundary of old 36-bin grid [kg]
+NBINS_LEGACY = 36
 
 
 def xk_boundaries():
@@ -94,18 +101,31 @@ def xk_boundaries():
     return make_grid(NBINS, XK0, 2.0)
 
 
-def make_grid(nbins=36, xk0=XK0, doubling_factor=2.0):
+def make_grid(nbins=None, xk0=None, doubling_factor=2.0):
     """Create mass-ratio bin boundary array for arbitrary resolution.
 
     Args:
-        nbins: Number of size bins
-        xk0: Lower boundary of first bin [kg]
-        doubling_factor: Mass ratio between adjacent bins (2.0 = standard TOMAS)
+        nbins: Number of size bins (default: NBINS=40)
+        xk0: Lower boundary of first bin [kg] (default: XK0, 1.7nm start)
+        doubling_factor: Mass ratio between adjacent bins
+            2.0 = standard TOMAS (40 bins), sqrt(2) = high-res (80 bins)
 
     Returns:
         xk: Bin boundaries, shape (nbins+1,), JAX float64 array
     """
     import jax.numpy as jnp
+    if nbins is None:
+        nbins = NBINS
+    if xk0 is None:
+        xk0 = XK0
     exponents = jnp.arange(nbins + 1, dtype=jnp.float64)
     xk = xk0 * jnp.power(doubling_factor, exponents)
     return xk
+
+
+def make_grid_80bin():
+    """Create 80-bin high-resolution grid (1.7nm start, sqrt(2) mass ratio).
+
+    Same diameter range as the 40-bin default but with double resolution.
+    """
+    return make_grid(nbins=80, xk0=XK0, doubling_factor=2.0**0.5)

@@ -11,7 +11,7 @@ import pytest
 
 from tomas_jax.core.config import (
     NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
-    SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO
+    SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO, XK0,
 )
 from tomas_jax.physics.condensation_tfl_jax import tmcond_jax, ezcond_tfl_jax
 from tomas_jax.solvers.condensation import (
@@ -30,7 +30,7 @@ PI_F = 3.141592654
 @pytest.fixture
 def xk():
     x = np.zeros(NBINS + 1)
-    x[0] = 1.6033e-23
+    x[0] = XK0
     for k in range(NBINS):
         x[k + 1] = 2.0 * x[k]
     return jnp.array(x)

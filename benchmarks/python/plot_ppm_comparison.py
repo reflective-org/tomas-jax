@@ -23,7 +23,8 @@ from .utils import load_csv
 from .test_cases import CASES, CASE_KEYS, init_lognormal
 
 from tomas_jax.core.config import (
-    SRTSO4, ICOMP, ICOMP_NODIAG, IDIAG, N_GAS_SPECIES, NBINS,
+    SRTSO4, ICOMP, ICOMP_NODIAG, IDIAG, N_GAS_SPECIES,
+    NBINS_LEGACY as NBINS,
 )
 from tomas_jax.physics.condensation_sink import calc_condensation_sink
 from tomas_jax.physics.ezcond import ezcond

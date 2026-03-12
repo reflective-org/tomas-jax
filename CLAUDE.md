@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-TOMAS-JAX is a JAX re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model. It implements coagulation (JIT-compiled), condensation (TFL/PPM, JIT-compiled), and nucleation (Riccobono 2014 + Dunne 2016, JIT-compiled) for a 36-bin, 44-component aerosol size distribution.
+TOMAS-JAX is a JAX re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model. It implements coagulation (JIT-compiled), condensation (TFL/PPM, JIT-compiled), and nucleation (Riccobono 2014 + Dunne 2016, JIT-compiled) for a 40-bin (1.7nm start), 44-component aerosol size distribution.
 
 ## Build & Run
 
@@ -23,7 +23,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 ## Key Architecture Rules
 
 - **float64 everywhere.** `config.py` sets `jax_enable_x64 = True` before any JAX import. Never use float32 for aerosol microphysics.
-- **config.py is the single source of truth** for dimensions (NBINS=36, ICOMP=44), species indices, and physical constants. Use `make_grid(nbins, xk0, doubling_factor)` for custom bin grids. JIT-compiled functions must derive bin count from array shapes (`Nk.shape[0]`), never from the config NBINS constant.
+- **config.py is the single source of truth** for dimensions (NBINS=40, ICOMP=44), species indices, and physical constants. Default grid: 40 bins starting at 1.7nm (Dunne 2016 cluster size), mass-doubling, covering 1.7nm–17.5μm. Use `make_grid(nbins, xk0, doubling_factor)` for custom bin grids. `make_grid_80bin()` returns the 80-bin high-resolution grid (same range, √2 mass ratio). Legacy 36-bin grid: `NBINS_LEGACY=36`, `XK0_LEGACY=1.6033e-23`. JIT-compiled functions must derive bin count from array shapes (`Nk.shape[0]`), never from the config NBINS constant.
 - **TomasState is a NamedTuple** with fields: Nk, Mk, xk, temp, pres, boxvol, Gc, rh, alpha. Use `.create()` factory for initialization, `.update()` for modification.
 - **Coagulation has two solvers:** `diffrax_step` (Tsit5 adaptive ODE, rtol=1e-4, atol=1e-10, for standalone coagulation) and `coag_euler_step` (forward Euler + MNFIX, for scan-fused loops). The forward Euler solver is more stable for high-N scenarios — higher-order methods amplify N^2 coagulation rates. Legacy alias `coag_rk4_step` still works. The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
 - **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). Both TFL_JIT and PPM_JIT are fast paths. PPM_JIT uses analytical mass-weighted fluxes for exact conservation and is ~1.8x faster than TFL_JIT for condensation-only. TFL matches Fortran output exactly. Use `run_condensation_scan_tfl()` or `run_condensation_scan()` for scan-fused time loops.
@@ -42,7 +42,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 
 ```
 tomas_jax/
-  core/config.py              — Constants, dimensions, species indices
+  core/config.py              — Constants, dimensions (NBINS=40, 1.7nm start), species indices, make_grid(), make_grid_80bin()
   core/state.py               — TomasState NamedTuple
   core/mnfix_jax.py           — Mass-number drift correction (vectorized JAX)
   physics/condensation.py     — TFL condensation (dmdt_int + tmcond)

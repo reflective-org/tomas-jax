@@ -91,7 +91,7 @@ The JAX production solver uses Tsit5 (5th-order Runge-Kutta) from diffrax.
 | Order of accuracy | 1st | 1st | 5th |
 | Error control | CFL-like (dtlimit/itlimit) | CFL-like (matching) | Embedded RK pair |
 | Mass conservation | Depends on dt | Depends on dt | ~1e-13 relative |
-| Speed (36 bins) | Baseline | Comparable | 10-100x faster via JIT |
+| Speed (40 bins) | Baseline | Comparable | 10-100x faster via JIT |
 
 ## 24-Hour Comprehensive Benchmark (50 Scenarios)
 

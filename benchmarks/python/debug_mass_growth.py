@@ -5,7 +5,8 @@ import jax
 import jax.numpy as jnp
 
 from tomas_jax.core.config import (
-    NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
+    NBINS_LEGACY as NBINS, XK0_LEGACY,
+    ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
     SRTSO4, SRTH2O, MW_H2SO4, CS_EPS
 )
 from tomas_jax.solvers.condensation import condensation_step
@@ -43,7 +44,7 @@ def main():
     sc = scenarios[19]  # S20
 
     xk_np = np.zeros(NBINS + 1)
-    xk_np[0] = 1.6033e-23
+    xk_np[0] = XK0_LEGACY
     for k in range(NBINS):
         xk_np[k + 1] = 2.0 * xk_np[k]
     xk_j = jnp.array(xk_np)

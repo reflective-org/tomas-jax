@@ -77,7 +77,7 @@ k = exp(u - exp(v * (T/1000 - w)))
 - Radius: 0.85 nm (fixed for both parameterizations)
 - Density: 1350 kg/m3
 - Mass: `mnuc = 4/3 * pi * (0.85e-9)^3 * 1350 = ~3.47e-24 kg`
-- Always placed in bin 0 (mnuc < XK0 = 1.6e-23 kg)
+- Always placed in bin 0 (mnuc < XK0 ≈ 4.55e-24 kg for 1.7nm start)
 - Composition: 90% SO4, 10% organic (last organic species)
 
 ## Adaptive Nucleation Sub-Stepping

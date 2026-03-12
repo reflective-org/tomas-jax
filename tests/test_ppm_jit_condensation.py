@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 from tomas_jax.core.config import (
     NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
-    SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO
+    SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO, XK0,
 )
 from tomas_jax.core.mnfix_jax import mnfix_jax
 from tomas_jax.physics.ezcond_ppm_jax import ezcond_ppm_jax
@@ -38,9 +38,9 @@ PI_F = 3.141592654
 
 
 def make_xk():
-    """Fortran-style mass-doubling bin boundaries."""
+    """Mass-doubling bin boundaries."""
     xk = np.zeros(NBINS + 1)
-    xk[0] = 1.6033e-23
+    xk[0] = XK0
     for k in range(NBINS):
         xk[k + 1] = 2.0 * xk[k]
     return jnp.array(xk)

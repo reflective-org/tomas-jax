@@ -33,7 +33,7 @@ Each timestep:
 tomas_jax/
 │
 ├── core/
-│   ├── config.py                  ─── Constants, NBINS=36, ICOMP=44, species indices
+│   ├── config.py                  ─── Constants, NBINS=40 (1.7nm start), ICOMP=44, grid presets, species indices
 │   ├── state.py                   ─── TomasState NamedTuple
 │   └── mnfix_jax.py               ─── Mass-number consistency (Fortran partial-transfer)
 │

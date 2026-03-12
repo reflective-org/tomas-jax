@@ -4,6 +4,36 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-12 (Thu) — Default Grid: 40 Bins, 1.7nm Start
+
+**Time**: ~12:00 PM PST
+
+### Summary
+Changed default bin grid from 36 bins (3.2nm start) to 40 bins (1.7nm start, Dunne 2016 nucleation cluster size). Added 80-bin high-resolution preset. All physics/solver code is shape-agnostic — no changes needed there.
+
+### Files Modified
+- `tomas_jax/core/config.py` — NBINS=40, XK0=(pi/6)*(1.7e-9)^3*1770, added `XK0_LEGACY`, `NBINS_LEGACY`, `make_grid_80bin()`
+- `tests/test_ppm_condensation.py` — Import NBINS from config instead of hardcoded
+- `tests/test_tfl_jit_condensation.py` — Use XK0 from config
+- `tests/test_ppm_jit_condensation.py` — Use XK0 from config
+- 13 benchmark scripts — Import `NBINS_LEGACY as NBINS` and `XK0_LEGACY` for Fortran 36-bin comparison
+- `benchmarks/python/test_cases.py` — Derive nbins from xk shape instead of config constant
+- `CLAUDE.md` — Updated dimensions and grid documentation
+
+### Grid Configurations
+| Config | Bins | Start | End | Mass ratio | Usage |
+|--------|------|-------|-----|------------|-------|
+| Default (40-bin) | 40 | 1.7nm | 17.5μm | ×2 | Production, nucleation studies |
+| High-res (80-bin) | 80 | 1.7nm | 17.5μm | ×√2 | Convergence studies |
+| Legacy (36-bin) | 36 | 2.6nm | 10.6μm | ×2 | Fortran comparison benchmarks |
+
+### Verification
+- All 132 core tests pass (nucleation, PPM, TFL, coagulation)
+- 24 pre-existing test_24h_scenarios failures (load stored 36-bin data — unrelated)
+- Nucleation cluster (mnuc=3.47e-24 kg) still fits in bin 0 of 40-bin grid
+
+---
+
 ## 2026-03-11 (Wed) — Zhao 2024 11-Mechanism NPF Scheme
 
 **Time**: ~5:00 PM PST
