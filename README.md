@@ -27,15 +27,30 @@ A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol m
 
 ## Installation
 
-**Requirements:** Python 3.9+
+**Requirements:** Python 3.10+
+
+### With uv (Recommended)
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone and sync
+git clone https://github.com/aliakherati/tomas-jax.git
+cd tomas-jax
+uv sync --extra dev       # Install all dependencies from lockfile
+```
+
+### With pip
 
 ```bash
 git clone https://github.com/aliakherati/tomas-jax.git
 cd tomas-jax
-pip install -e .
+pip install -e ".[dev]"   # Install with dev dependencies
 ```
 
-Verify:
+### Verify
+
 ```bash
 python -c "from tomas_jax import TomasState, CoagulationSolver; print('OK')"
 python -m pytest tests/ --ignore=tests/test_24h_scenarios.py -q
@@ -50,24 +65,51 @@ python -m pytest tests/ --ignore=tests/test_24h_scenarios.py -q
 ```bash
 # Full model: nucleation + coagulation + condensation (24h, 60s timestep)
 python run_box_model.py
-
-# Select condensation method
-python run_box_model.py --method ppm_jit       # PPM (fastest, default)
-python run_box_model.py --method tfl_jit       # TFL (Fortran-matching)
-
-# Select nucleation scheme
-python run_box_model.py --nucl-scheme ricco_dunne   # Riccobono+Dunne (default)
-python run_box_model.py --nucl-scheme zhao2024      # Zhao 2024 (11 mechanisms)
-
-# Disable processes
-python run_box_model.py --no-nucleation        # Coagulation + condensation only
-python run_box_model.py --no-condensation      # Coagulation only
-
-# Use composable API (make_step)
-python run_box_model.py --make-step --method ppm_jit --nucl-scheme zhao2024
 ```
 
-All CLI options:
+#### Process Combinations
+
+The model supports any combination of nucleation, coagulation, and condensation. Use `--no-nucleation` and `--no-condensation` to disable processes (coagulation is always on in the CLI):
+
+```bash
+# All processes (default)
+python run_box_model.py                                          # nucl + coag + cond
+
+# Two-process combinations
+python run_box_model.py --no-nucleation                          # coag + cond
+python run_box_model.py --no-condensation                        # nucl + coag
+
+# Coagulation only
+python run_box_model.py --no-nucleation --no-condensation        # coag only
+```
+
+For arbitrary process combinations (including condensation-only or nucleation+condensation without coagulation), use the `--make-step` flag with the Python API:
+
+```bash
+# Condensation only (via make_step)
+python -c "
+from tomas_jax.solvers.condensation import make_step, run_condensation_scan
+# ... see Python API section below
+"
+```
+
+#### Condensation Methods
+
+```bash
+python run_box_model.py --method ppm_jit       # PPM (fastest, default)
+python run_box_model.py --method tfl_jit       # TFL (Fortran-matching)
+python run_box_model.py --method tfl           # TFL sequential (reference)
+python run_box_model.py --method ppm           # PPM sequential (reference)
+```
+
+#### Nucleation Schemes
+
+```bash
+python run_box_model.py --nucl-scheme ricco_dunne   # Riccobono 2014 + Dunne 2016 (default)
+python run_box_model.py --nucl-scheme zhao2024      # Zhao et al. 2024 (11 mechanisms)
+```
+
+#### All CLI Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -81,23 +123,54 @@ All CLI options:
 
 #### Composable Process Orchestrator (Recommended)
 
+The `make_step()` API lets you create a step function with any combination and ordering of processes:
+
 ```python
 from tomas_jax.solvers.condensation import make_step
 import jax
 
-# Create a step function with any combination of processes
-step_fn = make_step(
+# Full model: nucleation + coagulation + condensation
+step_fn = jax.jit(make_step(
     processes=['nucleation', 'coagulation', 'condensation'],
     cond_method='ppm_jit',
-    nucl_scheme='ricco_dunne',  # or 'zhao2024'
-)
-step_fn_jit = jax.jit(step_fn)
+    nucl_scheme='ricco_dunne',
+))
 
-# Run one timestep
-Nk, Mk, Gc = step_fn_jit(
+# Coagulation + condensation (no nucleation)
+step_fn = jax.jit(make_step(
+    processes=['coagulation', 'condensation'],
+    cond_method='ppm_jit',
+))
+
+# Condensation only
+step_fn = jax.jit(make_step(
+    processes=['condensation'],
+    cond_method='ppm_jit',
+))
+
+# Coagulation only
+step_fn = jax.jit(make_step(
+    processes=['coagulation'],
+))
+
+# Nucleation + condensation (no coagulation)
+step_fn = jax.jit(make_step(
+    processes=['nucleation', 'condensation'],
+    cond_method='ppm_jit',
+    nucl_scheme='zhao2024',
+))
+
+# Nucleation + coagulation (no condensation)
+step_fn = jax.jit(make_step(
+    processes=['nucleation', 'coagulation'],
+    nucl_scheme='ricco_dunne',
+))
+
+# Run one timestep (all combinations use the same signature)
+Nk, Mk, Gc = step_fn(
     Nk, Mk, Gc, xk,
     temp, pres, boxvol, rh, alpha, dt,
-    org_conc=1e7, nh3_conc=1e9, fion=3.0,
+    org_conc=1e7, nh3_conc=1e9, fion=3.0,  # needed when nucleation is enabled
 )
 ```
 
@@ -127,6 +200,8 @@ Nk, Mk, Gc = condensation_step(
 
 #### Scan-Fused Time Loops (Fastest)
 
+Pre-built scan-fused loops compile 1440 timesteps into a single XLA program with zero Python dispatch overhead:
+
 ```python
 from tomas_jax.solvers.condensation import (
     run_condensation_scan,       # Condensation only (PPM)
@@ -142,6 +217,18 @@ Nk, Mk, Gc, N_history = run_full_scan(
     org_conc=1e7, nh3_conc=1e9, fion=3.0,
 )
 ```
+
+#### Summary of All Process Combinations
+
+| Processes | CLI | `make_step()` | Scan-fused |
+|-----------|-----|---------------|------------|
+| Nucl + Coag + Cond | `python run_box_model.py` | `['nucleation', 'coagulation', 'condensation']` | `run_full_scan()` |
+| Coag + Cond | `--no-nucleation` | `['coagulation', 'condensation']` | — |
+| Nucl + Coag | `--no-condensation` | `['nucleation', 'coagulation']` | — |
+| Nucl + Cond | — | `['nucleation', 'condensation']` | `run_nucleation_condensation_scan()` |
+| Coag only | `--no-nucleation --no-condensation` | `['coagulation']` | — |
+| Cond only | — | `['condensation']` | `run_condensation_scan()` / `run_condensation_scan_tfl()` |
+| Nucl only | — | `['nucleation']` | — |
 
 ### Grid Configuration
 

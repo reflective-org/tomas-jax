@@ -35,3 +35,6 @@ tomas_fortran/output/
 
 # NPZ files
 *.npz
+
+# PDF files
+*.pdf

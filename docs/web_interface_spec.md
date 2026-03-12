@@ -430,7 +430,7 @@ The API repo should install `tomas-jax` as a pip package:
 
 ```
 # requirements.txt
-tomas-jax @ git+https://github.com/yourorg/tomas-jax-coagulation.git
+tomas-jax @ git+https://github.com/aliakherati/tomas-jax.git
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.0
@@ -439,7 +439,7 @@ pydantic>=2.0
 Or, for development, pip install the local checkout:
 
 ```bash
-pip install -e /path/to/tomas-jax-coagulation
+pip install -e /path/to/tomas-jax
 ```
 
 **Precaution:** Pin the `tomas-jax` version/commit hash in production to avoid breaking changes.
