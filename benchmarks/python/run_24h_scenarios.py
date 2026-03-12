@@ -19,7 +19,8 @@ import jax
 import jax.numpy as jnp
 
 from tomas_jax.core.config import (
-    NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
+    NBINS_LEGACY as NBINS, XK0_LEGACY,
+    ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
     SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO
 )
 from tomas_jax.solvers.diffrax import diffrax_step
@@ -123,7 +124,7 @@ def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
     # Actually, Fortran uses initbounds() which does mass doubling from xk(1).
     # Let's compute xk the Fortran way: xk(k+1) = 2*xk(k)
     xk_np = np.zeros(NBINS + 1)
-    xk_np[0] = 1.6033e-23  # Match Fortran initbounds xk(1)
+    xk_np[0] = XK0_LEGACY  # Match Fortran initbounds xk(1)
     for k in range(NBINS):
         xk_np[k + 1] = 2.0 * xk_np[k]
     xk = jnp.array(xk_np)

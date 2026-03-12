@@ -20,7 +20,8 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 from tomas_jax.core.config import (
-    NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
+    NBINS_LEGACY as NBINS, XK0_LEGACY,
+    ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
     SRTSO4, SRTH2O, MW_H2SO4, AVOGADRO,
 )
 from tomas_jax.solvers.diffrax import diffrax_step, coag_euler_step
@@ -52,7 +53,7 @@ NUC_FION = 3.0
 def init_scenario(scenario):
     """Initialize a scenario's state arrays."""
     xk_np = np.zeros(NBINS + 1)
-    xk_np[0] = 1.6033e-23
+    xk_np[0] = XK0_LEGACY
     for k in range(NBINS):
         xk_np[k + 1] = 2.0 * xk_np[k]
     xk = jnp.array(xk_np)

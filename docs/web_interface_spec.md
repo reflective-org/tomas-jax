@@ -392,7 +392,7 @@ async def warmup_jit():
     # Must run at server start, not per-request
 ```
 
-**Precaution:** Warmup must use the same array shapes as production (NBINS=36, ICOMP=44). Different shapes trigger recompilation.
+**Precaution:** Warmup must use the same array shapes as production (NBINS=40, ICOMP=44). Different shapes trigger recompilation.
 
 ### 4.5 Job Management
 
@@ -1021,7 +1021,7 @@ JAX JIT compilation takes 30–60 seconds on first call. Strategies:
 | JAX cold start (60s) | Poor first-request UX | High | Warmup in lifespan; keep-alive pings; min-instances=1 |
 | Full-mode simulation timeout | User thinks it's broken | Medium | Show progress bar; set 120s timeout with clear message; default to fast modes |
 | JAX version mismatch | Subtle numerical differences | Low | Pin JAX version in requirements.txt; test in Docker locally |
-| Memory leak from JIT cache | Server OOM after many unique shapes | Low | Only support NBINS=36; monitor memory; restart weekly |
+| Memory leak from JIT cache | Server OOM after many unique shapes | Low | Only support NBINS=40/80; monitor memory; restart weekly |
 | Plotly.js bundle size (3.5 MB) | Slow frontend load | Medium | Use partial bundle (only scatter + heatmap); lazy-load |
 | Concurrent JAX on single CPU | Simulations interfere | Medium | Semaphore limits concurrency to 2; thread pool for isolation |
 

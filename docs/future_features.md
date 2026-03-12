@@ -104,6 +104,32 @@ This document tracks features that are not currently needed but would unlock sig
 
 ---
 
+## 8. Explicit ELVOC/HOM Gas-Phase Species
+
+**What:** Add ELVOC (Extremely Low Volatility Organic Compounds) and HOM (Highly Oxygenated Molecules) as explicit tracked species in the TOMAS-JAX gas array (`Gc`), distinct from the existing bulk organics (indices 1–41). This would split the organic gas pool into volatility classes (e.g., ULVOC, ELVOC, LVOC) or O:C ratio classes.
+
+**Context / Why this came up:**
+The Zhao 2024 11-mechanism NPF scheme (mechanisms 6–7) uses pure-biogenic nucleation from Kirkby et al. 2016 (Nature 533, 521–526), parameterized with [HOM] in units of 10⁶ cm⁻³. The current implementation passes `ulvoc` as an external scalar — it is not part of `Gc` and is not depleted by nucleation or condensation. Additionally, Kirkby 2016 does not state the units of the ion concentration [n±] explicitly (back-calculated as cm⁻³ from Fig. 3 data), and the common 36% ELVOC fraction approximation (Tröstl et al. 2016, Nature 533, 527–531) has large uncertainty across environments.
+
+**Unlocks:**
+- Precise mass balance for nucleation and condensation of distinct organic classes
+- Sensitivity studies: how does the ELVOC fraction affect NPF rate vs. condensational growth?
+- Proper depletion of the ULVOC/ELVOC pool during nucleation events
+- Compatibility with HOM-resolving chemistry schemes (e.g., MCM, GECKO-A outputs)
+
+**Action needed:**
+- Follow up with Jeff Pierce (Colorado State) and the CLOUD/ACTRIS-NF community on best practice for treating ELVOC/HOM in sectional models
+- Review Tröstl et al. 2016 for the ELVOC fraction basis (36%)
+- Check whether CAM-TOMAS, GLOMAP-mode, or EMAC/GMXe have adopted explicit HOM tracers
+- Extend `config.py` from 43 → N gas species with new ULVOC/ELVOC entries
+- Update nucleation and condensation drivers to deplete the appropriate gas pool
+
+**Effort:** ~1–2 weeks. Main work: extending the gas array, updating all nucleation/condensation call sites, and adding test cases.
+
+**Current workaround:** `ulvoc` passed as external scalar; 36% ELVOC fraction applied outside the model if needed. Documented as approximation in `docs/zhao2024_nucleation.md`.
+
+---
+
 ## Priority Guide
 
 | Priority | Feature | Reason |

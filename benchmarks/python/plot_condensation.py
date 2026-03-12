@@ -25,7 +25,8 @@ from tomas_jax.physics.gas_properties import (
 )
 from tomas_jax.physics.condensation_sink import calc_condensation_sink
 from tomas_jax.core.config import (
-    SRTSO4, SRTNH4, SRTH2O, ICOMP_NODIAG, N_GAS_SPECIES, NBINS,
+    SRTSO4, SRTNH4, SRTH2O, ICOMP_NODIAG, N_GAS_SPECIES,
+    NBINS_LEGACY as NBINS,
 )
 from tomas_jax.physics.ezcond import ezcond
 from tomas_jax.physics.ezcond_ppm import ezcond_ppm

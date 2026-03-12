@@ -4,6 +4,117 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-12 (Thu) — Default Grid: 40 Bins, 1.7nm Start
+
+**Time**: ~12:00 PM PST
+
+### Summary
+Changed default bin grid from 36 bins (3.2nm start) to 40 bins (1.7nm start, Dunne 2016 nucleation cluster size). Added 80-bin high-resolution preset. All physics/solver code is shape-agnostic — no changes needed there.
+
+### Files Modified
+- `tomas_jax/core/config.py` — NBINS=40, XK0=(pi/6)*(1.7e-9)^3*1770, added `XK0_LEGACY`, `NBINS_LEGACY`, `make_grid_80bin()`
+- `tests/test_ppm_condensation.py` — Import NBINS from config instead of hardcoded
+- `tests/test_tfl_jit_condensation.py` — Use XK0 from config
+- `tests/test_ppm_jit_condensation.py` — Use XK0 from config
+- 13 benchmark scripts — Import `NBINS_LEGACY as NBINS` and `XK0_LEGACY` for Fortran 36-bin comparison
+- `benchmarks/python/test_cases.py` — Derive nbins from xk shape instead of config constant
+- `CLAUDE.md` — Updated dimensions and grid documentation
+
+### Grid Configurations
+| Config | Bins | Start | End | Mass ratio | Usage |
+|--------|------|-------|-----|------------|-------|
+| Default (40-bin) | 40 | 1.7nm | 17.5μm | ×2 | Production, nucleation studies |
+| High-res (80-bin) | 80 | 1.7nm | 17.5μm | ×√2 | Convergence studies |
+| Legacy (36-bin) | 36 | 2.6nm | 10.6μm | ×2 | Fortran comparison benchmarks |
+
+### Verification
+- All 132 core tests pass (nucleation, PPM, TFL, coagulation)
+- 24 pre-existing test_24h_scenarios failures (load stored 36-bin data — unrelated)
+- Nucleation cluster (mnuc=3.47e-24 kg) still fits in bin 0 of 40-bin grid
+
+---
+
+## 2026-03-11 (Wed) — Zhao 2024 11-Mechanism NPF Scheme
+
+**Time**: ~5:00 PM PST
+
+### Summary
+
+Implemented the complete Zhao et al. 2024 (Nature 631, 98–105) 11-mechanism new particle formation scheme as a selectable alternative to the existing Riccobono 2014 + Dunne 2016 scheme.
+
+### Files Modified
+- `tomas_jax/physics/nucleation.py` — Added 7 new mechanism functions + driver:
+  - `zhao2024_synergistic_hno3_rate()` — Mechanism 5 (Wang 2022 + Zhao 2024 cutoff)
+  - `kirkby2016_pure_organic_rate()` — Mechanisms 6–7 (Kirkby 2016 + Zhao 2024 T-factor)
+  - `zhao2024_organic_h2so4_rate()` — Mechanism 8 (Lehtipalo 2018 refit)
+  - `zhao2024_amine_h2so4_rate()` — Mechanism 9 (Hanson 2017 + Cai 2021 T-function)
+  - `zhao2024_iodine_oxoacid_rate()` — Mechanisms 10–11 (He 2021 fits)
+  - `zhao2024_nucleation_step()` — 11-mechanism driver with enable masks
+  - `_compute_ionc()` — Shared ion concentration helper
+  - Fixed `estimate_nucleation_rate()` missing parameters (Gc, temp, pres, boxvol)
+- `tomas_jax/solvers/condensation.py` — Added `nucl_scheme` parameter to `make_step()`:
+  - `nucl_scheme='ricco_dunne'` (default) or `'zhao2024'`
+  - Python-level dispatch, no recompilation between schemes
+  - Imported `zhao2024_nucleation_step`, `ZHAO2024_ALL_ENABLED`
+- `run_box_model.py` — Added `--nucl-scheme` CLI option:
+  - Both manual and `make_step` paths support Zhao 2024
+  - Added Zhao 2024 gas precursor inputs (hno3, ulvoc, dma, hio3)
+- `tests/test_nucleation.py` — Added 35 new tests (58 total, all passing):
+  - `TestSynergisticHNO3` (4 tests): scaling, temperature cutoff
+  - `TestKirkby2016` (5 tests): neutral/ion rates, temperature, zero input
+  - `TestOrganicH2SO4` (3 tests): bilinear form, scaling
+  - `TestAmineH2SO4` (5 tests): H₂SO₄^3, DMA^1.5 scaling, Cai 2021 f_T
+  - `TestIodineOxoacids` (6 tests): rates, T-clamps at 263K/283K
+  - `TestZhao2024Step` (8 tests): driver mass balance, enable masks, clamping, JIT
+  - `TestComputeIonc` (3 tests): ion concentration helper
+- `docs/zhao2024_nucleation.md` — Added driver function docs, usage examples, CLI
+- `docs/future_features.md` — Added item #8: Explicit ELVOC/HOM Gas-Phase Species
+- `CLAUDE.md` — Updated nucleation architecture rule and file layout
+
+### Key Design Decisions
+- `ulvoc` (Zhao 2024) and `org_conc` (Riccobono) are separate inputs
+- Enable masks are tuples of 11 floats to avoid JIT recompilation
+- ULVOC used for both mechs 6-7 (ULVOC-only) and mech 8 (ULVOC+ELVOC) — noted as approximation
+- Kirkby 2016 [n±] units: back-calculated as 10³ cm⁻³ from Fig. 3 data
+- Mechanism 9 base rate from Hanson 2017 formula (≡ Almeida × 10 at 278K)
+- Iodine T-clamps: 263K neutral, 283K ion-induced (He 2021 experimental range)
+
+### Known Limitations
+- `estimate_nucleation_rate()` always uses Ricco+Dunne for adaptive sub-stepping (conservative estimate; Zhao 2024 rates may be higher)
+- ELVOC/HOM as explicit gas species is a future feature (#8 in future_features.md)
+- Scan-fused paths (`run_full_scan`, `run_nucleation_condensation_scan`) still use `ricco_dunne` only
+
+---
+
+## 2026-03-11 (Wed) — Web Interface UX Design Decisions
+
+**Time**: ~PST
+
+### Summary
+
+Completed structured Q&A session to define all UX and architecture decisions for the tomas-app web interface. All decisions documented in `tomas-app/tomas-web/DECISIONS.md` (ADR-008 through ADR-016).
+
+### Key Decisions
+- **Bins**: 40 default, 80/160 as options (dropdown)
+- **Simulation time**: 6–48h, default 12h
+- **Timestep**: dropdown (1/5/10/20/30/40/60/120s), default 60s
+- **Process modes**: 6 named modes (coag-only → full model), not independent toggles
+- **Condensation method**: PPM only, no user choice
+- **Gas-phase modes**: 4 modes per gas (H₂SO₄, NH₃, organics) — depleting, prescribed trend, constant, constant production
+- **Prescribed trend profiles**: 6 profiles (diurnal, morning burst, linear ramp up/down, exponential decay, step change) with preview graph
+- **Presets**: 7 scenarios populating all fields, all editable after selection
+- **Plots**: 9 panels — number/mass size dist (hourly lines + hover), banana plot, N/M/Gc time series, nucleation rate, condensation sink, mass conservation
+- **Audience**: atmospheric researchers, students, climate scientists (SAI/CCN)
+
+### Next Steps
+- Implement new form design with named process modes
+- Implement 4-mode gas-phase forcing with profile previews
+- Add bin resolution selector
+- Add simulation time/timestep controls
+- Implement 9-panel results visualization with hover interactions
+
+---
+
 ## 2026-03-10 (Tue) — Adaptive Nucleation Sub-Stepping
 
 **Time**: ~PST

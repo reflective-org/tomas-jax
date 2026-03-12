@@ -5,7 +5,7 @@ water content, temperature, and pressure conditions.
 """
 import numpy as np
 
-from tomas_jax.core.config import SRTSO4, NBINS, ICOMP
+from tomas_jax.core.config import SRTSO4, ICOMP
 
 # Test case configurations
 CASES = {
@@ -47,10 +47,11 @@ def init_lognormal(case_key, xk):
     boxvol = 1.0e6
     dens_init = 1770.0
 
-    Nk = np.zeros(NBINS)
-    Mk = np.zeros((NBINS, ICOMP))
+    nbins = len(xk) - 1
+    Nk = np.zeros(nbins)
+    Mk = np.zeros((nbins, ICOMP))
 
-    for k in range(NBINS):
+    for k in range(nbins):
         Dl = 1e6 * ((6.0 * xk[k]) / (dens_init * pi)) ** 0.3333
         Dh = 1e6 * ((6.0 * xk[k + 1]) / (dens_init * pi)) ** 0.3333
         Dk_init = np.sqrt(Dl * Dh)
@@ -66,7 +67,7 @@ def init_lognormal(case_key, xk):
 
     # Neps preprocessing (match Fortran benchmark harness)
     Neps = 1.0e-3
-    for k in range(NBINS):
+    for k in range(nbins):
         if Nk[k] < Neps:
             Nk[k] = Neps
             Mk[k, :] = 0.0
