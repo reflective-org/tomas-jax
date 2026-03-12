@@ -8,6 +8,7 @@ A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol m
 
 ## Features
 
+- **SO2 Chemistry:** SO2 + OH → H2SO4 using Sun et al. (2022) Troe formalism with H2O enhancement. Constant or diurnal OH modes.
 - **Nucleation:** Two selectable schemes, JIT-compiled with adaptive sub-stepping
   - `ricco_dunne` — Riccobono 2014 (organic) + Dunne 2016 (inorganic, 4 mechanisms)
   - `zhao2024` — Zhao et al. 2024 (11 mechanisms: inorganic, organic, amine, iodine)
@@ -18,10 +19,10 @@ A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol m
   - `tfl` / `ppm` — Sequential reference implementations
 - **Equilibrium:** NH₃/NH₄⁺ stoichiometric equilibrium + ISORROPIA-based water uptake
 - **Configurable grid:** 40-bin default (1.7nm–17.5μm), 80-bin high-resolution, or custom via `make_grid()`
-- **Composable API:** `make_step(['nucleation', 'coagulation', 'condensation'])` for any process combination
+- **Composable API:** `make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation'])` for any process combination
 - **Scan-fused loops:** 1440-step time loops compiled to single XLA programs (zero Python overhead)
 - **Precision:** float64 enforced everywhere. Mass conservation at machine precision.
-- **132 tests**, all passing
+- **160 tests**, all passing
 
 ---
 
@@ -109,6 +110,19 @@ python run_box_model.py --nucl-scheme ricco_dunne   # Riccobono 2014 + Dunne 201
 python run_box_model.py --nucl-scheme zhao2024      # Zhao et al. 2024 (11 mechanisms)
 ```
 
+#### SO2 Chemistry
+
+```bash
+# SO2 oxidation with constant OH
+python run_box_model.py --so2-init 5e10 --oh-conc 1e6 --make-step
+
+# With SO2 emissions
+python run_box_model.py --so2-init 5e10 --so2-emission 1e7 --oh-conc 1e6 --make-step
+
+# Diurnal OH cycle (proportional to cos(SZA))
+python run_box_model.py --so2-init 5e10 --oh-conc 2e6 --oh-diurnal --lat 45 --make-step
+```
+
 #### All CLI Options
 
 | Flag | Default | Description |
@@ -118,6 +132,13 @@ python run_box_model.py --nucl-scheme zhao2024      # Zhao et al. 2024 (11 mecha
 | `--no-nucleation` | off | Disable nucleation |
 | `--no-condensation` | off | Disable condensation |
 | `--make-step` | off | Use composable `make_step()` API |
+| `--so2-init` | 0 | Initial SO2 concentration [molec/cm3] |
+| `--so2-emission` | 0 | SO2 emission rate [molec/cm3/s] |
+| `--oh-conc` | 0 | OH concentration [molec/cm3] |
+| `--oh-diurnal` | off | Use diurnal OH cycle (proportional to cos(SZA)) |
+| `--lat` | 45 | Latitude [degrees N] for diurnal cycle |
+| `--lon` | 0 | Longitude [degrees E] for diurnal cycle |
+| `--day-of-year` | 172 | Day of year for diurnal cycle |
 
 ### Python API
 
@@ -285,14 +306,14 @@ Median wall time per 24h scenario (49 LHC scenarios, 36-bin legacy grid):
 | `Nk` | (40,) | #/grid cell | Number concentration per bin |
 | `Mk` | (40, 44) | kg/grid cell | Mass per bin per species |
 | `xk` | (41,) | kg | Bin boundary masses |
-| `Gc` | (43,) | kg/grid cell | Gas-phase concentrations (all species except water) |
+| `Gc` | (44,) | kg/grid cell | Gas-phase concentrations (species 0-42 + SO2 at index 43) |
 | `temp` | scalar | K | Temperature |
 | `pres` | scalar | Pa | Pressure |
 | `boxvol` | scalar | cm³ | Grid cell volume |
 | `rh` | scalar | 0–1 | Relative humidity |
 | `alpha` | scalar | — | Mass accommodation coefficient |
 
-**Species indices (0-based):** 0 = SO₄, 1–41 = organics, 42 = NH₄, 43 = H₂O. Gas array `Gc` has 43 elements (no water).
+**Species indices (0-based):** 0 = SO₄, 1–41 = organics, 42 = NH₄, 43 = H₂O. Gas array `Gc` has 44 elements: indices 0–42 (aerosol species except water) + index 43 (SO2).
 
 ---
 
@@ -333,9 +354,16 @@ Nucleated clusters: d ≈ 1.7 nm, placed in bin 0, 90% SO₄ + 10% organic. Adap
 - **NH₃:** Stoichiometric NH₄/SO₄ = 2:1 partitioning
 - **Water:** Piecewise polynomial fits to ISORROPIA (273 K reference)
 
+### SO2 Chemistry
+
+- SO2 + OH (+M) → H2SO4 using Sun et al. (2022) Troe formalism
+- Rate constant k1(T,p) with H2O vapor enhancement
+- Constant or diurnal OH modes (proportional to cos(SZA))
+- k1(298K, 1atm) ≈ 1.05×10⁻¹² cm³/molec/s, SO2 lifetime ~11 days at [OH]=10⁶
+
 ### Operator Splitting Order
 
-Each timestep: (1) H₂SO₄ production → (2) Nucleation → (3) Coagulation → (4) Condensation
+Each timestep: (1) SO2 + OH chemistry → (2) Nucleation → (3) Coagulation → (4) Condensation
 
 ---
 
@@ -364,6 +392,7 @@ tomas-jax/
 │   │   ├── gas_properties.py        # Gas diffusivity, MFP, Fuchs-Sutugin
 │   │   ├── properties.py            # Particle diameter, thermal speed
 │   │   ├── density.py               # Mixed-salt density (Tang 1997)
+│   │   ├── so2_chemistry.py          # SO2+OH chemistry (Sun et al. 2022 Troe)
 │   │   ├── water_equilibrium.py     # Hygroscopic water uptake (ISORROPIA)
 │   │   └── nh3_equilibrium.py       # NH3/NH4 equilibrium
 │   ├── solvers/
@@ -373,8 +402,9 @@ tomas-jax/
 │       ├── plotting.py              # Size distributions, banana plots, time series
 │       └── diagnostics.py           # Coagulation rate diagnostics
 │
-├── tests/                           # 132 tests
+├── tests/                           # 160 tests
 │   ├── test_nucleation.py           # Nucleation parameterization tests (24 tests)
+│   ├── test_so2_chemistry.py        # SO2 chemistry tests (28 tests)
 │   ├── test_ppm_condensation.py     # PPM algorithm tests (31 tests)
 │   ├── test_ppm_jit_condensation.py # PPM JIT pipeline tests
 │   ├── test_tfl_jit_condensation.py # TFL JIT pipeline tests (15 tests)
@@ -386,6 +416,7 @@ tomas-jax/
 │   │   ├── scenarios.py             # LHC scenario generator (50 scenarios)
 │   │   ├── convergence_test.py      # Multi-resolution convergence (40/80 bins)
 │   │   ├── benchmark_nucleation_constgc.py  # Nucleation full-mode benchmark
+│   │   ├── validate_so2_chemistry.py  # SO2 chemistry validation (6 figures)
 │   │   ├── run_24h_scenarios.py     # 24h JAX runner (3 modes × 2 methods)
 │   │   └── compare_24h.py           # 3-way Fortran vs TFL vs PPM comparison
 │   └── results/                     # Generated plots, NPZ files, summaries
@@ -402,6 +433,7 @@ tomas-jax/
 │   ├── zhao2024_nucleation.md       # Zhao 2024 11-mechanism scheme
 │   ├── ppm_condensation.md          # PPM algorithm documentation
 │   ├── 24h_benchmark.md             # 24h benchmark suite
+│   ├── so2_chemistry.md             # SO2+OH chemistry (Sun et al. 2022)
 │   ├── missing_physics.md           # Gap analysis: what's not yet implemented
 │   └── future_features.md           # Planned JAX-specific enhancements
 │
@@ -435,6 +467,7 @@ python -m pytest tests/test_nucleation.py tests/test_ppm_condensation.py -q
 | [Zhao 2024 Nucleation](docs/zhao2024_nucleation.md) | 11-mechanism NPF scheme, per-mechanism parameters |
 | [PPM Condensation](docs/ppm_condensation.md) | PPM algorithm: reconstruction, flux, analytical mass integrals |
 | [24h Benchmarks](docs/24h_benchmark.md) | 50-scenario benchmark suite, Fortran comparison methodology |
+| [SO2 Chemistry](docs/so2_chemistry.md) | Sun et al. 2022 Troe formalism, diurnal OH, validation |
 | [Missing Physics](docs/missing_physics.md) | Gap analysis: VBS, Kelvin effect, deposition, chemistry, etc. |
 | [Future Features](docs/future_features.md) | GPU acceleration, autodiff, vmap, learned surrogates |
 

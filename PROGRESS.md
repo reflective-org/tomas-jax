@@ -4,6 +4,45 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-12 (Thu) — SO2 + OH Gas-Phase Chemistry
+
+**Time**: ~2:30 PM PST
+
+### Summary
+Implemented SO2 + OH → H2SO4 gas-phase chemistry using the Sun et al. (2022) Troe formalism with H2O vapor enhancement. This replaces the constant H2SO4 production rate with physically-based SO2 oxidation. All 4 functions are JIT-compilable.
+
+### Key Details
+- **Rate constant**: k1(298K, 1atm) = 1.05×10⁻¹² cm³/molec/s, SO2 lifetime ~11 days at [OH]=10⁶
+- **H2O enhancement**: 2-5% at 298K, 50% RH (Sun et al. Eqs. 5-6)
+- **OH modes**: Constant (default) and diurnal (proportional to cos(SZA))
+- **Gc extended**: 43→44 elements. SRTSO2=43, N_GAS_SPECIES=44
+- **Backward compatible**: No SO2 flags → legacy constant H2SO4 production path
+
+### Files Created
+- `tomas_jax/physics/so2_chemistry.py` — 4 JIT functions: calc_k1_so2_oh, calc_solar_zenith_angle, calc_oh_concentration, so2_oxidation_step
+- `tests/test_so2_chemistry.py` — 28 tests (Troe rate, SZA, OH modes, oxidation step, conservation)
+- `benchmarks/python/validate_so2_chemistry.py` — 6 validation figures reproducing Sun et al. (2022)
+- `docs/so2_chemistry.md` — Algorithm documentation, usage, validation
+
+### Files Modified
+- `tomas_jax/core/config.py` — Added SRTSO2=43, MW_SO2=64.066, MW_OH=17.007, SV_SO2=41.73; N_GAS_SPECIES=44
+- `tomas_jax/solvers/condensation.py` — Added 'so2_chemistry' to make_step valid processes; _run_scan supports so2_prod_rate
+- `run_box_model.py` — New CLI: --so2-init, --so2-emission, --oh-conc, --oh-diurnal, --lat, --lon, --day-of-year
+- `docs/references.md` — Added Sun et al. (2022), Buck (1981)
+- `README.md` — SO2 chemistry features, CLI options, state variables, file tree
+- `CLAUDE.md` — SO2 chemistry architecture rules, file layout, species indices
+
+### Reference
+- Sun, W., et al.: Kinetics of OH + SO2 + M. *Atmos. Chem. Phys.*, 22, 4969-4984, 2022.
+- Supplemental: `references/so2_chemistry/acp-22-4969-2022-supplement.pdf`
+
+### Verification
+- 160 tests pass (28 new + 132 existing, all backward-compatible)
+- Box model runs with SO2 chemistry: `python run_box_model.py --so2-init 5e10 --oh-conc 1e6 --make-step`
+- 6 validation figures in `benchmarks/results/so2_chemistry/`
+
+---
+
 ## 2026-03-12 (Thu) — Default Grid: 40 Bins, 1.7nm Start
 
 **Time**: ~12:00 PM PST

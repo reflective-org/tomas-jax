@@ -64,6 +64,14 @@ Papers and textbooks referenced in the TOMAS-JAX codebase, organized by topic.
 
 ---
 
+## SO2 Gas-Phase Chemistry
+
+- Sun, W., et al.: Kinetics of OH + SO2 + M: The key reaction in atmospheric SO2-to-sulfate conversion. *Atmos. Chem. Phys.*, 22, 4969–4984, https://doi.org/10.5194/acp-22-4969-2022, 2022.
+
+- Buck, A. L.: New equations for computing vapor pressure and enhancement factor. *J. Appl. Meteorol.*, 20, 1527–1532, 1981.
+
+---
+
 ## Numerical Methods — Gas-Phase Transport
 
 - Fuller, E. N., Schettler, P. D., and Giddings, J. C.: A new method for prediction of binary gas-phase diffusion coefficients. *Ind. Eng. Chem.*, 58(5), 18–27, 1966. *(Used via Perry's Chemical Engineers' Handbook)*
@@ -120,4 +128,4 @@ Papers and textbooks referenced in the TOMAS-JAX codebase, organized by topic.
 
 ---
 
-*35 references. Last updated: 2026-03-12*
+*37 references. Last updated: 2026-03-12*

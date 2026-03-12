@@ -55,8 +55,12 @@ from typing import Tuple
 from functools import partial
 
 from ..core.config import (
-    SRTSO4, SRTNH4, SRTH2O, ICOMP_NODIAG,
+    SRTSO4, SRTSO2, SRTNH4, SRTH2O, ICOMP_NODIAG,
     MW_H2SO4, SV_H2SO4, CS_EPS,
+)
+from ..physics.so2_chemistry import (
+    so2_oxidation_step, calc_k1_so2_oh,
+    calc_solar_zenith_angle, calc_oh_concentration,
 )
 from ..physics.nucleation import (
     nucleation_step, estimate_nucleation_rate, compute_nucleation_substeps,
@@ -495,38 +499,44 @@ def full_step_jax(
 # Layer 3: _run_scan — single scan implementation
 # =========================================================================
 
-def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich'):
-    """Internal scan: adds H2SO4 prod, calls step_fn, collects diagnostics.
+def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
+              so2_prod_rate=0.0):
+    """Internal scan: adds H2SO4/SO2 prod, calls step_fn, collects diagnostics.
 
     Args:
         step_fn: Callable(Nk, Mk, Gc) -> (Nk, Mk, Gc)
+            OR Callable(Nk, Mk, Gc, step_idx) -> (Nk, Mk, Gc) when
+            step_fn accepts a step index (for diurnal OH in so2_chemistry).
         nsteps: Number of scan steps
         dt: Timestep [s]
         prod_rate: H2SO4 production rate [kg/s]
         diag_mode: 'rich' returns (N_tot, M_dry, Gc_SO4) per step,
                    'light' returns N_tot only
+        so2_prod_rate: SO2 emission rate [kg/s] (added to Gc[SRTSO2] each step)
 
     Returns:
         (Nk_f, Mk_f, Gc_f), diagnostics
     """
     if diag_mode == 'rich':
-        def body(carry, _):
+        def body(carry, step_idx):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+            Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
             Nk_c, Mk_c, Gc_c = step_fn(Nk_c, Mk_c, Gc_c)
             diag = jnp.array([jnp.sum(Nk_c),
                                jnp.sum(Mk_c[:, :SRTH2O]),
                                Gc_c[SRTSO4]])
             return (Nk_c, Mk_c, Gc_c), diag
     else:
-        def body(carry, _):
+        def body(carry, step_idx):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
+            Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
             Nk_c, Mk_c, Gc_c = step_fn(Nk_c, Mk_c, Gc_c)
             return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
 
     (Nk_f, Mk_f, Gc_f), history = jax.lax.scan(
-        body, (Nk, Mk, Gc), None, length=nsteps
+        body, (Nk, Mk, Gc), jnp.arange(nsteps), length=nsteps
     )
     return (Nk_f, Mk_f, Gc_f), history
 
@@ -719,7 +729,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
 
     Args:
         processes: Ordered list of process names, e.g.
-            ['nucleation', 'coagulation', 'condensation']
+            ['so2_chemistry', 'nucleation', 'coagulation', 'condensation']
         cond_method: 'ppm_jit' or 'tfl_jit'
         nucl_scheme: 'ricco_dunne' (Riccobono 2014 + Dunne 2016) or
             'zhao2024' (11-mechanism Zhao et al. 2024). For zhao2024,
@@ -738,6 +748,10 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         Nk, Mk, Gc = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                            org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
 
+        # With SO2 chemistry:
+        step = make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation'])
+        Nk, Mk, Gc = step(..., oh_conc=1e6)
+
         # Zhao 2024 11-mechanism scheme:
         step = make_step(['nucleation', 'coagulation', 'condensation'],
                          nucl_scheme='zhao2024')
@@ -746,7 +760,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
     """
     ezcond_fn = ezcond_tfl_jax if 'tfl' in cond_method else ezcond_ppm_jax
 
-    valid = {'nucleation', 'coagulation', 'condensation'}
+    valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation'}
     for p in processes:
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
@@ -759,7 +773,11 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
 
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
         for process in processes:
-            if process == 'nucleation':
+            if process == 'so2_chemistry':
+                oh_conc = kwargs.get('oh_conc', 0.0)
+                Gc = so2_oxidation_step(Gc, temp, pres, boxvol, dt, oh_conc, rh)
+
+            elif process == 'nucleation':
                 # Adaptive nucleation sub-stepping
                 # Rate estimate always uses Ricco+Dunne (fast, conservative)
                 fn = estimate_nucleation_rate(
