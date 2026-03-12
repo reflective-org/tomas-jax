@@ -60,6 +60,7 @@ from ..core.config import (
 )
 from ..physics.nucleation import (
     nucleation_step, estimate_nucleation_rate, compute_nucleation_substeps,
+    zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED,
 )
 from ..physics.condensation_sink import calc_condensation_sink
 from ..physics.ezcond import ezcond
@@ -701,7 +702,8 @@ def run_full_scan(
 # Layer 4: make_step() — public composable API
 # =========================================================================
 
-def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
+def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
+              n_coag_substeps=10,
               max_nucleation_frac=0.5, max_nuc_substeps=20):
     """Build a step function from an ordered list of process names.
 
@@ -719,6 +721,9 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
         processes: Ordered list of process names, e.g.
             ['nucleation', 'coagulation', 'condensation']
         cond_method: 'ppm_jit' or 'tfl_jit'
+        nucl_scheme: 'ricco_dunne' (Riccobono 2014 + Dunne 2016) or
+            'zhao2024' (11-mechanism Zhao et al. 2024). For zhao2024,
+            pass extra kwargs: hno3, ulvoc, dma, hio3, enable_masks.
         n_coag_substeps: Number of forward-Euler substeps for coagulation
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
@@ -732,6 +737,12 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
                          cond_method='ppm_jit')
         Nk, Mk, Gc = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                            org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+
+        # Zhao 2024 11-mechanism scheme:
+        step = make_step(['nucleation', 'coagulation', 'condensation'],
+                         nucl_scheme='zhao2024')
+        Nk, Mk, Gc = step(..., org_conc=..., nh3_conc=..., fion=...,
+                           hno3=..., ulvoc=..., dma=..., hio3=...)
     """
     ezcond_fn = ezcond_tfl_jax if 'tfl' in cond_method else ezcond_ppm_jax
 
@@ -740,13 +751,20 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
 
+    valid_schemes = {'ricco_dunne', 'zhao2024'}
+    if nucl_scheme not in valid_schemes:
+        raise ValueError(f"Unknown nucl_scheme '{nucl_scheme}'. Valid: {sorted(valid_schemes)}")
+
+    use_zhao = nucl_scheme == 'zhao2024'
+
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
         for process in processes:
             if process == 'nucleation':
                 # Adaptive nucleation sub-stepping
+                # Rate estimate always uses Ricco+Dunne (fast, conservative)
                 fn = estimate_nucleation_rate(
                     Gc, temp, pres, boxvol,
-                    kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
+                    kwargs.get('org_conc', 0.0), kwargs['nh3_conc'], kwargs['fion'],
                     kwargs.get('enable_organic', 1.0),
                     kwargs.get('enable_inorganic', 1.0),
                     kwargs.get('fn_scale', 1.0),
@@ -758,17 +776,36 @@ def make_step(processes, cond_method='ppm_jit', n_coag_substeps=10,
                 )
                 dt_nuc = dt / n_nuc
 
-                def nuc_body(i, carry):
-                    Nk_s, Mk_s, Gc_s = carry
-                    Nk_s, Mk_s, Gc_s = nucleation_step(
-                        Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
-                        kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
-                        kwargs.get('enable_organic', 1.0),
-                        kwargs.get('enable_inorganic', 1.0),
-                        kwargs.get('fn_scale', 1.0),
-                    )
-                    Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
-                    return (Nk_s, Mk_s, Gc_s)
+                if use_zhao:
+                    enable_masks = kwargs.get('enable_masks', ZHAO2024_ALL_ENABLED)
+
+                    def nuc_body(i, carry):
+                        Nk_s, Mk_s, Gc_s = carry
+                        Nk_s, Mk_s, Gc_s = zhao2024_nucleation_step(
+                            Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+                            kwargs.get('org_conc', 0.0),
+                            kwargs['nh3_conc'], kwargs['fion'],
+                            hno3=kwargs.get('hno3', 0.0),
+                            ulvoc=kwargs.get('ulvoc', 0.0),
+                            dma=kwargs.get('dma', 0.0),
+                            hio3=kwargs.get('hio3', 0.0),
+                            enable_masks=enable_masks,
+                            fn_scale=kwargs.get('fn_scale', 1.0),
+                        )
+                        Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
+                        return (Nk_s, Mk_s, Gc_s)
+                else:
+                    def nuc_body(i, carry):
+                        Nk_s, Mk_s, Gc_s = carry
+                        Nk_s, Mk_s, Gc_s = nucleation_step(
+                            Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
+                            kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
+                            kwargs.get('enable_organic', 1.0),
+                            kwargs.get('enable_inorganic', 1.0),
+                            kwargs.get('fn_scale', 1.0),
+                        )
+                        Nk_s, Mk_s = mnfix_jax(Nk_s, Mk_s, xk, ICOMP_NODIAG)
+                        return (Nk_s, Mk_s, Gc_s)
 
                 Nk, Mk, Gc = jax.lax.fori_loop(
                     0, n_nuc, nuc_body, (Nk, Mk, Gc))

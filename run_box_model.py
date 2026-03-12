@@ -28,7 +28,7 @@ from tomas_jax.core.config import (
 from tomas_jax.core.state import TomasState
 from tomas_jax.solvers.diffrax import diffrax_step
 from tomas_jax.solvers.condensation import condensation_step, make_step
-from tomas_jax.physics.nucleation import nucleation_step
+from tomas_jax.physics.nucleation import nucleation_step, zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED
 from tomas_jax.utils import plotting
 from tomas_jax.utils.diagnostics import get_coagulation_rates
 
@@ -104,11 +104,13 @@ def molec_cm3_to_kg_gridcell(conc_molec_cm3: float, boxvol_cm3: float) -> float:
 # =========================================================================
 
 def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
-                   enable_nucleation: bool = True, use_make_step: bool = False):
+                   enable_nucleation: bool = True, use_make_step: bool = False,
+                   nucl_scheme: str = 'ricco_dunne'):
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
     print(f"   Bins: {NBINS}, Components: {ICOMP}")
-    print(f"   Nucleation:   {'ON' if enable_nucleation else 'OFF'}")
+    print(f"   Nucleation:   {'ON' if enable_nucleation else 'OFF'}"
+          + (f" ({nucl_scheme})" if enable_nucleation else ""))
     print(f"   Condensation: {'ON' if enable_condensation else 'OFF'}")
     print(f"   Cond. Method: {method.upper()}")
     print(f"   Precision: {'float64' if jax.config.jax_enable_x64 else 'float32'}")
@@ -152,11 +154,22 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     fion = jnp.float64(3.0)       # Ion-pair production rate [pairs/cm3/s]
     fn_scale = jnp.float64(1.0)   # Nucleation rate scaling factor
 
+    # Zhao 2024 additional precursors (only used when nucl_scheme='zhao2024')
+    hno3_conc = jnp.float64(1e8)   # HNO3 [molec/cm3] (mech 5)
+    ulvoc_conc = jnp.float64(5e6)  # ULVOC [molec/cm3] (mechs 6-8)
+    dma_conc = jnp.float64(1e7)    # Dimethylamine [molec/cm3] (mech 9)
+    hio3_conc = jnp.float64(0.0)   # HIO3 [molec/cm3] (mechs 10-11, coastal only)
+
     print(f"\nInitial H2SO4 gas: {h2so4_init_molec_cm3:.1e} molec/cm3")
     print(f"H2SO4 production:  {h2so4_prod_rate_molec_cm3_s:.1e} molec/cm3/s")
     if enable_nucleation:
         print(f"Organic vapor:     {float(org_conc):.1e} molec/cm3")
         print(f"NH3:               {float(nh3_conc):.1e} molec/cm3")
+        if nucl_scheme == 'zhao2024':
+            print(f"HNO3:              {float(hno3_conc):.1e} molec/cm3")
+            print(f"ULVOC:             {float(ulvoc_conc):.1e} molec/cm3")
+            print(f"DMA:               {float(dma_conc):.1e} molec/cm3")
+            print(f"HIO3:              {float(hio3_conc):.1e} molec/cm3")
 
     # Calculate initial totals for conservation check
     total_N_init = jnp.sum(Nk)
@@ -173,11 +186,17 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         processes.append('coagulation')
         if enable_condensation:
             processes.append('condensation')
-        step_fn = make_step(processes, cond_method=method)
+        step_fn = make_step(processes, cond_method=method, nucl_scheme=nucl_scheme)
         step_fn_jit = jax.jit(step_fn)
-        print(f"\n[System] Using make_step({processes})")
+        print(f"\n[System] Using make_step({processes}, nucl_scheme='{nucl_scheme}')")
         # Warmup
-        _kw = dict(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion) if enable_nucleation else {}
+        _kw = {}
+        if enable_nucleation:
+            _kw.update(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+            if nucl_scheme == 'zhao2024':
+                _kw.update(hno3=hno3_conc, ulvoc=ulvoc_conc,
+                           dma=dma_conc, hio3=hio3_conc,
+                           enable_masks=ZHAO2024_ALL_ENABLED)
         _ = step_fn_jit(Nk, Mk, Gc, xk,
                         jnp.float64(temp), jnp.float64(pres),
                         jnp.float64(boxvol), jnp.float64(rh),
@@ -233,6 +252,10 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
             kw = {}
             if enable_nucleation:
                 kw.update(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+                if nucl_scheme == 'zhao2024':
+                    kw.update(hno3=hno3_conc, ulvoc=ulvoc_conc,
+                              dma=dma_conc, hio3=hio3_conc,
+                              enable_masks=ZHAO2024_ALL_ENABLED)
             Nk, Mk, Gc = step_fn_jit(
                 Nk, Mk, Gc, xk,
                 jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
@@ -242,14 +265,26 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         else:
             # 2. Nucleation (creates particles, depletes gas)
             if enable_nucleation:
-                Nk, Mk, Gc = nucleation_step(
-                    Nk, Mk, Gc, xk,
-                    jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
-                    jnp.float64(dt_model),
-                    org_conc, nh3_conc, fion,
-                    enable_organic=1.0, enable_inorganic=1.0,
-                    fn_scale=float(fn_scale),
-                )
+                if nucl_scheme == 'zhao2024':
+                    Nk, Mk, Gc = zhao2024_nucleation_step(
+                        Nk, Mk, Gc, xk,
+                        jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+                        jnp.float64(dt_model),
+                        org_conc, nh3_conc, fion,
+                        hno3=hno3_conc, ulvoc=ulvoc_conc,
+                        dma=dma_conc, hio3=hio3_conc,
+                        enable_masks=ZHAO2024_ALL_ENABLED,
+                        fn_scale=float(fn_scale),
+                    )
+                else:
+                    Nk, Mk, Gc = nucleation_step(
+                        Nk, Mk, Gc, xk,
+                        jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+                        jnp.float64(dt_model),
+                        org_conc, nh3_conc, fion,
+                        enable_organic=1.0, enable_inorganic=1.0,
+                        fn_scale=float(fn_scale),
+                    )
 
             # 3. Run Coagulation Step
             Nk, Mk = solver_jit(
@@ -380,10 +415,15 @@ if __name__ == "__main__":
                         help='Disable nucleation')
     parser.add_argument('--make-step', action='store_true',
                         help='Use make_step() composable API instead of manual operator splitting')
+    parser.add_argument('--nucl-scheme', choices=['ricco_dunne', 'zhao2024'],
+                        default='ricco_dunne',
+                        help='Nucleation scheme: ricco_dunne (Riccobono+Dunne, default) '
+                             'or zhao2024 (11-mechanism Zhao et al. 2024)')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
         method=args.method,
         enable_nucleation=not args.no_nucleation,
         use_make_step=args.make_step,
+        nucl_scheme=args.nucl_scheme,
     )

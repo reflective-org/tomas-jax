@@ -27,7 +27,11 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **TomasState is a NamedTuple** with fields: Nk, Mk, xk, temp, pres, boxvol, Gc, rh, alpha. Use `.create()` factory for initialization, `.update()` for modification.
 - **Coagulation has two solvers:** `diffrax_step` (Tsit5 adaptive ODE, rtol=1e-4, atol=1e-10, for standalone coagulation) and `coag_euler_step` (forward Euler + MNFIX, for scan-fused loops). The forward Euler solver is more stable for high-N scenarios — higher-order methods amplify N^2 coagulation rates. Legacy alias `coag_rk4_step` still works. The coagulation_rhs returns zero derivatives for Gc, rh, alpha — these are preserved unchanged through the ODE solve.
 - **Condensation has four methods:** `method='tfl'` (default, sequential Fortran-faithful), `method='tfl_jit'` (fully JIT-compiled TFL, Fortran-matching), `method='ppm'` (PPM with numpy wrapper), or `method='ppm_jit'` (fully JIT-compiled PPM). Both TFL_JIT and PPM_JIT are fast paths. PPM_JIT uses analytical mass-weighted fluxes for exact conservation and is ~1.8x faster than TFL_JIT for condensation-only. TFL matches Fortran output exactly. Use `run_condensation_scan_tfl()` or `run_condensation_scan()` for scan-fused time loops.
-- **Nucleation is JIT-compiled** with two parameterizations: Riccobono 2014 (organic, `ricco_nucleation_rate`) and Dunne 2016 (inorganic, 4 mechanisms, `dunne_nucleation_rate`). Enable/disable via float masks (0.0/1.0) to avoid recompilation. Nucleated clusters go to bin 0 (90% SO4, 10% organic). Gas depletion: SO4 mass subtracted directly from Gc (no 98/96 MW correction). Organic mass is clamped proportionally when gas is exhausted (diverges from Fortran, but necessary for JAX coagulation stability).
+- **Nucleation is JIT-compiled** with two selectable schemes:
+  - `ricco_dunne` (default): Riccobono 2014 (organic) + Dunne 2016 (inorganic, 4 mechanisms). Enable/disable via `enable_organic`/`enable_inorganic` float masks (0.0/1.0).
+  - `zhao2024`: Zhao et al. 2024 11-mechanism scheme. Mechanisms 1–4 reuse Dunne 2016; adds synergistic HNO₃ (5), pure-organic Kirkby 2016 (6–7), organic-H₂SO₄ (8), amine-H₂SO₄ (9), iodine oxoacids (10–11). Per-mechanism enable via `enable_masks` tuple of 11 floats. Extra inputs: `hno3`, `ulvoc`, `dma`, `hio3`.
+  - Select via `make_step(processes, nucl_scheme='zhao2024')` or `--nucl-scheme zhao2024` CLI flag.
+  - Nucleated clusters go to bin 0 (90% SO4, 10% organic). Gas depletion: SO4 mass subtracted directly from Gc (no 98/96 MW correction). Organic mass is clamped proportionally when gas is exhausted (diverges from Fortran, but necessary for JAX coagulation stability).
 - **Adaptive nucleation sub-stepping** prevents particle creation surges: `estimate_nucleation_rate()` computes J, `compute_nucleation_substeps()` returns n_sub = ceil(dN/(frac*N_total)), clamped to [1, max_substeps]. Each substep runs nucleation_step + MNFIX. Default: max_frac=0.5, max_substeps=20. Applies to `_full_step_core`, `full_step_jax`, `condensation_step_with_nucleation_jax`, `make_step`, and all scan-fused loops.
 - **Operator splitting:** Each timestep runs: (1) H2SO4 production, (2) nucleation, (3) coagulation (JIT), (4) condensation independently. Use `make_step(['nucleation', 'coagulation', 'condensation'], cond_method='ppm_jit')` for composable process ordering.
 - **Condensation orchestrator uses layered cores:** `_condensation_step_core(ezcond_fn)` is the single implementation for PPM/TFL; `_combined_step_core()` adds coag; `_full_step_core()` adds nucl+coag; `_run_scan()` is the single scan loop. All public functions are thin wrappers.
@@ -51,7 +55,7 @@ tomas_jax/
   physics/condensation_sink.py — Condensation sink CS [s^-1] and per-bin fractions
   physics/nh3_equilibrium.py  — NH3/NH4 stoichiometric equilibrium
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
-  physics/nucleation.py       — Nucleation: Riccobono 2014 + Dunne 2016 + adaptive sub-stepping (JIT-compilable)
+  physics/nucleation.py       — Nucleation: ricco_dunne (Riccobono+Dunne) + zhao2024 (11-mechanism) schemes (JIT-compilable)
   solvers/diffrax.py          — Coagulation solvers: Tsit5 adaptive (diffrax_step), forward Euler (coag_euler_step)
   solvers/condensation.py     — Process orchestrator: core helpers + thin wrappers + make_step() composable API + scan-fused loops
 
@@ -89,7 +93,8 @@ docs/
   architecture.md             — Condensation pipeline architecture
   ppm_condensation.md         — PPM algorithm documentation
   24h_benchmark.md            — 24h benchmark suite documentation
-  nucleation.md               — Nucleation algorithm documentation
+  nucleation.md               — Nucleation algorithm documentation (ricco_dunne scheme)
+  zhao2024_nucleation.md      — Zhao 2024 11-mechanism NPF scheme documentation
   future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```
 
