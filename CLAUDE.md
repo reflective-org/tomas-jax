@@ -78,6 +78,7 @@ benchmarks/
   python/convergence_test.py  — Multi-resolution TFL vs PPM convergence (40/80 bins)
   python/benchmark_nucleation_constgc.py — Nucleation full-mode benchmark (constant-gas + fixed-production)
   python/validate_so2_chemistry.py — SO2 chemistry validation (6 figures vs Sun et al. 2022)
+  python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -144,6 +145,12 @@ When modifying condensation code, verify:
 4. PPM ≠ TFL: PPM must produce different (smoother) distributions than TFL. If PPM=TFL, check `ezcond_ppm_jax.py` threshold (`mcond > 0.0` triggers PPM; `mcond > tot_m * 1e-3` is WRONG — causes fallthrough to simple_add_path)
 5. Convergence benchmark: `python -m benchmarks.python.convergence_test --constant-gc --h2so4 1e7 --n-total 1e4 --gmd 0.02 --gsd 1.6 --temp 298 --pres 101325 --mode cond_only` (PPM should be smooth and resolution-stable at 40/80 bins)
 4. Coagulation mass error should remain < 1e-13 relative
+
+## Benchmark & Testing Rules
+
+- **Never skip or hide failures.** If a model run crashes, the benchmark must fail loudly — never produce empty/placeholder figures or silently skip scenarios. A crash means there is a bug that must be diagnosed and fixed before proceeding.
+- **Always run the full benchmark end-to-end** before declaring success. Partial test runs (e.g., single grid resolution, single altitude) do not validate the full parameter space.
+- **Plot functions must error when data is missing**, not silently produce empty axes. Use explicit checks and raise informative errors (e.g., `raise FileNotFoundError(f"Missing NPZ: {fname}. Run simulations first.")`).
 
 ## Documentation Requirements
 

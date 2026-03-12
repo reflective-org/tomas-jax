@@ -4,6 +4,32 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-12 (Thu) — SO2 Sensitivity Benchmark
+
+**Time**: ~5:00 PM PST
+
+### Summary
+Added SO2 sensitivity benchmark: 5 SO2 concentrations (1e8–1e11 molec/cm³) × 4 process modes × 3 altitudes × 2 grid resolutions over 48 hours. Produces 12 figures showing SO2 decay (3 units), H2SO4 gas, particle number/mass evolution, banana plots, and size distributions.
+
+### Files Created
+- `benchmarks/python/benchmark_so2_sensitivity.py` — Full benchmark runner + 12-figure plotting suite
+
+### Key Results
+- 20 scenarios (surface, 40-bin) run in ~40s total
+- SO2 decay ratio at 48h: ~0.82 (surface, cond_only, SO2=1e10), consistent with k1×[OH]=1e6 lifetime ~11 days
+- Full 120-scenario suite (all altitudes + 80-bin): ~15-30 min estimated
+- All 12 figures generate correctly from saved NPZ files
+
+### Usage
+```bash
+python -m benchmarks.python.benchmark_so2_sensitivity           # run all + plot
+python -m benchmarks.python.benchmark_so2_sensitivity --plot-only  # replot from NPZ
+python -m benchmarks.python.benchmark_so2_sensitivity --grids 40   # 40-bin only
+python -m benchmarks.python.benchmark_so2_sensitivity --altitudes sfc  # surface only
+```
+
+---
+
 ## 2026-03-12 (Thu) — SO2 + OH Gas-Phase Chemistry
 
 **Time**: ~2:30 PM PST
