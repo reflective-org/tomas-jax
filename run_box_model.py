@@ -21,8 +21,12 @@ import numpy as np # Used for printing/logging (CPU side)
 import tomas_jax.core.config as config
 from tomas_jax.core.config import (
     NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
-    SRTSO4, SRTH2O, SRTNH4,
-    MW_H2SO4, AVOGADRO
+    SRTSO4, SRTSO2, SRTH2O, SRTNH4,
+    MW_H2SO4, MW_SO2, AVOGADRO,
+)
+from tomas_jax.physics.so2_chemistry import (
+    so2_oxidation_step, calc_k1_so2_oh,
+    calc_solar_zenith_angle, calc_oh_concentration,
 )
 
 from tomas_jax.core.state import TomasState
@@ -105,10 +109,16 @@ def molec_cm3_to_kg_gridcell(conc_molec_cm3: float, boxvol_cm3: float) -> float:
 
 def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                    enable_nucleation: bool = True, use_make_step: bool = False,
-                   nucl_scheme: str = 'ricco_dunne'):
+                   nucl_scheme: str = 'ricco_dunne',
+                   so2_init: float = 0.0, so2_emission: float = 0.0,
+                   oh_conc: float = 0.0, oh_diurnal: bool = False,
+                   lat: float = 45.0, lon: float = 0.0, day_of_year: int = 172):
+    enable_so2 = so2_init > 0 or so2_emission > 0 or oh_conc > 0
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
     print(f"   Bins: {NBINS}, Components: {ICOMP}")
+    print(f"   SO2 Chemistry:{'ON' if enable_so2 else 'OFF'}"
+          + (f" ({'diurnal' if oh_diurnal else 'constant'} OH)" if enable_so2 else ""))
     print(f"   Nucleation:   {'ON' if enable_nucleation else 'OFF'}"
           + (f" ({nucl_scheme})" if enable_nucleation else ""))
     print(f"   Condensation: {'ON' if enable_condensation else 'OFF'}")
@@ -160,8 +170,32 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     dma_conc = jnp.float64(1e7)    # Dimethylamine [molec/cm3] (mech 9)
     hio3_conc = jnp.float64(0.0)   # HIO3 [molec/cm3] (mechs 10-11, coastal only)
 
+    # --- SO2 Chemistry Parameters ---
+    if enable_so2:
+        # Initialize SO2 gas [molec/cm3 -> kg/grid cell]
+        if so2_init > 0:
+            so2_kg = so2_init * boxvol * (MW_SO2 / 1000.0) / AVOGADRO
+            Gc = Gc.at[SRTSO2].set(so2_kg)
+        # SO2 emission rate [molec/cm3/s -> kg/s]
+        so2_emission_kg_s = so2_emission * boxvol * (MW_SO2 / 1000.0) / AVOGADRO
+        use_diurnal = 1.0 if oh_diurnal else 0.0
+    else:
+        so2_emission_kg_s = 0.0
+        use_diurnal = 0.0
+
     print(f"\nInitial H2SO4 gas: {h2so4_init_molec_cm3:.1e} molec/cm3")
     print(f"H2SO4 production:  {h2so4_prod_rate_molec_cm3_s:.1e} molec/cm3/s")
+    if enable_so2:
+        print(f"Initial SO2:       {so2_init:.1e} molec/cm3")
+        print(f"SO2 emission:      {so2_emission:.1e} molec/cm3/s")
+        print(f"OH concentration:  {oh_conc:.1e} molec/cm3"
+              + (" (diurnal)" if oh_diurnal else " (constant)"))
+        if oh_diurnal:
+            print(f"Location:          lat={lat}N, lon={lon}E, DOY={day_of_year}")
+        k1_ref = float(calc_k1_so2_oh(temp, pres, rh))
+        tau_days = 1.0 / max(k1_ref * oh_conc, 1e-30) / 86400.0
+        print(f"k1(SO2+OH):        {k1_ref:.3e} cm3/molec/s")
+        print(f"SO2 lifetime:      {tau_days:.1f} days (at given [OH])")
     if enable_nucleation:
         print(f"Organic vapor:     {float(org_conc):.1e} molec/cm3")
         print(f"NH3:               {float(nh3_conc):.1e} molec/cm3")
@@ -181,6 +215,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     # --- D. Prepare Solvers ---
     if use_make_step:
         processes = []
+        if enable_so2:
+            processes.append('so2_chemistry')
         if enable_nucleation:
             processes.append('nucleation')
         processes.append('coagulation')
@@ -191,6 +227,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         print(f"\n[System] Using make_step({processes}, nucl_scheme='{nucl_scheme}')")
         # Warmup
         _kw = {}
+        if enable_so2:
+            _kw.update(oh_conc=jnp.float64(oh_conc))
         if enable_nucleation:
             _kw.update(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
             if nucl_scheme == 'zhao2024':
@@ -244,12 +282,25 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         history_M_tot.append(jnp.sum(Mk))
         history_Gc_so4.append(float(Gc[SRTSO4]))
 
-        # 1. Add H2SO4 production (constant source)
+        # 1. Add H2SO4 production (constant source) and SO2 emissions
         Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + h2so4_prod_rate_kg_s * dt_model)
+        if enable_so2 and so2_emission_kg_s > 0:
+            Gc = Gc.at[SRTSO2].add(so2_emission_kg_s * dt_model)
 
         if use_make_step:
             # Composable path: single step_fn handles all enabled processes
             kw = {}
+            if enable_so2:
+                # Compute OH concentration (constant or diurnal)
+                if oh_diurnal:
+                    hour_utc = (current_time / 3600.0) % 24.0
+                    cos_sza = calc_solar_zenith_angle(
+                        lat, day_of_year, hour_utc, lon)
+                    oh_now = calc_oh_concentration(
+                        oh_conc, cos_sza, use_diurnal)
+                else:
+                    oh_now = jnp.float64(oh_conc)
+                kw.update(oh_conc=oh_now)
             if enable_nucleation:
                 kw.update(org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
                 if nucl_scheme == 'zhao2024':
@@ -263,6 +314,21 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                 **kw,
             )
         else:
+            # SO2 chemistry (manual path)
+            if enable_so2:
+                if oh_diurnal:
+                    hour_utc = (current_time / 3600.0) % 24.0
+                    cos_sza = calc_solar_zenith_angle(
+                        lat, day_of_year, hour_utc, lon)
+                    oh_now = calc_oh_concentration(
+                        oh_conc, cos_sza, use_diurnal)
+                else:
+                    oh_now = jnp.float64(oh_conc)
+                Gc = so2_oxidation_step(
+                    Gc, jnp.float64(temp), jnp.float64(pres),
+                    jnp.float64(boxvol), jnp.float64(dt_model),
+                    oh_now, jnp.float64(rh))
+
             # 2. Nucleation (creates particles, depletes gas)
             if enable_nucleation:
                 if nucl_scheme == 'zhao2024':
@@ -419,6 +485,21 @@ if __name__ == "__main__":
                         default='ricco_dunne',
                         help='Nucleation scheme: ricco_dunne (Riccobono+Dunne, default) '
                              'or zhao2024 (11-mechanism Zhao et al. 2024)')
+    # SO2 chemistry
+    parser.add_argument('--so2-init', type=float, default=0.0,
+                        help='Initial SO2 concentration [molec/cm3] (e.g. 5e10)')
+    parser.add_argument('--so2-emission', type=float, default=0.0,
+                        help='SO2 emission rate [molec/cm3/s] (e.g. 1e7)')
+    parser.add_argument('--oh-conc', type=float, default=0.0,
+                        help='OH concentration [molec/cm3] (e.g. 1e6)')
+    parser.add_argument('--oh-diurnal', action='store_true',
+                        help='Use diurnal OH cycle (proportional to cos(SZA))')
+    parser.add_argument('--lat', type=float, default=45.0,
+                        help='Latitude [degrees N] for diurnal cycle (default: 45)')
+    parser.add_argument('--lon', type=float, default=0.0,
+                        help='Longitude [degrees E] for diurnal cycle (default: 0)')
+    parser.add_argument('--day-of-year', type=int, default=172,
+                        help='Day of year for diurnal cycle (default: 172, summer solstice)')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
@@ -426,4 +507,11 @@ if __name__ == "__main__":
         enable_nucleation=not args.no_nucleation,
         use_make_step=args.make_step,
         nucl_scheme=args.nucl_scheme,
+        so2_init=args.so2_init,
+        so2_emission=args.so2_emission,
+        oh_conc=args.oh_conc,
+        oh_diurnal=args.oh_diurnal,
+        lat=args.lat,
+        lon=args.lon,
+        day_of_year=args.day_of_year,
     )

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-TOMAS-JAX is a JAX re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model. It implements coagulation (JIT-compiled), condensation (TFL/PPM, JIT-compiled), and nucleation (Riccobono 2014 + Dunne 2016, JIT-compiled) for a 40-bin (1.7nm start), 44-component aerosol size distribution.
+TOMAS-JAX is a JAX re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model. It implements SO2 chemistry (Sun et al. 2022, JIT-compiled), coagulation (JIT-compiled), condensation (TFL/PPM, JIT-compiled), and nucleation (Riccobono 2014 + Dunne 2016, JIT-compiled) for a 40-bin (1.7nm start), 44-component aerosol size distribution.
 
 ## Build & Run
 
@@ -36,7 +36,8 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
   - Select via `make_step(processes, nucl_scheme='zhao2024')` or `--nucl-scheme zhao2024` CLI flag.
   - Nucleated clusters go to bin 0 (90% SO4, 10% organic). Gas depletion: SO4 mass subtracted directly from Gc (no 98/96 MW correction). Organic mass is clamped proportionally when gas is exhausted (diverges from Fortran, but necessary for JAX coagulation stability).
 - **Adaptive nucleation sub-stepping** prevents particle creation surges: `estimate_nucleation_rate()` computes J, `compute_nucleation_substeps()` returns n_sub = ceil(dN/(frac*N_total)), clamped to [1, max_substeps]. Each substep runs nucleation_step + MNFIX. Default: max_frac=0.5, max_substeps=20. Applies to `_full_step_core`, `full_step_jax`, `condensation_step_with_nucleation_jax`, `make_step`, and all scan-fused loops.
-- **Operator splitting:** Each timestep runs: (1) H2SO4 production, (2) nucleation, (3) coagulation (JIT), (4) condensation independently. Use `make_step(['nucleation', 'coagulation', 'condensation'], cond_method='ppm_jit')` for composable process ordering.
+- **SO2 chemistry is JIT-compiled** using the Sun et al. (2022) Troe formalism with H2O enhancement. `calc_k1_so2_oh(temp, pres, rh)` returns the rate constant [cm³/molec/s]. `so2_oxidation_step()` applies analytical pseudo-first-order decay: SO2(t+dt) = SO2(t) × exp(-k1 × [OH] × dt). Sulfur is conserved (ΔH2SO4 = ΔSO2 × MW_H2SO4/MW_SO2). OH can be constant or diurnal (proportional to cos(SZA)). SO2 stored in Gc[SRTSO2=43]; N_GAS_SPECIES=44 (was 43). When SO2=0, falls back to existing constant prod_rate path.
+- **Operator splitting:** Each timestep runs: (1) SO2 chemistry, (2) nucleation, (3) coagulation (JIT), (4) condensation independently. Use `make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation'], cond_method='ppm_jit')` for composable process ordering.
 - **Condensation orchestrator uses layered cores:** `_condensation_step_core(ezcond_fn)` is the single implementation for PPM/TFL; `_combined_step_core()` adds coag; `_full_step_core()` adds nucl+coag; `_run_scan()` is the single scan loop. All public functions are thin wrappers.
 - **MNFIX multi-bin shift:** Uses analytical log2 computation to find target bin for large mass shifts (e.g., nucleated particles jumping 12+ bins). Formula: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
 - **Scan-fused modes:** `run_condensation_scan_tfl()` (cond-only), `run_nucleation_condensation_scan()` (nucl+cond), `run_full_scan()` (nucl+coag+cond). All compile into single XLA programs for zero Python dispatch overhead.
@@ -59,6 +60,7 @@ tomas_jax/
   physics/nh3_equilibrium.py  — NH3/NH4 stoichiometric equilibrium
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
   physics/nucleation.py       — Nucleation: ricco_dunne (Riccobono+Dunne) + zhao2024 (11-mechanism) schemes (JIT-compilable)
+  physics/so2_chemistry.py    — SO2+OH chemistry: Sun et al. (2022) Troe formalism, SZA, diurnal OH (JIT-compilable)
   solvers/diffrax.py          — Coagulation solvers: Tsit5 adaptive (diffrax_step), forward Euler (coag_euler_step)
   solvers/condensation.py     — Process orchestrator: core helpers + thin wrappers + make_step() composable API + scan-fused loops
 
@@ -75,6 +77,8 @@ benchmarks/
   python/time_single_scenario.py — Clean single-scenario timing benchmark (all solver combos vs Fortran)
   python/convergence_test.py  — Multi-resolution TFL vs PPM convergence (40/80 bins)
   python/benchmark_nucleation_constgc.py — Nucleation full-mode benchmark (constant-gas + fixed-production)
+  python/validate_so2_chemistry.py — SO2 chemistry validation (7 figures vs Sun et al. 2022, incl. stratospheric lifetime heatmaps)
+  python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -98,13 +102,14 @@ docs/
   24h_benchmark.md            — 24h benchmark suite documentation
   nucleation.md               — Nucleation algorithm documentation (ricco_dunne scheme)
   zhao2024_nucleation.md      — Zhao 2024 11-mechanism NPF scheme documentation
+  so2_chemistry.md            — SO2+OH chemistry (Sun et al. 2022), validation, usage
   future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```
 
 ## Species Indices (0-based)
 
 - 0 = SO4, 1-41 = Organics, 42 = NH4, 43 = H2O
-- Gas array Gc has 43 elements (all species except water)
+- Gas array Gc has 44 elements (N_GAS_SPECIES=44): indices 0-42 (aerosol species except water) + index 43 (SO2, SRTSO2=43)
 
 ## Fortran Source Mapping
 
@@ -140,6 +145,12 @@ When modifying condensation code, verify:
 4. PPM ≠ TFL: PPM must produce different (smoother) distributions than TFL. If PPM=TFL, check `ezcond_ppm_jax.py` threshold (`mcond > 0.0` triggers PPM; `mcond > tot_m * 1e-3` is WRONG — causes fallthrough to simple_add_path)
 5. Convergence benchmark: `python -m benchmarks.python.convergence_test --constant-gc --h2so4 1e7 --n-total 1e4 --gmd 0.02 --gsd 1.6 --temp 298 --pres 101325 --mode cond_only` (PPM should be smooth and resolution-stable at 40/80 bins)
 4. Coagulation mass error should remain < 1e-13 relative
+
+## Benchmark & Testing Rules
+
+- **Never skip or hide failures.** If a model run crashes, the benchmark must fail loudly — never produce empty/placeholder figures or silently skip scenarios. A crash means there is a bug that must be diagnosed and fixed before proceeding.
+- **Always run the full benchmark end-to-end** before declaring success. Partial test runs (e.g., single grid resolution, single altitude) do not validate the full parameter space.
+- **Plot functions must error when data is missing**, not silently produce empty axes. Use explicit checks and raise informative errors (e.g., `raise FileNotFoundError(f"Missing NPZ: {fname}. Run simulations first.")`).
 
 ## Documentation Requirements
 
