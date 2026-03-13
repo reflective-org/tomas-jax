@@ -77,7 +77,7 @@ benchmarks/
   python/time_single_scenario.py — Clean single-scenario timing benchmark (all solver combos vs Fortran)
   python/convergence_test.py  — Multi-resolution TFL vs PPM convergence (40/80 bins)
   python/benchmark_nucleation_constgc.py — Nucleation full-mode benchmark (constant-gas + fixed-production)
-  python/validate_so2_chemistry.py — SO2 chemistry validation (6 figures vs Sun et al. 2022)
+  python/validate_so2_chemistry.py — SO2 chemistry validation (7 figures vs Sun et al. 2022, incl. stratospheric lifetime heatmaps)
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
 
 tomas_fortran/

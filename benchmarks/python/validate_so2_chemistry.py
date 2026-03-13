@@ -295,6 +295,216 @@ def figure_f():
 
 
 # =========================================================================
+# US Standard Atmosphere 1976 (0–50 km)
+# =========================================================================
+
+# Layer definitions: (z_base_km, T_base_K, lapse_rate_K_per_km)
+_STD_ATM_LAYERS = [
+    (0.0,  288.15,  -6.5),    # Troposphere
+    (11.0, 216.65,   0.0),    # Tropopause / lower stratosphere
+    (20.0, 216.65,   1.0),    # Stratosphere
+    (32.0, 228.65,   2.8),    # Upper stratosphere
+    (47.0, 270.65,   0.0),    # Stratopause
+]
+
+_G0 = 9.80665   # m/s^2
+_R_AIR = 287.05  # J/(kg K)
+
+
+def _std_atmosphere(z_km):
+    """US Standard Atmosphere 1976: return (T [K], P [Pa]) at altitude z_km.
+
+    Valid for 0–50 km.
+    """
+    T0, P0 = 288.15, 101325.0
+    T_prev, P_prev, z_prev = T0, P0, 0.0
+
+    for i, (z_base, T_base, lapse) in enumerate(_STD_ATM_LAYERS):
+        # Determine the top of this layer
+        if i + 1 < len(_STD_ATM_LAYERS):
+            z_top = _STD_ATM_LAYERS[i + 1][0]
+        else:
+            z_top = 51.0
+
+        if z_km <= z_top:
+            dz = (z_km - z_base) * 1000.0  # m
+            T = T_base + lapse * (z_km - z_base)
+            if abs(lapse) < 1e-10:
+                # Isothermal layer
+                P = P_prev * np.exp(-_G0 * dz / (_R_AIR * T_base))
+            else:
+                # Linear lapse
+                P = P_prev * (T / T_base) ** (-_G0 / (lapse / 1000.0 * _R_AIR))
+            return T, P
+
+        # Advance to top of this layer for next iteration
+        dz_layer = (z_top - z_base) * 1000.0
+        T_top = T_base + lapse * (z_top - z_base)
+        if abs(lapse) < 1e-10:
+            P_top = P_prev * np.exp(-_G0 * dz_layer / (_R_AIR * T_base))
+        else:
+            P_top = P_prev * (T_top / T_base) ** (-_G0 / (lapse / 1000.0 * _R_AIR))
+        P_prev = P_top
+
+    return T0, P0  # fallback
+
+
+def _std_atm_profile(z_arr_km):
+    """Vectorized standard atmosphere: return T, P arrays."""
+    T = np.zeros_like(z_arr_km)
+    P = np.zeros_like(z_arr_km)
+    for i, z in enumerate(z_arr_km):
+        T[i], P[i] = _std_atmosphere(z)
+    return T, P
+
+
+# =========================================================================
+# Figure G: SO2 lifetime across the atmosphere (3-panel 2D heatmap)
+# =========================================================================
+
+def figure_g():
+    """SO2 lifetime across the atmosphere: 3-panel 2D heatmaps.
+
+    Panel 1: k1(T, P) — rate constant in full T-P parameter space
+    Panel 2: SO2 lifetime(T, P) at [OH]=1e6 molec/cm3
+    Panel 3: SO2 lifetime(altitude, [OH]) using standard atmosphere
+
+    Panels 1-2 overlay the US Standard Atmosphere 1976 profile.
+    """
+    from matplotlib.colors import LogNorm
+
+    # ----- Panel 1 & 2: T-P parameter space -----
+    T_arr = np.linspace(190, 300, 120)
+    P_arr = np.logspace(np.log10(70), np.log10(101325), 100)  # Pa (~0.7 hPa to 1013 hPa)
+
+    k1_grid = np.zeros((len(P_arr), len(T_arr)))
+    for j, T in enumerate(T_arr):
+        for i, P in enumerate(P_arr):
+            k1_grid[i, j] = float(calc_k1_so2_oh(float(T), float(P)))
+
+    oh_ref = 1e6
+    tau_grid = 1.0 / (k1_grid * oh_ref) / 86400.0  # days
+
+    # Standard atmosphere profile for overlay (0-50 km)
+    z_prof = np.linspace(0, 50, 200)
+    T_prof, P_prof = _std_atm_profile(z_prof)
+
+    # ----- Panel 3: altitude vs [OH] -----
+    z_arr = np.linspace(0, 50, 100)
+    oh_arr = np.logspace(4, 7.5, 100)
+
+    T_z, P_z = _std_atm_profile(z_arr)
+    k1_z = np.array([float(calc_k1_so2_oh(float(t), float(p)))
+                      for t, p in zip(T_z, P_z)])
+
+    tau_alt_oh = np.zeros((len(z_arr), len(oh_arr)))
+    for j, oh in enumerate(oh_arr):
+        tau_alt_oh[:, j] = 1.0 / (k1_z * oh) / 86400.0
+
+    # ----- Plot -----
+    fig, axes = plt.subplots(1, 3, figsize=(20, 8))
+
+    # Panel 1: k1(T, P)
+    ax = axes[0]
+    T_mesh, P_mesh = np.meshgrid(T_arr, P_arr)
+    im1 = ax.pcolormesh(T_mesh, P_mesh / 100.0, k1_grid,
+                         norm=LogNorm(vmin=k1_grid.min(), vmax=k1_grid.max()),
+                         cmap='viridis', shading='auto')
+    ax.plot(T_prof, P_prof / 100.0, 'w-', linewidth=2.5, label='Std Atm')
+    ax.plot(T_prof, P_prof / 100.0, 'k--', linewidth=1.0)
+    ax.set_yscale('log')
+    ax.invert_yaxis()
+    ax.set_xlabel('Temperature (K)', fontsize=12)
+    ax.set_ylabel('Pressure (hPa)', fontsize=12)
+    ax.set_title('(a) k$_1$(SO$_2$+OH)', fontsize=13, fontweight='bold')
+    cb1 = plt.colorbar(im1, ax=ax, shrink=0.85, pad=0.02)
+    cb1.set_label('k$_1$ (cm$^3$ molec$^{-1}$ s$^{-1}$)', fontsize=10)
+    ax.legend(loc='lower left', fontsize=9)
+
+    # Annotate altitude ticks on right
+    alt_ticks = [0, 5, 10, 15, 20, 30, 40, 50]
+    for z in alt_ticks:
+        _, p_z = _std_atmosphere(z)
+        if P_arr.min() / 100 <= p_z / 100 <= P_arr.max() / 100:
+            ax.annotate(f'{z}km', xy=(T_arr[-1], p_z / 100),
+                       xytext=(T_arr[-1] + 3, p_z / 100),
+                       fontsize=7, color='0.4', va='center',
+                       annotation_clip=False)
+
+    # Panel 2: lifetime(T, P) at [OH]=1e6
+    ax = axes[1]
+    # Clip lifetime to reasonable range for colorbar
+    tau_clipped = np.clip(tau_grid, 0.1, 1000)
+    im2 = ax.pcolormesh(T_mesh, P_mesh / 100.0, tau_clipped,
+                         norm=LogNorm(vmin=0.1, vmax=1000),
+                         cmap='RdYlBu', shading='auto')
+    ax.plot(T_prof, P_prof / 100.0, 'k-', linewidth=2.5, label='Std Atm')
+    ax.plot(T_prof, P_prof / 100.0, 'w--', linewidth=1.0)
+    ax.set_yscale('log')
+    ax.invert_yaxis()
+    ax.set_xlabel('Temperature (K)', fontsize=12)
+    ax.set_ylabel('Pressure (hPa)', fontsize=12)
+    ax.set_title('(b) SO$_2$ lifetime at [OH]=10$^6$', fontsize=13, fontweight='bold')
+    cb2 = plt.colorbar(im2, ax=ax, shrink=0.85, pad=0.02)
+    cb2.set_label('Lifetime (days)', fontsize=10)
+    ax.legend(loc='lower left', fontsize=9)
+
+    # Contour lines for key lifetimes
+    CS = ax.contour(T_mesh, P_mesh / 100.0, tau_grid,
+                    levels=[1, 5, 10, 30, 100],
+                    colors='k', linewidths=0.8, linestyles=':')
+    ax.clabel(CS, fmt='%g d', fontsize=7)
+
+    for z in alt_ticks:
+        _, p_z = _std_atmosphere(z)
+        if P_arr.min() / 100 <= p_z / 100 <= P_arr.max() / 100:
+            ax.annotate(f'{z}km', xy=(T_arr[-1], p_z / 100),
+                       xytext=(T_arr[-1] + 3, p_z / 100),
+                       fontsize=7, color='0.4', va='center',
+                       annotation_clip=False)
+
+    # Panel 3: lifetime(altitude, [OH])
+    ax = axes[2]
+    OH_mesh, Z_mesh = np.meshgrid(oh_arr, z_arr)
+    tau_clipped3 = np.clip(tau_alt_oh, 0.01, 10000)
+    im3 = ax.pcolormesh(OH_mesh, Z_mesh, tau_clipped3,
+                         norm=LogNorm(vmin=0.1, vmax=1000),
+                         cmap='RdYlBu', shading='auto')
+    ax.set_xscale('log')
+    ax.set_xlabel('[OH] (molec cm$^{-3}$)', fontsize=12)
+    ax.set_ylabel('Altitude (km)', fontsize=12)
+    ax.set_title('(c) SO$_2$ lifetime vs altitude & [OH]', fontsize=13, fontweight='bold')
+    cb3 = plt.colorbar(im3, ax=ax, shrink=0.85, pad=0.12)
+    cb3.set_label('Lifetime (days)', fontsize=10)
+
+    # Contour lines
+    CS3 = ax.contour(OH_mesh, Z_mesh, tau_alt_oh,
+                     levels=[1, 5, 10, 30, 100],
+                     colors='k', linewidths=0.8, linestyles=':')
+    ax.clabel(CS3, fmt='%g d', fontsize=7)
+
+    # Mark typical OH ranges
+    ax.axvline(1e6, color='gray', ls='--', lw=0.8, alpha=0.7)
+    ax.text(1.1e6, 48, '[OH]$_{typ}$', fontsize=8, color='0.4')
+
+    # Annotate approximate pressure on right edge
+    for z_km in [0, 10, 20, 30, 40, 50]:
+        _, p = _std_atmosphere(z_km)
+        ax.annotate(f'{p/100:.0f} hPa', xy=(oh_arr[-1], z_km),
+                   xytext=(5, 0), textcoords='offset points',
+                   fontsize=7, color='0.4', va='center',
+                   annotation_clip=False)
+
+    fig.suptitle('SO$_2$ + OH Kinetics: Surface to Stratosphere (Sun et al. 2022)',
+                 fontsize=15, fontweight='bold', y=1.02)
+    fig.tight_layout()
+    fig.savefig(os.path.join(OUTDIR, 'fig_g_lifetime_heatmaps.png'),
+                dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print("  Figure G saved.")
+
+
+# =========================================================================
 # Main
 # =========================================================================
 
@@ -316,8 +526,9 @@ def main():
     figure_d()
     figure_e()
     figure_f()
+    figure_g()
 
-    print(f"\nAll 6 figures saved to {OUTDIR}/")
+    print(f"\nAll 7 figures saved to {OUTDIR}/")
 
 
 if __name__ == '__main__':

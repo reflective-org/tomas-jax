@@ -4,6 +4,24 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-12 (Thu) — SO2 Lifetime Heatmaps (Surface to Stratosphere)
+
+**Time**: ~6:00 PM PST
+
+### Summary
+Added Figure G to SO2 chemistry validation: 3-panel 2D heatmap showing SO2+OH kinetics from surface to stratosphere (0–50 km). Uses US Standard Atmosphere 1976 (all 5 layers).
+
+### Key Results
+- Panel (a): k1(T,P) — rate constant drops ~130× from surface to 50km due to pressure decrease
+- Panel (b): SO2 lifetime at [OH]=10⁶ — ranges from ~10 days (surface) to ~1400 days (50km)
+- Panel (c): Lifetime vs altitude & [OH] — practical reference chart for atmospheric modelers
+- Stratospheric temperature inversion (T rising above 20km) visible in standard atmosphere overlay
+
+### Files Modified
+- `benchmarks/python/validate_so2_chemistry.py` — Added `_std_atmosphere()` (US Std Atm 1976, 0–50km), `figure_g()` (3-panel heatmap); now 7 figures total
+
+---
+
 ## 2026-03-12 (Thu) — SO2 Sensitivity Benchmark
 
 **Time**: ~5:00 PM PST
