@@ -37,7 +37,8 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
   - Nucleated clusters go to bin 0 (90% SO4, 10% organic). Gas depletion: SO4 mass subtracted directly from Gc (no 98/96 MW correction). Organic mass is clamped proportionally when gas is exhausted (diverges from Fortran, but necessary for JAX coagulation stability).
 - **Adaptive nucleation sub-stepping** prevents particle creation surges: `estimate_nucleation_rate()` computes J, `compute_nucleation_substeps()` returns n_sub = ceil(dN/(frac*N_total)), clamped to [1, max_substeps]. Each substep runs nucleation_step + MNFIX. Default: max_frac=0.5, max_substeps=20. Applies to `_full_step_core`, `full_step_jax`, `condensation_step_with_nucleation_jax`, `make_step`, and all scan-fused loops.
 - **SO2 chemistry is JIT-compiled** using the Sun et al. (2022) Troe formalism with H2O enhancement. `calc_k1_so2_oh(temp, pres, rh)` returns the rate constant [cm³/molec/s]. `so2_oxidation_step()` applies analytical pseudo-first-order decay: SO2(t+dt) = SO2(t) × exp(-k1 × [OH] × dt). Sulfur is conserved (ΔH2SO4 = ΔSO2 × MW_H2SO4/MW_SO2). OH can be constant or diurnal (proportional to cos(SZA)). SO2 stored in Gc[SRTSO2=43]; N_GAS_SPECIES=44 (was 43). When SO2=0, falls back to existing constant prod_rate path.
-- **Operator splitting:** Each timestep runs: (1) SO2 chemistry, (2) nucleation, (3) coagulation (JIT), (4) condensation independently. Use `make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation'], cond_method='ppm_jit')` for composable process ordering.
+- **Dilution is JIT-compiled** first-order relaxation toward background: `C(t+dt) = Cbg + (C - Cbg) * exp(-kdil * dt)`. Applies to Nk, Mk, Gc independently. When Cbg=0, simplifies to exponential decay. Pass `kdil`, `Nk_bg`, `Mk_bg`, `Gc_bg` as kwargs to `make_step`.
+- **Operator splitting:** Each timestep runs: (1) SO2 chemistry, (2) nucleation, (3) coagulation (JIT), (4) condensation, (5) dilution independently. Use `make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'], cond_method='ppm_jit')` for composable process ordering.
 - **Condensation orchestrator uses layered cores:** `_condensation_step_core(ezcond_fn)` is the single implementation for PPM/TFL; `_combined_step_core()` adds coag; `_full_step_core()` adds nucl+coag; `_run_scan()` is the single scan loop. All public functions are thin wrappers.
 - **MNFIX multi-bin shift:** Uses analytical log2 computation to find target bin for large mass shifts (e.g., nucleated particles jumping 12+ bins). Formula: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
 - **Scan-fused modes:** `run_condensation_scan_tfl()` (cond-only), `run_nucleation_condensation_scan()` (nucl+cond), `run_full_scan()` (nucl+coag+cond). All compile into single XLA programs for zero Python dispatch overhead.
@@ -61,6 +62,7 @@ tomas_jax/
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
   physics/nucleation.py       — Nucleation: ricco_dunne (Riccobono+Dunne) + zhao2024 (11-mechanism) schemes (JIT-compilable)
   physics/so2_chemistry.py    — SO2+OH chemistry: Sun et al. (2022) Troe formalism, SZA, diurnal OH (JIT-compilable)
+  physics/dilution.py         — Dilution/entrainment: first-order relaxation toward background (JIT-compilable)
   solvers/diffrax.py          — Coagulation solvers: Tsit5 adaptive (diffrax_step), forward Euler (coag_euler_step)
   solvers/condensation.py     — Process orchestrator: core helpers + thin wrappers + make_step() composable API + scan-fused loops
 
@@ -79,6 +81,7 @@ benchmarks/
   python/benchmark_nucleation_constgc.py — Nucleation full-mode benchmark (constant-gas + fixed-production)
   python/validate_so2_chemistry.py — SO2 chemistry validation (7 figures vs Sun et al. 2022, incl. stratospheric lifetime heatmaps)
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
+  python/benchmark_dilution.py — Dilution benchmark (3 cases × 24h, all processes + SO2 + dilution, 6 figures)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -103,6 +106,8 @@ docs/
   nucleation.md               — Nucleation algorithm documentation (ricco_dunne scheme)
   zhao2024_nucleation.md      — Zhao 2024 11-mechanism NPF scheme documentation
   so2_chemistry.md            — SO2+OH chemistry (Sun et al. 2022), validation, usage
+  dilution.md                 — Dilution/entrainment algorithm, parameters, usage
+  missing_physics.md          — Gap analysis of unimplemented physics
   future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```
 

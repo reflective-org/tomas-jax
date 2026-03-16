@@ -62,6 +62,7 @@ from ..physics.so2_chemistry import (
     so2_oxidation_step, calc_k1_so2_oh,
     calc_solar_zenith_angle, calc_oh_concentration,
 )
+from ..physics.dilution import dilution_step
 from ..physics.nucleation import (
     nucleation_step, estimate_nucleation_rate, compute_nucleation_substeps,
     zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED,
@@ -729,7 +730,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
 
     Args:
         processes: Ordered list of process names, e.g.
-            ['so2_chemistry', 'nucleation', 'coagulation', 'condensation']
+            ['so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution']
         cond_method: 'ppm_jit' or 'tfl_jit'
         nucl_scheme: 'ricco_dunne' (Riccobono 2014 + Dunne 2016) or
             'zhao2024' (11-mechanism Zhao et al. 2024). For zhao2024,
@@ -760,7 +761,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
     """
     ezcond_fn = ezcond_tfl_jax if 'tfl' in cond_method else ezcond_ppm_jax
 
-    valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation'}
+    valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'}
     for p in processes:
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
@@ -840,6 +841,14 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 Nk, Mk, Gc = _condensation_step_core(
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     ezcond_fn=ezcond_fn,
+                )
+            elif process == 'dilution':
+                kdil = kwargs.get('kdil', 0.0)
+                Nk, Mk, Gc = dilution_step(
+                    Nk, Mk, Gc, dt, kdil,
+                    Nk_bg=kwargs.get('Nk_bg', None),
+                    Mk_bg=kwargs.get('Mk_bg', None),
+                    Gc_bg=kwargs.get('Gc_bg', None),
                 )
         return Nk, Mk, Gc
 

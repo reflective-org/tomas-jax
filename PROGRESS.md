@@ -4,6 +4,71 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-14 (Fri) — SAI 96h Box Model Simulation
+
+**Time**: ~10:15 PM PST
+
+### Summary
+Added a 96-hour SAI box model simulation that evolves a fresh SO2 plume (10 tonnes, 1 ton/min, 250 m/s, r=100m → ~2×10¹³ molec/cm³) through all microphysical processes at stratospheric conditions (216K, 55 hPa). Three dilution cases: baseline (closed box), volume 2× in 24h, and volume 1.78× in 24h.
+
+### Files Created
+- `experimental_case/run_sai_simulation.py` — 96h simulation: 3 cases × 5760 steps, 6 figures
+- `experimental_case/__init__.py` — Package init for module imports
+
+### Files Modified
+- `experimental_case/README.md` — Added simulation description, usage, output table
+
+### Key Results
+- Massive nucleation burst in first ~2h: N goes from 5/cm³ background to ~2×10⁷/cm³
+- SO2 decay: baseline τ≈11 days (OH-limited), dilution cases much faster
+- H2SO4 consumed rapidly by condensation sink + nucleation
+- Banana plots show classic nucleation → growth → coagulation evolution
+- Runtime: ~15s per case (~45s total for 3 cases)
+
+### Figures (in `experimental_case/results/`)
+1. `fig1_ntotal.png` — N_total timeseries (absolute + ratio with passive tracer)
+2. `fig2_mdry.png` — M_dry timeseries
+3. `fig3_dndlogdp.png` — dN/dlogDp snapshots at 12h, 24h, 48h, 72h, 96h
+4. `fig4_dmdlogdp.png` — dM/dlogDp snapshots
+5. `fig5_banana.png` — Banana plots (3 panels)
+6. `fig6_gas.png` — SO2 + H2SO4 gas-phase timeseries
+
+---
+
+## 2026-03-13 (Thu) — Dilution / Entrainment Process
+
+**Time**: ~PST
+
+### Summary
+Added dilution/entrainment as the 5th physics process. First-order relaxation of Nk, Mk, Gc toward a background state: `C(t+dt) = Cbg + (C - Cbg) * exp(-kdil * dt)`. Analytical, unconditionally stable, JIT-compilable. Includes a passive scalar tracer (`dilute_tracer()`) that decays by dilution only — provides a clean reference to compare reactive species against pure dilution.
+
+### Files Created
+- `tomas_jax/physics/dilution.py` — `dilution_step()` + `dilute_tracer()` functions
+- `tests/test_dilution.py` — 10 unit tests (6 dilution_step + 4 passive tracer)
+- `docs/dilution.md` — Algorithm docs, typical kdil values, tracer usage
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `'dilution'` to `make_step()` valid set + process dispatch
+- `run_box_model.py` — Added `--dilution-rate`, `--dilution-bg` CLI flags; passive tracer tracking + diagnostics
+- `CLAUDE.md` — Added dilution.py to file layout, updated architecture rules
+- `docs/missing_physics.md` — Marked §5 (Dilution) as implemented
+
+### Benchmark
+- `benchmarks/python/benchmark_dilution.py` — 3 cases (baseline/moderate/strong) × 24h, all processes + SO2
+- 6 figures: N_total, M_dry, gas-phase SO2+H2SO4, size distributions, dilution attribution, banana plots
+- Passive tracer overlay shows chemistry/nucleation partially compensating dilution losses
+- Runtime: ~1.8s per scenario (3 × 1.8s = 5.4s total)
+
+### Usage
+```bash
+python run_box_model.py --make-step --dilution-rate 1e-4                       # clean-air
+python run_box_model.py --make-step --dilution-rate 1e-4 --dilution-bg ambient # relax to initial
+python -m benchmarks.python.benchmark_dilution                                 # full benchmark + plots
+python -m benchmarks.python.benchmark_dilution --plot-only                     # replot from NPZ
+```
+
+---
+
 ## 2026-03-12 (Thu) — SO2 Lifetime Heatmaps (Surface to Stratosphere)
 
 **Time**: ~6:00 PM PST
