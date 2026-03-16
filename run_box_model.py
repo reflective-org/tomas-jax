@@ -33,6 +33,7 @@ from tomas_jax.core.state import TomasState
 from tomas_jax.solvers.diffrax import diffrax_step
 from tomas_jax.solvers.condensation import condensation_step, make_step
 from tomas_jax.physics.nucleation import nucleation_step, zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED
+from tomas_jax.physics.dilution import dilute_tracer
 from tomas_jax.utils import plotting
 from tomas_jax.utils.diagnostics import get_coagulation_rates
 
@@ -112,8 +113,10 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                    nucl_scheme: str = 'ricco_dunne',
                    so2_init: float = 0.0, so2_emission: float = 0.0,
                    oh_conc: float = 0.0, oh_diurnal: bool = False,
-                   lat: float = 45.0, lon: float = 0.0, day_of_year: int = 172):
+                   lat: float = 45.0, lon: float = 0.0, day_of_year: int = 172,
+                   dilution_rate: float = 0.0, dilution_bg: str = 'clean'):
     enable_so2 = so2_init > 0 or so2_emission > 0 or oh_conc > 0
+    enable_dilution = dilution_rate > 0
     print("="*60)
     print(f"TOMAS Box Model - Coagulation + Condensation")
     print(f"   Bins: {NBINS}, Components: {ICOMP}")
@@ -122,6 +125,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     print(f"   Nucleation:   {'ON' if enable_nucleation else 'OFF'}"
           + (f" ({nucl_scheme})" if enable_nucleation else ""))
     print(f"   Condensation: {'ON' if enable_condensation else 'OFF'}")
+    print(f"   Dilution:     {'ON' if enable_dilution else 'OFF'}"
+          + (f" (kdil={dilution_rate:.1e}, bg={dilution_bg})" if enable_dilution else ""))
     print(f"   Cond. Method: {method.upper()}")
     print(f"   Precision: {'float64' if jax.config.jax_enable_x64 else 'float32'}")
     print("="*60)
@@ -205,6 +210,25 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
             print(f"DMA:               {float(dma_conc):.1e} molec/cm3")
             print(f"HIO3:              {float(hio3_conc):.1e} molec/cm3")
 
+    # --- Dilution Parameters ---
+    if enable_dilution:
+        if dilution_bg == 'ambient':
+            # Use initial state as background (relaxation to initial conditions)
+            Nk_bg = Nk.copy()
+            Mk_bg = Mk.copy()
+            Gc_bg = Gc.copy()
+        else:
+            # Clean air (zeros)
+            Nk_bg = jnp.zeros_like(Nk)
+            Mk_bg = jnp.zeros_like(Mk)
+            Gc_bg = jnp.zeros_like(Gc)
+        print(f"Dilution rate:     {dilution_rate:.1e} s^-1 "
+              f"(tau = {1.0/dilution_rate:.0f} s = {1.0/dilution_rate/3600:.1f} h)")
+    else:
+        Nk_bg = None
+        Mk_bg = None
+        Gc_bg = None
+
     # Calculate initial totals for conservation check
     total_N_init = jnp.sum(Nk)
     total_M_init = jnp.sum(Mk) + jnp.sum(Gc)  # aerosol + gas
@@ -222,6 +246,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         processes.append('coagulation')
         if enable_condensation:
             processes.append('condensation')
+        if enable_dilution:
+            processes.append('dilution')
         step_fn = make_step(processes, cond_method=method, nucl_scheme=nucl_scheme)
         step_fn_jit = jax.jit(step_fn)
         print(f"\n[System] Using make_step({processes}, nucl_scheme='{nucl_scheme}')")
@@ -235,6 +261,9 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                 _kw.update(hno3=hno3_conc, ulvoc=ulvoc_conc,
                            dma=dma_conc, hio3=hio3_conc,
                            enable_masks=ZHAO2024_ALL_ENABLED)
+        if enable_dilution:
+            _kw.update(kdil=jnp.float64(dilution_rate),
+                       Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg)
         _ = step_fn_jit(Nk, Mk, Gc, xk,
                         jnp.float64(temp), jnp.float64(pres),
                         jnp.float64(boxvol), jnp.float64(rh),
@@ -265,6 +294,9 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     print(f"{'Time [s]':<10} | {'Particles [#]':<15} | {'Aero Mass [kg]':<15} | {'H2SO4 gas [kg]':<15}")
     print("-" * 70)
 
+    # Passive tracer for dilution reference
+    tracer = jnp.float64(1.0)  # starts at 1.0, decays by dilution only
+
     # Data Collection for Plotting
     history_time = []
     history_Nk = []
@@ -273,6 +305,7 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     history_Gc_so4 = []
     history_dNdt = []
     history_dMdt = []
+    history_tracer = []
 
     while current_time < total_time:
         # Store History
@@ -281,6 +314,7 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         history_N_tot.append(jnp.sum(Nk))
         history_M_tot.append(jnp.sum(Mk))
         history_Gc_so4.append(float(Gc[SRTSO4]))
+        history_tracer.append(float(tracer))
 
         # 1. Add H2SO4 production (constant source) and SO2 emissions
         Gc = Gc.at[SRTSO4].set(Gc[SRTSO4] + h2so4_prod_rate_kg_s * dt_model)
@@ -307,6 +341,9 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                     kw.update(hno3=hno3_conc, ulvoc=ulvoc_conc,
                               dma=dma_conc, hio3=hio3_conc,
                               enable_masks=ZHAO2024_ALL_ENABLED)
+            if enable_dilution:
+                kw.update(kdil=jnp.float64(dilution_rate),
+                          Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg)
             Nk, Mk, Gc = step_fn_jit(
                 Nk, Mk, Gc, xk,
                 jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
@@ -369,18 +406,22 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                     method=method
                 )
 
-        # 5. DIAGNOSE: Calculate coagulation rates
+        # 5. Update passive tracer (dilution only, no chemistry)
+        if enable_dilution:
+            tracer = dilute_tracer(tracer, dt_model, dilution_rate)
+
+        # 6. DIAGNOSE: Calculate coagulation rates
         dNdt, dMdt = get_coagulation_rates(
             Nk, Mk, xk, temp, pres, boxvol, ICOMP_NODIAG
         )
         history_dNdt.append(np.array(dNdt))
         history_dMdt.append(np.array(dMdt))
 
-        # 6. Advance Time
+        # 7. Advance Time
         current_time += dt_model
         step_count += 1
 
-        # 7. Logging
+        # 8. Logging
         total_N = jnp.sum(Nk)
         total_M = jnp.sum(Mk)
 
@@ -395,6 +436,7 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     history_N_tot.append(jnp.sum(Nk))
     history_M_tot.append(jnp.sum(Mk))
     history_Gc_so4.append(float(Gc[SRTSO4]))
+    history_tracer.append(float(tracer))
 
     # =========================================================================
     # 3. Validation & Results
@@ -425,6 +467,15 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         print("Mass Conservation: ACCEPTABLE")
     else:
         print("Mass Conservation: CHECK NEEDED")
+
+    if enable_dilution:
+        print(f"\n[Passive Tracer]")
+        print(f"Tracer (t=0):       1.0000")
+        print(f"Tracer (t=final):   {float(tracer):.4f}")
+        expected_tracer = np.exp(-dilution_rate * total_time)
+        print(f"Expected exp(-k*t): {expected_tracer:.4f}")
+        N_ratio = float(total_N_final) / float(total_N_init)
+        print(f"N_total ratio:      {N_ratio:.4f}  (tracer={float(tracer):.4f})")
 
     # Performance
     duration = end_time_wall - start_time_wall
@@ -468,7 +519,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
 
     return (Nk_init, Nk, Mk_init, Mk, xk, boxvol, Gc,
             history_time, history_N_tot, history_M_tot,
-            history_Gc_so4, history_dNdt, history_dMdt)
+            history_Gc_so4, history_dNdt, history_dMdt,
+            history_tracer)
 
 if __name__ == "__main__":
     import argparse
@@ -500,6 +552,11 @@ if __name__ == "__main__":
                         help='Longitude [degrees E] for diurnal cycle (default: 0)')
     parser.add_argument('--day-of-year', type=int, default=172,
                         help='Day of year for diurnal cycle (default: 172, summer solstice)')
+    # Dilution
+    parser.add_argument('--dilution-rate', type=float, default=0.0,
+                        help='Dilution rate [s^-1] (e.g. 1e-4 for BL growth)')
+    parser.add_argument('--dilution-bg', choices=['clean', 'ambient'], default='clean',
+                        help='Dilution background: clean (zeros) or ambient (initial state)')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
@@ -514,4 +571,6 @@ if __name__ == "__main__":
         lat=args.lat,
         lon=args.lon,
         day_of_year=args.day_of_year,
+        dilution_rate=args.dilution_rate,
+        dilution_bg=args.dilution_bg,
     )

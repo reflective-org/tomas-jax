@@ -17,6 +17,7 @@ This document catalogs all physics and chemistry not yet implemented in TOMAS-JA
 | MNFIX mass-number correction | Done | Fortran-faithful, analytical multi-bin shift |
 | Condensation sink | Done | First-order gas loss rate, bin-resolved |
 | 40-bin / 80-bin grids | Done | 1.7nm start, configurable resolution |
+| Dilution / entrainment | Done | First-order relaxation toward background, JIT |
 
 ---
 
@@ -93,24 +94,17 @@ where σ is surface tension (~0.05 N/m for organics) and v is molar volume.
 
 ---
 
-### 5. Dilution / Entrainment
+### 5. Dilution / Entrainment ✅ IMPLEMENTED
 
-**What:** Mixing of the box model air with background (clean or aged) air, representing:
-- Boundary layer growth (dilution with free troposphere)
-- Chamber ventilation (dilution with clean air)
-- Plume dilution (entrainment during transport)
+**Status:** Done. See `docs/dilution.md`.
+
+**Implementation:** `tomas_jax/physics/dilution.py` — `dilution_step()` (JIT-compiled). Integrated into `make_step()` as `'dilution'` process. CLI: `--dilution-rate`, `--dilution-bg`.
 
 **Equation:**
 ```
 dC/dt = −kdil × (C − Cbg)
+C(t+dt) = Cbg + (C(t) − Cbg) × exp(−kdil × dt)
 ```
-where `kdil` is the dilution rate [s⁻¹] and `Cbg` is background concentration. Applies to both Nk, Mk (aerosol) and Gc (gases).
-
-**Fortran reference:** `layer_diff.f` — height-dependent layer diffusion.
-
-**Implementation:** Add as a process in `make_step()`. Simple first-order decay toward background state. Can be applied to individual bins or bulk.
-
-**Effort:** 1–2 days.
 
 ---
 
