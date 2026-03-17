@@ -1,66 +1,83 @@
-"""Dilution / entrainment — first-order relaxation toward background state.
+"""Dilution / entrainment — volume expansion approach.
 
-Represents boundary layer growth, chamber ventilation, or plume entrainment.
-Applies independently to Nk (number), Mk (mass), and Gc (gas concentrations).
+Represents boundary layer growth, chamber ventilation, or plume entrainment
+by expanding the box volume.  Concentrations decrease as 1/V while total
+per-cell mass is conserved (for clean-air dilution).
 
 Physics:
-    dC/dt = -kdil * (C - Cbg)
+    dV/dt = kdil * V
 
-    Analytical solution (exact for constant kdil and Cbg over dt):
-        C(t+dt) = Cbg + (C(t) - Cbg) * exp(-kdil * dt)
+    Analytical solution:
+        V(t+dt) = V(t) * exp(kdil * dt)
 
-    When Cbg = 0 (clean-air dilution): C(t+dt) = C(t) * exp(-kdil * dt)
+    For clean air (no background): total Nk, Mk, Gc unchanged.
+        Concentrations decrease as C(t) = C(0) * V(0)/V(t)
+                                        = C(0) * exp(-kdil * t).
+
+    For ambient background: entrained air brings mass at background
+    concentration, so total per-cell mass increases by c_bg * dV.
+
+Reference: TRACER_SOM-TOMAS box.f — BOXVOL = initial_boxvol * dilt_rate_new
 
 All functions are JIT-compilable.
 """
 import jax.numpy as jnp
 
 
-def dilution_step(Nk, Mk, Gc, dt, kdil,
-                  Nk_bg=None, Mk_bg=None, Gc_bg=None):
-    """Apply one timestep of dilution toward background concentrations.
+def dilution_step(boxvol, Nk, Mk, Gc, dt, kdil,
+                  Nk_bg_conc=None, Mk_bg_conc=None, Gc_bg_conc=None):
+    """Apply one timestep of dilution by expanding box volume.
+
+    The box volume grows exponentially.  For clean-air dilution (background
+    concentrations = 0), total per-cell mass is exactly conserved —
+    only concentrations (#/cm³, kg/cm³) decrease.  For ambient entrainment,
+    the entrained volume brings in background mass.
 
     Args:
-        Nk: Number concentration [#/grid cell], shape (nbins,)
-        Mk: Mass concentration [kg/grid cell], shape (nbins, icomp)
-        Gc: Gas-phase concentrations [kg/grid cell], shape (ngas,)
+        boxvol: Current box volume [cm³]
+        Nk: Number [#/grid cell], shape (nbins,)
+        Mk: Mass [kg/grid cell], shape (nbins, icomp)
+        Gc: Gas concentrations [kg/grid cell], shape (ngas,)
         dt: Timestep [s]
-        kdil: Dilution rate [s^-1]
-        Nk_bg: Background number concentration (default: zeros)
-        Mk_bg: Background mass concentration (default: zeros)
-        Gc_bg: Background gas concentration (default: zeros)
+        kdil: Dilution rate [s⁻¹]
+        Nk_bg_conc: Background number concentration [#/cm³] (default: zeros)
+        Mk_bg_conc: Background mass concentration [kg/cm³] (default: zeros)
+        Gc_bg_conc: Background gas concentration [kg/cm³] (default: zeros)
 
     Returns:
-        (Nk_new, Mk_new, Gc_new): Diluted concentrations
+        (boxvol_new, Nk_new, Mk_new, Gc_new)
     """
-    # Default backgrounds: clean air (zeros)
-    if Nk_bg is None:
-        Nk_bg = jnp.zeros_like(Nk)
-    if Mk_bg is None:
-        Mk_bg = jnp.zeros_like(Mk)
-    if Gc_bg is None:
-        Gc_bg = jnp.zeros_like(Gc)
+    boxvol_new = boxvol * jnp.exp(kdil * dt)
+    dV = boxvol_new - boxvol
 
-    decay = jnp.exp(-kdil * dt)
+    # Default: clean air (zero background concentrations)
+    if Nk_bg_conc is None:
+        Nk_bg_conc = jnp.zeros_like(Nk)
+    if Mk_bg_conc is None:
+        Mk_bg_conc = jnp.zeros_like(Mk)
+    if Gc_bg_conc is None:
+        Gc_bg_conc = jnp.zeros_like(Gc)
 
-    Nk_new = Nk_bg + (Nk - Nk_bg) * decay
-    Mk_new = Mk_bg + (Mk - Mk_bg) * decay
-    Gc_new = Gc_bg + (Gc - Gc_bg) * decay
+    # Add mass from entrained volume (zero for clean air)
+    Nk_new = Nk + Nk_bg_conc * dV
+    Mk_new = Mk + Mk_bg_conc * dV
+    Gc_new = Gc + Gc_bg_conc * dV
 
-    return Nk_new, Mk_new, Gc_new
+    return boxvol_new, Nk_new, Mk_new, Gc_new
 
 
 def dilute_tracer(tracer, dt, kdil, tracer_bg=0.0):
-    """Dilute a passive scalar tracer (same physics as dilution_step).
+    """Dilute a passive scalar tracer.
 
-    A passive tracer undergoes only dilution — no chemistry, deposition,
-    or microphysics. Useful as a reference to isolate the dilution signal
-    from reactive species.
+    Tracks concentration decrease due to volume expansion:
+        C(t) / C(0) = V(0) / V(t) = exp(-kdil * t)
+
+    For non-zero background the tracer relaxes toward tracer_bg.
 
     Args:
         tracer: Current tracer value (scalar or array)
         dt: Timestep [s]
-        kdil: Dilution rate [s^-1]
+        kdil: Dilution rate [s⁻¹]
         tracer_bg: Background tracer value (default: 0.0)
 
     Returns:

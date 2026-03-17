@@ -4,6 +4,40 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-16 (Sun) — Dilution Rewrite: Volume-Based Box Expansion
+
+**Time**: ~evening PST
+
+### Summary
+Rewrote dilution physics from concentration-decay (`C *= exp(-kdil*dt)`, WRONG) to volume-based box expansion (`boxvol *= exp(+kdil*dt)`, CORRECT per Fortran TRACER_SOM-TOMAS `box.f`). Per-cell totals Nk, Mk, Gc are unchanged for clean air; concentrations decrease naturally as 1/V. Background entrainment uses concentration units [per cm³]. `make_step()` now always returns 4 values `(Nk, Mk, Gc, boxvol)`.
+
+### Files Modified
+- `tomas_jax/physics/dilution.py` — Complete rewrite: `dilution_step(boxvol, Nk, Mk, Gc, dt, kdil, ...)` → `(boxvol_new, Nk_new, Mk_new, Gc_new)`
+- `tomas_jax/solvers/condensation.py` — `make_step()` dilution block updated for volume-based API; always returns 4 values
+- `tests/test_dilution.py` — Rewritten: 16 tests covering volume expansion, mass conservation, ambient background, JIT, passive tracer
+- `docs/dilution.md` — Rewritten for volume-based approach
+- `run_box_model.py` — Updated kwargs (`Nk_bg_conc` etc.), 4-value return
+- `benchmarks/python/benchmark_dilution.py` — Updated for volume-based API, per-step boxvol for concentration conversions
+- `experimental_case/run_sai_simulation.py` — Updated kwargs and 4-value return
+- `CLAUDE.md` — Corrected dilution description
+- `PROGRESS.md` — This entry
+
+### Key Design Decisions
+- Background state specified in concentration units [per cm³] for JIT compatibility (no None/zero branching)
+- `make_step()` always returns 4 values; boxvol unchanged when dilution not active
+- Clean-air dilution: per-cell mass exactly conserved (verified by test)
+- Ambient dilution: open system with mass injection (mass conservation not defined)
+
+### Known Limitations
+- Production rate (`prod_rate`) computed with initial boxvol, doesn't scale as boxvol changes during dilution
+- Benchmark plots may need adjustment to show concentration changes correctly with evolving boxvol
+
+### Tests
+- All 16 dilution tests pass
+- All 161 core physics tests pass (no regressions)
+
+---
+
 ## 2026-03-16 (Sun) — VBS Organic Condensation + SOA Chemistry
 
 **Time**: ~afternoon PST
