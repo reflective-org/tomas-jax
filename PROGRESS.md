@@ -4,6 +4,45 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-16 (Sun) — VBS Organic Condensation + SOA Chemistry
+
+**Time**: ~afternoon PST
+
+### Summary
+Implemented semi-volatile organic aerosol (SOA) condensation using the Volatility Basis Set (VBS) framework. Four new physics modules with clean modular architecture (cleaner than Fortran soacond.f monolithic routine). Integrated into `make_step()` as `'soa_condensation'` process.
+
+### Files Created
+- `tomas_jax/physics/vbs_config.py` — VBS bin definitions (6-bin, C*=0.01–1000 µg/m³), Clausius-Clapeyron T-correction, unit conversions
+- `tomas_jax/physics/kelvin_effect.py` — Kelvin correction factor for organic species (size-dependent vapor pressure)
+- `tomas_jax/physics/vbs_driving_force.py` — Ambient/equilibrium vapor pressure, driving force dp(k), equilibrium mass
+- `tomas_jax/physics/soa_condensation.py` — SOA condensation driver: VBS species loop, analytical gas depletion toward equilibrium, dp-weighted distribution, fodc equilibrium correction
+- `tests/test_soa_condensation.py` — 31 tests (VBS config, Kelvin, driving force, condensation, integration)
+- `docs/soa_vbs.md` — Algorithm documentation, configuration, open questions
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` — Added `'soa_condensation'` to `make_step()` valid processes
+- `CLAUDE.md` — Added VBS/SOA architecture rules, file layout, operator split order
+- `PROGRESS.md` — This entry
+
+### Algorithm
+Per VBS species: C*(T) via Clausius-Clapeyron → Kelvin factors → species-specific CS → per-bin driving force dp(k) = pamb − psat(k) → analytical gas depletion Gc(t) = Gc_eq + (Gc_0 − Gc_eq) × exp(−CS×t) → dp-weighted mass distribution → fodc equilibrium correction → conservation clamping.
+
+### Design Decisions
+- **No PPM/TFL redistribution** for SOA — mass added directly to bins, MNFIX handles consistency afterward. Simpler and sufficient since SOA mass changes are typically small per step.
+- **Species loop is Python-level** (6 iterations unrolled at trace time) — same pattern as make_step.
+- **Kelvin for organics only** — matches Fortran soacond.f. H2SO4 Kelvin flagged as open question.
+
+### Tests
+31 tests all passing. No regressions in existing 527 tests. The 24 pre-existing failures in test_24h_scenarios.py are data-dependent (missing benchmark NPZ files), not caused by this change.
+
+### Open Questions
+1. Kelvin effect for inorganic H2SO4 (currently organics only)
+2. Number of VBS bins (6 standard, extensible via VBSConfig)
+3. Accommodation coefficient for organics (using α=1.0, literature suggests 0.01–0.1)
+4. Full TAU+PPM redistribution (current: direct mass add + MNFIX)
+
+---
+
 ## 2026-03-14 (Fri) — SAI 96h Box Model Simulation
 
 **Time**: ~10:15 PM PST
