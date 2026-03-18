@@ -106,14 +106,18 @@ def calc_driving_force(pamb, psat):
     return pamb - psat
 
 
-def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk):
+def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk,
+                          Q=None):
     """Per-particle equilibrium mass change for each bin.
 
     From soacond.f lines 364–371:
         masseqm = pamb / (C* / Mtot × Ke)
         maddEQ(k) = (masseqm − Mk_j(k)) / Nk(k)
 
-    This is the mass each particle needs to gain/lose to reach equilibrium.
+    When Q is provided (Zaveri Approximation 1, fast reactions), the
+    effective saturation pressure is psat/Q, so the equilibrium mass is:
+        masseqm = pamb / (C* × Ke / (Mtot × Q))
+                = pamb × Mtot × Q / (C* × Ke)
 
     Args:
         pamb: Ambient vapor pressure [Pa]
@@ -122,6 +126,8 @@ def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk):
         kelvin: Kelvin correction per bin, shape (nbins,)
         Mk_species: Mass of this species per bin [kg], shape (nbins,)
         Nk: Number per bin [#], shape (nbins,)
+        Q: Quasi-steady-state parameter per bin, shape (nbins,), or None.
+           When provided, equilibrium uses effective psat/Q (Zaveri Approx 1).
 
     Returns:
         maddEQ: Per-particle equilibrium mass change [kg], shape (nbins,)
@@ -131,9 +137,11 @@ def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk):
 
     # Equilibrium total mass of this species in each bin
     # masseqm = pamb / (C* × Ke / Mtot)  [soacond.f line 369]
+    # With Q correction: masseqm = pamb × Mtot × Q / (C* × Ke)
+    Q_factor = jnp.maximum(Q, 1.0e-10) if Q is not None else 1.0
     masseqm = jnp.where(
         (Mtot_org > 1.0e-30) & (cstar_Pa > 1.0e-30),
-        pamb * safe_Mtot / (cstar_Pa * kelvin),
+        pamb * safe_Mtot * Q_factor / (cstar_Pa * kelvin),
         0.0,
     )
 

@@ -856,9 +856,10 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 )
             elif process == 'soa_condensation':
                 vbs_cfg = kwargs.get('vbs_config', DEFAULT_VBS_CONFIG)
+                soa_use_ppm = kwargs.get('soa_use_ppm', True)
                 Nk, Mk, Gc = soa_condensation_step(
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                    vbs_config=vbs_cfg,
+                    vbs_config=vbs_cfg, use_ppm=soa_use_ppm,
                 )
             elif process == 'dilution':
                 kdil = kwargs.get('kdil', 0.0)

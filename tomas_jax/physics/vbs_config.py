@@ -51,6 +51,12 @@ RHO_ORG = 1200.0
 # Typical value for C10-C15 oxygenated organics
 SV_ORG = 120.0
 
+# Particle-phase diffusion coefficient [m²/s] (Zaveri et al. 2014)
+DBK_DEFAULT = 1.0e-10
+
+# First-order loss rate of species in particle phase [s⁻¹]
+KC_DEFAULT = 0.0
+
 # TOMAS species indices for each VBS bin (0-based)
 VBS_SPECIES_INDICES = tuple(SRTORG1 + i for i in range(N_VBS_BINS))
 
@@ -66,6 +72,8 @@ class VBSConfig(NamedTuple):
     sv: float                     # Diffusion volume
     t_ref: float                  # Reference temperature [K]
     species_indices: tuple        # TOMAS species indices
+    Dbk: float = DBK_DEFAULT     # Particle-phase diffusion coeff [m²/s]
+    kc: float = KC_DEFAULT       # First-order particle-phase loss [s⁻¹]
 
 
 DEFAULT_VBS_CONFIG = VBSConfig(
@@ -78,6 +86,8 @@ DEFAULT_VBS_CONFIG = VBSConfig(
     sv=SV_ORG,
     t_ref=T_REF,
     species_indices=VBS_SPECIES_INDICES,
+    Dbk=DBK_DEFAULT,
+    kc=KC_DEFAULT,
 )
 
 

@@ -360,14 +360,30 @@ class TestSOACondensation:
         # Gas should increase
         assert gas_after > 0
 
-    def test_number_unchanged(self):
-        """SOA condensation should not change number (Nk unchanged)."""
+    def test_number_conserved_ppm(self):
+        """With PPM, total number is conserved (Nk redistributed)."""
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-15)
 
         Nk_new, Mk_new, Gc_new = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            use_ppm=True,
+        )
+
+        # PPM redistributes Nk across bins, but total is conserved
+        np.testing.assert_allclose(
+            float(jnp.sum(Nk_new)), float(jnp.sum(Nk)), rtol=1e-8)
+
+    def test_number_unchanged_no_ppm(self):
+        """Without PPM, Nk is unchanged (direct mass addition only)."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            use_ppm=False,
         )
 
         np.testing.assert_allclose(Nk_new, Nk, rtol=1e-14)
@@ -449,7 +465,7 @@ class TestMakeStepIntegration:
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-15)
 
-        Nk_out, Mk_out, Gc_out = step(
+        Nk_out, Mk_out, Gc_out, bv_out = step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
         )
         assert Nk_out.shape == Nk.shape
@@ -470,7 +486,7 @@ class TestMakeStepIntegration:
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-12)  # organic gas
 
-        Nk_out, Mk_out, Gc_out = step(
+        Nk_out, Mk_out, Gc_out, bv_out = step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
         )
         # H2SO4 should decrease

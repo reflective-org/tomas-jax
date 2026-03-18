@@ -4,6 +4,47 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-17 (Mon) — SOA/VBS Benchmark & Fortran Bug Fixes
+
+**Time**: afternoon PST
+
+### Summary
+Created Fortran vs Python SOA condensation benchmark (3 scenarios, 24h, 8+ figures). Found and fixed two bugs in Fortran `soacond.f`, implemented organic-specific condensation sink (Zaveri et al. 2014), and documented key physics differences.
+
+### Bugs Fixed in Fortran soacond.f
+1. **Kelvin effect missing factor of 4**: `exp(σMW/(RTρDp))` → `exp(4σMW/(RTρDp))` (Seinfeld & Pandis 2016 eqn 9.40)
+
+### Physics Changes in Python
+1. **Organic condensation sink** (`condensation_sink.py`): Added `calc_organic_condensation_sink()` implementing Zaveri et al. (2014) two-film theory — gas-side Fuchs correction (FC, Eq. 14, coefficient 0.283), particle-side diffusion (k_p, Eq. 23-24), combined K_g (Eq. 20) with C*/ρ/1e9 weighting. Returns Q parameter per bin (Eq. 8). Supports `use_gasside_only` for Approximation 1.
+2. **VBSConfig extended**: Added `Dbk` (particle-phase diffusion, default 1e-10 m²/s) and `kc` (particle-phase reaction rate, default 0 s⁻¹) fields.
+3. **Zaveri driving force** (`soa_condensation.py`): Full Zaveri et al. (2014) framework:
+   - Automatic approximation selection: Approx 1 (kc≥0.01: gas-side CS, Q-modified driving force dp=pamb-psat/Q, Eq. 29) vs Approx 2 (kc<0.01: two-film CS, standard driving force, Eq. 31)
+   - Q factor applied to equilibrium correction (calc_equilibrium_mass)
+   - Particle-phase reaction loss: `-k_c × Mk × (1-exp(-kc×dt))` (Eq. 19/21), applied after condensation. Gas unaffected (reaction internal to particle).
+4. **Fuchs coefficient corrected**: 0.238 → 0.283 (Zaveri Eq. 14, Fuchs & Sutugin 1971)
+
+### Key Findings Documented
+1. **Gas diffusivity 2× difference** (intentional): Fortran uses Chapman-Enskog with hard-coded `dorg=1nm` (Di≈3.3e-6). Python uses Fuller-Schettler-Giddings with `sv=120` (Di≈6.8e-6). Fuller is the standard for organics. The Fortran itself is inconsistent — `getCondSink.f` (H2SO4) uses Fuller via `gasdiff.f`, but `soacond.f` (organics) uses Chapman-Enskog.
+2. **Fuchs coefficient fixed**: Zaveri (2014) paper Eq. 14 says 0.283, Fortran uses 0.238. Original Fuchs & Sutugin (1971) and S&P (2006) confirm 0.283. Python now uses 0.283.
+3. **Q factor and k_c loss**: Now fully implemented following Zaveri framework. For default case (D_b=1e-10, kc=0), Q=1 and behavior is unchanged. For semisolid aerosol with reactive uptake, Q<1 increases effective saturation pressure and k_c removes volatile mass from particles.
+
+### Files Modified
+- `tomas_fortran/src/soacond.f` — Kelvin bug fix (factor of 4)
+- `tomas_jax/physics/condensation_sink.py` — `calc_organic_condensation_sink()`: returns Q, supports gas-side-only CS, Fuchs 0.283
+- `tomas_jax/physics/vbs_config.py` — Added Dbk, kc to VBSConfig
+- `tomas_jax/physics/vbs_driving_force.py` — `calc_equilibrium_mass()`: accepts Q parameter
+- `tomas_jax/physics/soa_condensation.py` — Full Zaveri framework: approx selection, Q driving force, k_c loss
+- `benchmarks/python/benchmark_soa.py` — SOA benchmark (3 scenarios, 8+ figures)
+- `tomas_fortran/harness/benchmark_soa.f` — Fortran SOA benchmark harness
+- `tomas_fortran/Makefile` — Added soacond.o, benchmark_soa target
+- `docs/soa_vbs.md` — Full Zaveri framework documentation
+
+### References Added
+- Zaveri et al. (2014), ACP, 14, 5153–5181
+- Fuller, Schettler & Giddings (1966), Ind. Eng. Chem., 58, 18–27
+
+---
+
 ## 2026-03-16 (Sun) — Dilution Rewrite: Volume-Based Box Expansion
 
 **Time**: ~evening PST
