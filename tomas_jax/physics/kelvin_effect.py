@@ -55,6 +55,28 @@ def calc_kelvin_factor(Dpk, sigma, mw, rho, temp):
     return jnp.maximum(Ke, 1.0)
 
 
+def calc_kelvin_factor_batch(Dpk, sigma, mw_arr, rho, temp):
+    """Kelvin correction factors for multiple species at once.
+
+    Broadcasting version of calc_kelvin_factor that returns (nbins, n_vbs).
+
+    Args:
+        Dpk: Particle diameters [m], shape (nbins,)
+        sigma: Surface tension [N/m]
+        mw_arr: Molecular weights [g/mol], shape (n_vbs,)
+        rho: Organic density [kg/m³]
+        temp: Temperature [K]
+
+    Returns:
+        Ke: Kelvin correction factors, shape (nbins, n_vbs). Always >= 1.0.
+    """
+    mw_kg = mw_arr * 1.0e-3  # (n_vbs,)
+    exponent = (4.0 * sigma * mw_kg[None, :]
+                / (R_GAS * temp * rho * jnp.maximum(Dpk[:, None], 1.0e-30)))
+    Ke = jnp.exp(exponent)
+    return jnp.maximum(Ke, 1.0)
+
+
 def calc_diameters_from_xk(xk, Nk, Mk, icomp_nodiag):
     """Compute wet particle diameters from mass and number.
 

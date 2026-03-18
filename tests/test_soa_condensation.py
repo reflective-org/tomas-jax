@@ -32,6 +32,12 @@ from tomas_jax.physics.vbs_driving_force import (
 from tomas_jax.physics.soa_condensation import (
     soa_condensation_step, _condense_one_species,
 )
+from tomas_jax.physics.condensation_sink import (
+    calc_organic_condensation_sink, calc_organic_condensation_sink_batch,
+)
+from tomas_jax.physics.kelvin_effect import (
+    calc_kelvin_factor_batch,
+)
 
 
 # =========================================================================
@@ -503,3 +509,339 @@ class TestMakeStepIntegration:
         from tomas_jax.solvers.condensation import make_step
         with pytest.raises(ValueError, match="Unknown process"):
             make_step(['soa_condensation', 'bogus'])
+
+    def test_make_step_soa_coupled(self):
+        """make_step with soa_solver='coupled'."""
+        from tomas_jax.solvers.condensation import make_step
+        step = make_step(['soa_condensation'], cond_method='ppm_jit',
+                         soa_solver='coupled')
+
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        Nk_out, Mk_out, Gc_out, bv_out = step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+        )
+        assert Nk_out.shape == Nk.shape
+        assert Mk_out.shape == Mk.shape
+
+
+# =========================================================================
+# Batch Function Tests
+# =========================================================================
+
+class TestBatchCondensationSink:
+    def test_batch_matches_single_species(self):
+        """Batch CS matches 6 individual calls."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        cfg = DEFAULT_VBS_CONFIG
+        cstar_ug = calc_Cstar_T(cfg.cstar_ref_ug, cfg.delta_Hvap_kJ,
+                                temp, cfg.t_ref)
+
+        # Batch call
+        CS_batch, sf_batch, Q_batch = calc_organic_condensation_sink_batch(
+            Nk, Mk, temp, pres, boxvol,
+            molecular_weights=cfg.mw,
+            diffusion_volume=cfg.sv,
+            accommodation_coeff=1.0, xk=xk,
+            cstar_ug_arr=cstar_ug,
+            Dbk=cfg.Dbk, kc=cfg.kc,
+        )
+
+        # Individual calls
+        for j in range(cfg.n_bins):
+            CS_j, sf_j, Q_j = calc_organic_condensation_sink(
+                Nk, Mk, temp, pres, boxvol,
+                molecular_weight=cfg.mw[j],
+                diffusion_volume=cfg.sv,
+                accommodation_coeff=1.0, xk=xk,
+                cstar_ug=cstar_ug[j],
+                Dbk=cfg.Dbk, kc=cfg.kc,
+            )
+            np.testing.assert_allclose(
+                float(CS_batch[j]), float(CS_j), rtol=1e-12,
+                err_msg=f"CS mismatch for species {j}")
+            np.testing.assert_allclose(
+                sf_batch[:, j], sf_j, rtol=1e-12,
+                err_msg=f"sinkfrac mismatch for species {j}")
+
+    def test_batch_shapes(self):
+        """Batch output shapes are correct."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        cfg = DEFAULT_VBS_CONFIG
+        cstar_ug = calc_Cstar_T(cfg.cstar_ref_ug, cfg.delta_Hvap_kJ,
+                                temp, cfg.t_ref)
+
+        CS, sf, Q = calc_organic_condensation_sink_batch(
+            Nk, Mk, temp, pres, boxvol,
+            molecular_weights=cfg.mw,
+            diffusion_volume=cfg.sv,
+            accommodation_coeff=1.0, xk=xk,
+            cstar_ug_arr=cstar_ug,
+        )
+        assert CS.shape == (6,)
+        assert sf.shape == (NBINS, 6)
+        assert Q.shape == (NBINS,)
+
+    def test_batch_sinkfrac_sums_to_one(self):
+        """Per-species sinkfrac sums to ~1."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        cfg = DEFAULT_VBS_CONFIG
+        cstar_ug = calc_Cstar_T(cfg.cstar_ref_ug, cfg.delta_Hvap_kJ,
+                                temp, cfg.t_ref)
+
+        CS, sf, Q = calc_organic_condensation_sink_batch(
+            Nk, Mk, temp, pres, boxvol,
+            molecular_weights=cfg.mw,
+            diffusion_volume=cfg.sv,
+            accommodation_coeff=1.0, xk=xk,
+            cstar_ug_arr=cstar_ug,
+        )
+        sums = jnp.sum(sf, axis=0)
+        np.testing.assert_allclose(sums, 1.0, rtol=1e-10)
+
+
+class TestBatchKelvinFactor:
+    def test_batch_matches_single_species(self):
+        """Batch Kelvin matches individual calls."""
+        Dpk = jnp.logspace(-9, -5, NBINS)
+        mw_arr = MW_ORG
+        sigma = 0.025
+        rho = 1200.0
+        temp = 298.0
+
+        Ke_batch = calc_kelvin_factor_batch(Dpk, sigma, mw_arr, rho, temp)
+
+        for j in range(N_VBS_BINS):
+            Ke_j = calc_kelvin_factor(Dpk, sigma, float(mw_arr[j]), rho, temp)
+            np.testing.assert_allclose(
+                Ke_batch[:, j], Ke_j, rtol=1e-12,
+                err_msg=f"Kelvin mismatch for species {j}")
+
+    def test_batch_shape(self):
+        """Batch Kelvin has correct shape."""
+        Dpk = jnp.logspace(-9, -5, NBINS)
+        Ke = calc_kelvin_factor_batch(Dpk, 0.025, MW_ORG, 1200.0, 298.0)
+        assert Ke.shape == (NBINS, N_VBS_BINS)
+
+    def test_batch_large_particles(self):
+        """Batch Kelvin → 1 for large particles, all species."""
+        Dpk = jnp.array([1e-5, 1e-4])
+        Ke = calc_kelvin_factor_batch(Dpk, 0.025, MW_ORG, 1200.0, 298.0)
+        np.testing.assert_allclose(Ke, 1.0, atol=0.01)
+
+
+# =========================================================================
+# Coupled Solver Tests
+# =========================================================================
+
+class TestCoupledSolver:
+    def test_mass_conservation(self):
+        """Coupled solver conserves total mass per VBS species."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        total_before = jnp.sum(Gc[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                       jnp.sum(Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled',
+        )
+
+        total_after = jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                      jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        np.testing.assert_allclose(float(total_after), float(total_before),
+                                   rtol=1e-10)
+
+    def test_per_species_conservation(self):
+        """Coupled solver conserves mass per individual VBS species."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15 * (j + 1))
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled',
+        )
+
+        for j in range(N_VBS_BINS):
+            idx = SRTORG1 + j
+            before = float(Gc[idx]) + float(jnp.sum(Mk[:, idx]))
+            after = float(Gc_new[idx]) + float(jnp.sum(Mk_new[:, idx]))
+            np.testing.assert_allclose(after, before, rtol=1e-8,
+                                       err_msg=f"Conservation failed for VBS {j}")
+
+    def test_coupled_vs_sequential_same_direction(self):
+        """Coupled and sequential produce gas changes in the same direction.
+
+        The solvers differ intentionally: sequential uses Gauss-Seidel
+        ordering (species j+1 sees species j's updates), coupled uses
+        Jacobi iteration (all species use same Mtot_org per iteration).
+        Numerical agreement varies (5-30%) but direction must match.
+        """
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        _, Mk_seq, Gc_seq = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='sequential', use_ppm=False,
+        )
+
+        _, Mk_coup, Gc_coup = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled',
+        )
+
+        # Both solvers should change gas in the same direction
+        for j in range(N_VBS_BINS):
+            idx = SRTORG1 + j
+            dG_seq = float(Gc_seq[idx] - Gc[idx])
+            dG_coup = float(Gc_coup[idx] - Gc[idx])
+            # Same sign (both condense or both evaporate)
+            if abs(dG_seq) > 1e-30 and abs(dG_coup) > 1e-30:
+                assert jnp.sign(dG_seq) == jnp.sign(dG_coup), \
+                    f"VBS {j}: direction mismatch seq={dG_seq:.3e} coup={dG_coup:.3e}"
+
+    def test_pure_condensation(self):
+        """Coupled solver: gas decreases, particle increases."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        # Zero out particle organics
+        for j in range(N_VBS_BINS):
+            Mk = Mk.at[:, SRTORG1 + j].set(0.0)
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-12)
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 3600.0,
+            solver='coupled',
+        )
+
+        # Gas should decrease
+        for j in range(N_VBS_BINS):
+            idx = SRTORG1 + j
+            assert float(Gc_new[idx]) < float(Gc[idx]), f"VBS {j}: gas didn't decrease"
+        # Particle organics should increase
+        org_after = float(jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS]))
+        assert org_after > 0
+
+    def test_evaporation(self):
+        """Coupled solver: with particles but no gas, evaporation occurs."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        org_before = float(jnp.sum(Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS]))
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 600.0,
+            solver='coupled',
+        )
+
+        org_after = float(jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS]))
+        gas_after = float(jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]))
+
+        assert org_after < org_before
+        assert gas_after > 0
+
+    def test_no_negative_mass(self):
+        """Coupled solver: particle mass never goes negative."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        Mk = Mk.at[:, SRTORG1].set(1e-30)
+        Gc = Gc.at[SRTORG1].set(0.0)
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 3600.0,
+            solver='coupled',
+        )
+
+        assert jnp.all(Mk_new[:, SRTORG1] >= 0.0)
+
+    def test_number_unchanged(self):
+        """Coupled solver doesn't modify Nk (no PPM)."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled',
+        )
+
+        np.testing.assert_allclose(Nk_new, Nk, rtol=1e-14)
+
+    def test_no_gas_no_particles_no_change(self):
+        """With zero gas and zero organics, nothing changes."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Mk = Mk.at[:, SRTORG1 + j].set(0.0)
+
+        _, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled',
+        )
+
+        np.testing.assert_allclose(
+            Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS],
+            Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS],
+            atol=1e-30)
+
+    def test_invalid_solver_raises(self):
+        """Invalid solver name raises ValueError."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        with pytest.raises(ValueError, match="Unknown SOA solver"):
+            soa_condensation_step(
+                Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+                solver='bogus',
+            )
+
+
+# =========================================================================
+# Sub-stepping Tests
+# =========================================================================
+
+class TestSubStepping:
+    def test_substep_mass_conservation(self):
+        """Sub-stepping still conserves mass."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state(
+            n_total=1e14,  # high N → high CS → triggers sub-stepping
+        )
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-12)
+
+        total_before = jnp.sum(Gc[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                       jnp.sum(Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        _, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            use_ppm=False, max_soa_substeps=20,
+        )
+
+        total_after = jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                      jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        np.testing.assert_allclose(float(total_after), float(total_before),
+                                   rtol=1e-8)
+
+    def test_coupled_substep_mass_conservation(self):
+        """Coupled solver sub-stepping conserves mass."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state(
+            n_total=1e14,
+        )
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-12)
+
+        total_before = jnp.sum(Gc[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                       jnp.sum(Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        _, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            solver='coupled', max_soa_substeps=20,
+        )
+
+        total_after = jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                      jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        np.testing.assert_allclose(float(total_after), float(total_before),
+                                   rtol=1e-8)

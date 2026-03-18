@@ -717,7 +717,8 @@ def run_full_scan(
 
 def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
               n_coag_substeps=10,
-              max_nucleation_frac=0.5, max_nuc_substeps=20):
+              max_nucleation_frac=0.5, max_nuc_substeps=20,
+              soa_solver='sequential'):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
@@ -744,6 +745,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         n_coag_substeps: Number of forward-Euler substeps for coagulation
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
+        soa_solver: SOA condensation solver — 'sequential' (default) or 'coupled'
 
     Returns:
         A callable step function.
@@ -860,6 +862,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 Nk, Mk, Gc = soa_condensation_step(
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     vbs_config=vbs_cfg, use_ppm=soa_use_ppm,
+                    solver=soa_solver,
                 )
             elif process == 'dilution':
                 kdil = kwargs.get('kdil', 0.0)

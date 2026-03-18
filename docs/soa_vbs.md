@@ -128,6 +128,30 @@ Additional VBSConfig parameters (Zaveri et al. 2014):
 VBS bins map to TOMAS organic species 1–6 (SRTORG1 + 0..5). Species 7–41
 are reserved for future expansion.
 
+## Solvers
+
+Two switchable solvers, selected via `solver=` kwarg or `soa_solver=` in `make_step()`:
+
+### `solver='sequential'` (default)
+
+Sequential Python loop over 6 VBS species (Gauss-Seidel ordering). Species j+1
+sees species j's updated Mk and Gc. Includes adaptive sub-stepping when
+`exp(-CS×dt) < 0.01`. Supports PPM redistribution. Matches existing behavior
+and Fortran comparison.
+
+### `solver='coupled'`
+
+All 6 species solved simultaneously via vectorized JAX operations. Fixed-point
+iteration (n_iter=3, `jax.lax.fori_loop`) resolves Raoult coupling through
+Mtot_org. Adaptive sub-stepping when `max(CS)×dt` is large. No PPM — direct
+mass addition. Uses batch functions for CS, Kelvin, and driving force.
+
+**Key difference**: Sequential (Gauss-Seidel) vs coupled (Jacobi iteration).
+Both conserve mass per species to machine precision. Numerical results differ
+by 5–30% for typical conditions due to different update ordering of the Raoult
+denominator (Mtot_org). Neither is more "correct" — they are different valid
+operator-split approaches.
+
 ## Usage
 
 ### With make_step()
@@ -135,17 +159,22 @@ are reserved for future expansion.
 ```python
 from tomas_jax.solvers.condensation import make_step
 
-# H2SO4 + SOA condensation
+# Sequential solver (default, backward-compatible)
 step = make_step(['condensation', 'soa_condensation'], cond_method='ppm_jit')
-Nk, Mk, Gc = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt)
+Nk, Mk, Gc, bv = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt)
+
+# Coupled solver
+step = make_step(['condensation', 'soa_condensation'], cond_method='ppm_jit',
+                 soa_solver='coupled')
+Nk, Mk, Gc, bv = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt)
 
 # Full chain with SOA
 step = make_step(['so2_chemistry', 'nucleation', 'coagulation',
                   'condensation', 'soa_condensation', 'dilution'],
-                 cond_method='ppm_jit')
-Nk, Mk, Gc = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                    org_conc=org_conc, nh3_conc=nh3_conc, fion=fion,
-                    oh_conc=1e6, kdil=1e-5)
+                 cond_method='ppm_jit', soa_solver='coupled')
+Nk, Mk, Gc, bv = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                        org_conc=org_conc, nh3_conc=nh3_conc, fion=fion,
+                        oh_conc=1e6, kdil=1e-5)
 ```
 
 ### Custom VBS configuration

@@ -252,3 +252,98 @@ def calc_organic_condensation_sink(
     )
 
     return CS, sinkfrac, Qkk
+
+
+def calc_organic_condensation_sink_batch(
+    Nk: jnp.ndarray,
+    Mk: jnp.ndarray,
+    temp: Union[float, jnp.ndarray],
+    pres: Union[float, jnp.ndarray],
+    boxvol: Union[float, jnp.ndarray],
+    molecular_weights: jnp.ndarray,
+    diffusion_volume: float,
+    accommodation_coeff: float,
+    xk: jnp.ndarray,
+    cstar_ug_arr: jnp.ndarray,
+    Dbk: float = 1.0e-10,
+    kc: float = 0.0,
+    use_gasside_only: bool = False,
+) -> tuple:
+    """Batch organic condensation sink for all VBS species at once.
+
+    Vectorized version of calc_organic_condensation_sink that computes
+    CS, sinkfrac, Q for n_vbs species simultaneously via broadcasting.
+
+    Args:
+        molecular_weights: (n_vbs,) array of MW [g/mol]
+        diffusion_volume: Diffusion volume (scalar, shared across species)
+        cstar_ug_arr: (n_vbs,) array of C* [µg/m³]
+        ... other args same as single-species version
+
+    Returns:
+        CS: (n_vbs,) condensation sink per species [s⁻¹]
+        sinkfrac: (nbins, n_vbs) per-bin fractions
+        Q: (nbins,) quasi-steady-state parameter (shared across species)
+    """
+    # Gas diffusivity and MFP per species: (n_vbs,)
+    Di = calc_gas_diffusivity(temp, pres, molecular_weights, diffusion_volume)
+    mfp = calc_mean_free_path(temp, pres, molecular_weights, diffusion_volume)
+
+    # Shared particle properties: (nbins,)
+    has_particles = Nk > NEPS_CONDSINK
+    Mktot = jnp.sum(Mk, axis=1)
+    mp_actual = Mktot / jnp.maximum(Nk, 1e-30)
+    density_actual = calc_density(Mk)
+    mp_default = 1.4 * xk[:-1]
+    density_default = 1500.0
+    mp = jnp.where(has_particles, mp_actual, mp_default)
+    density = jnp.where(has_particles, density_actual, density_default)
+    Dpk = jnp.cbrt(mp / density * (6.0 / PI))
+    Rpk = Dpk / 2.0
+    safe_Rp = jnp.maximum(Rpk, 1e-30)
+
+    # Knudsen number per species: (nbins, n_vbs)
+    Kn = 2.0 * mfp[None, :] / jnp.maximum(Dpk[:, None], 1e-30)
+
+    # Fuchs-Sutugin correction (Zaveri Eq. 14): (nbins, n_vbs)
+    alpha = accommodation_coeff
+    FC = (0.75 * alpha * (1.0 + Kn)
+          / (Kn * (1.0 + Kn) + 0.283 * alpha * Kn + 0.75 * alpha))
+
+    # Gas-side mass transfer coefficient: (nbins, n_vbs)
+    kgk = Di[None, :] / safe_Rp[:, None] * FC
+
+    # Particle-side (shared across species): (nbins,)
+    kpk_simple = 5.0 * Dbk / safe_Rp
+    qk = safe_Rp * jnp.sqrt(jnp.maximum(kc, 0.0) / jnp.maximum(Dbk, 1e-30))
+    safe_qk = jnp.maximum(qk, 1e-30)
+    coth_qk = 1.0 / jnp.tanh(jnp.maximum(safe_qk, 1e-10))
+    Qkk_raw = 3.0 * (safe_qk * coth_qk - 1.0) / safe_qk**2
+    Qkk = jnp.where(qk > 1e-6, jnp.minimum(Qkk_raw, 0.99), 1.0)
+    kpk_reactive = Dbk / safe_Rp * (safe_qk * coth_qk - 1.0) / (1.0 - Qkk)
+    kpk = jnp.where(kc > 0.0, kpk_reactive, kpk_simple)
+
+    # Effective mass transfer coefficient: (nbins, n_vbs)
+    if use_gasside_only:
+        Keff = safe_Rp[:, None] * kgk
+    else:
+        cstar_weight = cstar_ug_arr[None, :] / density[:, None] / 1.0e9
+        Keff = safe_Rp[:, None] / (
+            1.0 / jnp.maximum(kgk, 1e-30)
+            + cstar_weight / jnp.maximum(kpk[:, None], 1e-30)
+        )
+
+    Keff = jnp.where(Dpk[:, None] > 0.0, Keff, 0.0)
+
+    # CS and sinkfrac per species
+    sink_contributions = Dpk[:, None] * Nk[:, None] * Keff  # (nbins, n_vbs)
+    CS_sum = jnp.sum(sink_contributions, axis=0)  # (n_vbs,)
+    CS = 2.0 * PI * CS_sum / (boxvol * 1e-6)
+
+    sinkfrac = jnp.where(
+        CS_sum[None, :] > 1e-30,
+        sink_contributions / CS_sum[None, :],
+        0.0,
+    )
+
+    return CS, sinkfrac, Qkk

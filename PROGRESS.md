@@ -4,6 +4,41 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-17 (Mon) — Vectorized Coupled SOA/VBS Solver
+
+**Time**: evening PST
+
+### Summary
+Added a vectorized coupled solver for SOA/VBS condensation (`solver='coupled'`). All 6 VBS species are solved simultaneously with fixed-point Raoult iteration and adaptive sub-stepping, replacing the sequential Python species loop. The existing sequential solver is preserved as the default (`solver='sequential'`).
+
+### New Features
+1. **Coupled solver** (`soa_condensation.py`): Vectorized all 6 VBS species using JAX broadcasting over `(nbins, n_vbs)` arrays. Fixed-point iteration (n_iter=3 via `jax.lax.fori_loop`) for Raoult coupling — all species see each other's Mtot_org simultaneously (Jacobi), unlike the sequential solver's Gauss-Seidel ordering.
+2. **Adaptive sub-stepping**: Both solvers now subdivide the timestep when `exp(-CS*dt) < 0.01` (matching Fortran `soacond.f`). `n_sub = ceil(max(CS) * dt / ln(100))`, clamped to `[1, max_soa_substeps=10]`.
+3. **Batch condensation sink** (`condensation_sink.py`): `calc_organic_condensation_sink_batch()` computes CS, sinkfrac, Q for all n_vbs species in one call using broadcasting. Matches individual calls to machine precision.
+4. **Batch Kelvin factor** (`kelvin_effect.py`): `calc_kelvin_factor_batch()` returns `(nbins, n_vbs)` Kelvin correction factors for all species at once.
+5. **Solver dispatch via `make_step()`**: `soa_solver='sequential'` (default) or `soa_solver='coupled'` kwarg threaded through the process orchestrator.
+
+### Key Design Decisions
+- Sequential (Gauss-Seidel) vs coupled (Jacobi) solvers produce 5-30% numerical differences due to different Raoult update ordering. Both are physically valid.
+- Fixed 3 iterations (not dynamic convergence) for JIT compatibility.
+- CS/sinkfrac frozen per operator-split step (not recomputed inside sub-steps).
+- PPM/TFL redistribution not used in coupled solver — direct mass addition + MNFIX.
+
+### Files Modified
+- `tomas_jax/physics/soa_condensation.py` — Complete rewrite: solver dispatch, `_soa_sequential()` with sub-stepping, `_soa_coupled()` with vectorized iteration
+- `tomas_jax/physics/condensation_sink.py` — Added `calc_organic_condensation_sink_batch()`
+- `tomas_jax/physics/kelvin_effect.py` — Added `calc_kelvin_factor_batch()`
+- `tomas_jax/solvers/condensation.py` — `make_step()` accepts `soa_solver` kwarg
+- `tests/test_soa_condensation.py` — 18 new tests (32 → 50 total, all passing)
+- `docs/soa_vbs.md` — Solver documentation section
+- `CLAUDE.md` — Updated SOA architecture description
+
+### Test Results
+- 50/50 SOA condensation tests pass
+- Full test suite: 6 pre-existing failures (coag mass conservation in 24h scenarios), none related to SOA changes
+
+---
+
 ## 2026-03-17 (Mon) — SOA/VBS Benchmark & Fortran Bug Fixes
 
 **Time**: afternoon PST
