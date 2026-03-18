@@ -4,6 +4,38 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-17 (Mon) — SOA Solver Comparison Benchmark
+
+**Time**: evening PST
+
+### Summary
+Created `benchmarks/python/compare_soa_solvers.py` — a 3-way comparison benchmark of SOA/VBS condensation solvers: Fortran (top-hat reference), Sequential (Gauss-Seidel, use_ppm=False), and Coupled (Jacobi, use_ppm=False). Two scenarios (sA: pure condensation, sB: mixed cond/evap), 36-bin legacy grid, 24h simulation, 9 presentation-quality figures.
+
+### New Files
+- `benchmarks/python/compare_soa_solvers.py` — Full benchmark script (~550 lines). Reuses `benchmark_soa.py` infrastructure (initial state, Fortran loader, grid helpers). CLI: `--run` / `--plot-only`.
+
+### Figures (9)
+1. `fig1_sizedist_log.png` — dN/dlogDp log-log at 0, 6, 12, 24h
+2. `fig2_sizedist_linear.png` — dN/dlogDp semilog-x (linear y)
+3. `fig3_massdist_log.png` — dM_dry/dlogDp log-log
+4. `fig4_massdist_linear.png` — dM_dry/dlogDp semilog-x
+5. `fig5_gas_evolution.png` — VBS gas Gc(t) per C* bin (6 panels × 2 scenarios)
+6. `fig6_vbs_particle.png` — Grouped bar: particle mass per VBS bin at 4 snapshots
+7. `fig7_banana.png` — Banana plots (pcolormesh, LogNorm), one column per solver
+8. `fig8_totals.png` — N_total(t) and M_dry(t) timeseries with wall-time annotation
+9. `fig9_relerror.png` — Per-bin relative error vs Fortran at 4 snapshots
+
+### Key Findings
+- Both Python solvers track Fortran closely in the core of the distribution
+- Coupled solver shows larger deviations at specific bins where Jacobi vs Gauss-Seidel ordering affects mass redistribution
+- Sequential and Coupled have similar wall times (~0.15s per scenario after JIT warmup)
+- Presentation-quality styling: Fortran as thick gray background, conditions text boxes, proxy Line2D legends
+
+### Output
+- `benchmarks/results/soa_comparison/` — 9 PNGs + 2 NPZ files (sA, sB)
+
+---
+
 ## 2026-03-17 (Mon) — Vectorized Coupled SOA/VBS Solver
 
 **Time**: evening PST

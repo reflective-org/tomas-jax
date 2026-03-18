@@ -53,7 +53,7 @@ C     Timing
 
 C     File output
       character*200 fname
-      integer ihour
+      integer ihour, iminute
 
 C-----SCENARIO DEFINITIONS---------------------------------------------
       sc_label(1) = 'sA'
@@ -222,8 +222,8 @@ C        Zero gas for unused organic species
             Gc(srtorg1+j-1) = 0.0d0
          enddo
 
-C        --- Write initial state (hour 0) ---
-         call write_soa_hourly(0, sc_label(iscen))
+C        --- Write initial state (minute 0) ---
+         call write_soa_minute(0, sc_label(iscen))
 
 C        --- Time stepping loop ---
          call cpu_time(t_start)
@@ -246,7 +246,10 @@ C           SOA condensation only (no H2SO4 condensation)
 C           MNFIX
             call mnfix(Nk, Mk)
 
-C           Write hourly output
+C           Write every-minute output
+            call write_soa_minute(istep, sc_label(iscen))
+
+C           Write hourly output (kept for backward compat)
             if (mod(istep, 60) .eq. 0) then
                ihour = istep / 60
                call write_soa_hourly(ihour, sc_label(iscen))
@@ -267,6 +270,31 @@ C           Write hourly output
       write(*,*) '========================================'
 
       END PROGRAM
+
+
+C     **************************************************
+C     *  write_soa_minute — Nk only (for banana plots) *
+C     **************************************************
+      SUBROUTINE write_soa_minute(imin, label)
+
+      IMPLICIT NONE
+      include 'sizecode.COM'
+
+      integer imin, k
+      character*2 label
+      character*200 fname
+
+C     Write Nk only (Mk too large for every-minute output)
+      write(fname,'(A,A2,A,I4.4,A)')
+     &     'output/soa/',label,'_soa_min',imin,'_Nk.csv'
+      open(unit=10, file=fname, status='replace')
+      do k=1,ibins
+         write(10,'(E25.16)') Nk(k)
+      enddo
+      close(10)
+
+      RETURN
+      END
 
 
 C     **************************************************
