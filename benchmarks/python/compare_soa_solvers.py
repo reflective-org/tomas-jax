@@ -1,6 +1,6 @@
-"""SOA Solver Comparison: Fortran (top-hat) vs Sequential vs Coupled.
+"""SOA Solver Comparison: Fortran vs Sequential (TFL) vs PPM Sequential vs Coupled.
 
-3-way comparison of SOA/VBS condensation solvers on 2 scenarios using the
+4-way comparison of SOA/VBS condensation solvers on 2 scenarios using the
 36-bin legacy grid.  24-hour simulation with hourly snapshots.
 
 Scenarios (matching Fortran benchmark_soa.f):
@@ -8,15 +8,15 @@ Scenarios (matching Fortran benchmark_soa.f):
     sB -- Mixed cond/evap    (270 K, 800 hPa, N=5e3, GMD=80 nm, GSD=1.5)
 
 Solvers:
-    Fortran      -- top-hat redistribution (soacond.f reference)
-    Sequential   -- Python Gauss-Seidel VBS loop, use_ppm=True (TFL tmcond_jax)
-    Coupled      -- Python vectorised fixed-point (Jacobi), direct mass addition
+    Fortran        -- top-hat redistribution (soacond.f reference)
+    Sequential TFL -- Python Gauss-Seidel VBS loop, redistribution='tfl'
+    Sequential PPM -- Python Gauss-Seidel VBS loop, redistribution='ppm'
+    Coupled        -- Python vectorised fixed-point (Jacobi), direct mass addition
 
-The sequential solver uses tmcond_jax (TFL Lagrangian remapping) to match
-Fortran's tmcond call inside soacond.f.  The coupled solver uses direct mass
-addition + MNFIX (no tmcond).  Both produce correct total N, M, and gas
-depletion.  Known limitation: the sequential solver develops oscillatory
-size-distribution artifacts from TFL bin-boundary sensitivity.
+The sequential TFL solver uses tmcond_jax (Lagrangian remapping) matching
+Fortran's tmcond call.  The sequential PPM solver uses ppm_condensation_step
+for smoother bin redistribution without TFL oscillation artifacts.  The coupled
+solver uses direct mass addition + MNFIX (no redistribution).
 
 Figures (9):
     1. dN/dlogDp  (log-log)        at 0h, 6h, 12h, 24h x 2 scenarios
@@ -25,7 +25,7 @@ Figures (9):
     4. dM_dry/dlogDp (semilog-x)   at 0h, 6h, 12h, 24h x 2 scenarios
     5. VBS gas Gc(t)               6 VBS bins x 2 scenarios (semilogy)
     6. VBS particle mass bars      at 0h, 6h, 12h, 24h x 2 scenarios
-    7. Banana plots                3 solvers x 2 scenarios (pcolormesh)
+    7. Banana plots                4 solvers x 2 scenarios (pcolormesh)
     8. Totals N(t) & M_dry(t)     2 metrics x 2 scenarios
     9. Relative error vs Fortran   at 0h, 6h, 12h, 24h x 2 scenarios
 
@@ -71,6 +71,7 @@ SNAP_HOURS = [0, 6, 12, 24]
 # =========================================================================
 LS_FORTRAN = dict(color='#bbbbbb', lw=4.0, ls='-', zorder=1, alpha=0.9)
 LS_SEQ = dict(color='#1f77b4', lw=2.5, ls='--', zorder=3)
+LS_PPM = dict(color='#2ca02c', lw=2.5, ls='-.', zorder=4)
 LS_COUP = dict(color='#d62728', lw=2.5, ls='-', zorder=2)
 
 
@@ -95,7 +96,8 @@ def _make_legend(fig):
     from matplotlib.lines import Line2D
     handles = [
         Line2D([0], [0], **LS_FORTRAN, label='Fortran'),
-        Line2D([0], [0], **LS_SEQ, label='Sequential'),
+        Line2D([0], [0], **LS_SEQ, label='Seq TFL'),
+        Line2D([0], [0], **LS_PPM, label='Seq PPM'),
         Line2D([0], [0], **LS_COUP, label='Coupled'),
     ]
     fig.legend(handles=handles, loc='upper right', fontsize=11,
@@ -216,6 +218,8 @@ def run_all(verbose=True):
 
         seq = run_python_solver(label, 'sequential', redistribution='tfl',
                                 verbose=verbose)
+        ppm = run_python_solver(label, 'sequential', redistribution='ppm',
+                                verbose=verbose)
         coup = run_python_solver(label, 'coupled', redistribution='tfl',
                                  verbose=verbose)
 
@@ -226,6 +230,9 @@ def run_all(verbose=True):
             seq_Nk=seq['Nk'], seq_Mk=seq['Mk'], seq_Gc=seq['Gc'],
             seq_Nk_full=seq['Nk_full'],
             seq_wall_time=seq['wall_time_s'],
+            ppm_Nk=ppm['Nk'], ppm_Mk=ppm['Mk'], ppm_Gc=ppm['Gc'],
+            ppm_Nk_full=ppm['Nk_full'],
+            ppm_wall_time=ppm['wall_time_s'],
             coup_Nk=coup['Nk'], coup_Mk=coup['Mk'], coup_Gc=coup['Gc'],
             coup_Nk_full=coup['Nk_full'],
             coup_wall_time=coup['wall_time_s'],
@@ -264,9 +271,9 @@ def _load_fortran_minute_Nk(label):
 
 
 def _load_results(label):
-    """Load Fortran + both Python solver results.
+    """Load Fortran + all Python solver results.
 
-    Returns (fort, seq, coup) dicts with keys Nk, Mk, Gc, Nk_full,
+    Returns (fort, seq, ppm, coup) dicts with keys Nk, Mk, Gc, Nk_full,
     wall_time_s.
     """
     # Fortran hourly snapshots via benchmark_soa loader
@@ -290,6 +297,13 @@ def _load_results(label):
         'Nk_full': d.get('seq_Nk_full'),
         'wall_time_s': float(d['seq_wall_time']),
     }
+    ppm = {
+        'Nk': d['ppm_Nk'],
+        'Mk': d['ppm_Mk'],
+        'Gc': d['ppm_Gc'],
+        'Nk_full': d.get('ppm_Nk_full'),
+        'wall_time_s': float(d['ppm_wall_time']),
+    }
     coup = {
         'Nk': d['coup_Nk'],
         'Mk': d['coup_Mk'],
@@ -297,7 +311,7 @@ def _load_results(label):
         'Nk_full': d.get('coup_Nk_full'),
         'wall_time_s': float(d['coup_wall_time']),
     }
-    return fort, seq, coup
+    return fort, seq, ppm, coup
 
 
 # =========================================================================
@@ -341,13 +355,14 @@ def plot_fig1_sizedist_log():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
             ax.loglog(dp, _dN_dlogDp(fort['Nk'][hr], dlogDp), **LS_FORTRAN)
             ax.loglog(dp, _dN_dlogDp(seq['Nk'][hr], dlogDp), **LS_SEQ)
+            ax.loglog(dp, _dN_dlogDp(ppm['Nk'][hr], dlogDp), **LS_PPM)
             ax.loglog(dp, _dN_dlogDp(coup['Nk'][hr], dlogDp), **LS_COUP)
 
             if row == 0:
@@ -385,13 +400,14 @@ def plot_fig2_sizedist_linear():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
             ax.plot(dp, _dN_dlogDp(fort['Nk'][hr], dlogDp), **LS_FORTRAN)
             ax.plot(dp, _dN_dlogDp(seq['Nk'][hr], dlogDp), **LS_SEQ)
+            ax.plot(dp, _dN_dlogDp(ppm['Nk'][hr], dlogDp), **LS_PPM)
             ax.plot(dp, _dN_dlogDp(coup['Nk'][hr], dlogDp), **LS_COUP)
 
             ax.set_xscale('log')
@@ -430,7 +446,7 @@ def plot_fig3_massdist_log():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
@@ -440,6 +456,9 @@ def plot_fig3_massdist_log():
 
             dM_s = _dM_dlogDp(seq['Mk'][hr], dlogDp)
             ax.loglog(dp, np.maximum(dM_s, 1e-30), **LS_SEQ)
+
+            dM_p = _dM_dlogDp(ppm['Mk'][hr], dlogDp)
+            ax.loglog(dp, np.maximum(dM_p, 1e-30), **LS_PPM)
 
             dM_c = _dM_dlogDp(coup['Mk'][hr], dlogDp)
             ax.loglog(dp, np.maximum(dM_c, 1e-30), **LS_COUP)
@@ -479,7 +498,7 @@ def plot_fig4_massdist_linear():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
@@ -489,6 +508,9 @@ def plot_fig4_massdist_linear():
 
             dM_s = _dM_dlogDp(seq['Mk'][hr], dlogDp)
             ax.plot(dp, dM_s, **LS_SEQ)
+
+            dM_p = _dM_dlogDp(ppm['Mk'][hr], dlogDp)
+            ax.plot(dp, dM_p, **LS_PPM)
 
             dM_c = _dM_dlogDp(coup['Mk'][hr], dlogDp)
             ax.plot(dp, dM_c, **LS_COUP)
@@ -526,7 +548,7 @@ def plot_fig5_gas_evolution():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col in range(N_VBS):
             ax = axes[row, col]
@@ -535,6 +557,7 @@ def plot_fig5_gas_evolution():
 
             ax.semilogy(hours, fort['Gc'][:, f_idx], **LS_FORTRAN)
             ax.semilogy(hours, seq['Gc'][:, p_idx], **LS_SEQ)
+            ax.semilogy(hours, ppm['Gc'][:, p_idx], **LS_PPM)
             ax.semilogy(hours, coup['Gc'][:, p_idx], **LS_COUP)
 
             if row == 0:
@@ -562,12 +585,13 @@ def plot_fig6_vbs_particle():
 
     cstar_labels = ['0.01', '0.1', '1', '10', '100', '1000']
     x = np.arange(N_VBS)
-    w = 0.25
+    w = 0.20
 
     # Solver colors matching line styles
     solver_colors = {
         'Fortran':    ('#bbbbbb', '#666666'),
-        'Sequential': ('#1f77b4', '#0d4a7a'),
+        'Seq TFL':    ('#1f77b4', '#0d4a7a'),
+        'Seq PPM':    ('#2ca02c', '#1a6b1a'),
         'Coupled':    ('#d62728', '#8b1a1a'),
     }
 
@@ -578,7 +602,7 @@ def plot_fig6_vbs_particle():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
@@ -589,21 +613,32 @@ def plot_fig6_vbs_particle():
             fort_gas = np.array([fort['Gc'][hr, 1 + j]
                                  for j in range(N_VBS)])
             fc, fe = solver_colors['Fortran']
-            ax.bar(x - w, fort_part, w,
+            ax.bar(x - 1.5 * w, fort_part, w,
                    color=fc, edgecolor=fe)
-            ax.bar(x - w, fort_gas, w, bottom=fort_part,
+            ax.bar(x - 1.5 * w, fort_gas, w, bottom=fort_part,
                    color=fc, edgecolor=fe, hatch='///', alpha=0.5)
 
-            # --- Sequential ---
+            # --- Sequential TFL ---
             seq_part = np.array([np.sum(seq['Mk'][hr, :, SRTORG1 + j])
                                  for j in range(N_VBS)])
             seq_gas = np.array([seq['Gc'][hr, SRTORG1 + j]
                                 for j in range(N_VBS)])
-            sc2, se = solver_colors['Sequential']
-            ax.bar(x, seq_part, w,
+            sc2, se = solver_colors['Seq TFL']
+            ax.bar(x - 0.5 * w, seq_part, w,
                    color=sc2, edgecolor=se)
-            ax.bar(x, seq_gas, w, bottom=seq_part,
+            ax.bar(x - 0.5 * w, seq_gas, w, bottom=seq_part,
                    color=sc2, edgecolor=se, hatch='///', alpha=0.5)
+
+            # --- Sequential PPM ---
+            ppm_part = np.array([np.sum(ppm['Mk'][hr, :, SRTORG1 + j])
+                                 for j in range(N_VBS)])
+            ppm_gas = np.array([ppm['Gc'][hr, SRTORG1 + j]
+                                for j in range(N_VBS)])
+            pc, pe = solver_colors['Seq PPM']
+            ax.bar(x + 0.5 * w, ppm_part, w,
+                   color=pc, edgecolor=pe)
+            ax.bar(x + 0.5 * w, ppm_gas, w, bottom=ppm_part,
+                   color=pc, edgecolor=pe, hatch='///', alpha=0.5)
 
             # --- Coupled ---
             coup_part = np.array([np.sum(coup['Mk'][hr, :, SRTORG1 + j])
@@ -611,9 +646,9 @@ def plot_fig6_vbs_particle():
             coup_gas = np.array([coup['Gc'][hr, SRTORG1 + j]
                                  for j in range(N_VBS)])
             cc, ce = solver_colors['Coupled']
-            ax.bar(x + w, coup_part, w,
+            ax.bar(x + 1.5 * w, coup_part, w,
                    color=cc, edgecolor=ce)
-            ax.bar(x + w, coup_gas, w, bottom=coup_part,
+            ax.bar(x + 1.5 * w, coup_gas, w, bottom=coup_part,
                    color=cc, edgecolor=ce, hatch='///', alpha=0.5)
 
             ax.set_xticks(x)
@@ -632,7 +667,9 @@ def plot_fig6_vbs_particle():
                     Patch(facecolor='#bbbbbb', edgecolor='#666666',
                           label='Fortran'),
                     Patch(facecolor='#1f77b4', edgecolor='#0d4a7a',
-                          label='Sequential'),
+                          label='Seq TFL'),
+                    Patch(facecolor='#2ca02c', edgecolor='#1a6b1a',
+                          label='Seq PPM'),
                     Patch(facecolor='#d62728', edgecolor='#8b1a1a',
                           label='Coupled'),
                     Patch(facecolor='white', edgecolor='gray',
@@ -660,15 +697,15 @@ def plot_fig7_banana():
     # Dp edges for pcolormesh [nm]
     dp_edges = np.cbrt(xk_np / DENS_INIT * (6.0 / PI)) * 1e9
 
-    solver_names = ['Fortran', 'Sequential', 'Coupled']
+    solver_names = ['Fortran', 'Seq TFL', 'Seq PPM', 'Coupled']
 
-    fig, axes = plt.subplots(2, 3, figsize=(20, 8))
+    fig, axes = plt.subplots(2, 4, figsize=(24, 8))
     fig.suptitle(f'Banana Plots -- dN/dlogDp evolution ({NHOURS}h)',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         # Time edges in hours (1-minute resolution = n_minutes+1 points)
         n_minutes = NHOURS * 60  # 1440
@@ -686,13 +723,14 @@ def plot_fig7_banana():
 
         dN_fort = _make_dN(fort)
         dN_seq = _make_dN(seq)
+        dN_ppm = _make_dN(ppm)
         dN_coup = _make_dN(coup)
 
         # Shared vmin/vmax from Fortran reference
         vmax = np.max(dN_fort[dN_fort > 0]) if np.any(dN_fort > 0) else 1.0
         vmin = vmax * 1e-4
 
-        all_dN = [dN_fort, dN_seq, dN_coup]
+        all_dN = [dN_fort, dN_seq, dN_ppm, dN_coup]
 
         for col, (dN, sname) in enumerate(zip(all_dN, solver_names)):
             ax = axes[row, col]
@@ -724,12 +762,12 @@ def plot_fig7_banana():
                 ax.set_xlabel('Time [h]')
 
         # Colorbar for each row
-        bbox = axes[row, 2].get_position()
-        cax = fig.add_axes([0.90, bbox.y0, 0.015, bbox.height])
+        bbox = axes[row, 3].get_position()
+        cax = fig.add_axes([0.92, bbox.y0, 0.012, bbox.height])
         cbar = fig.colorbar(pcm, cax=cax)
         cbar.set_label('dN/dlogDp [#/cm\u00b3]', fontsize=9)
 
-    fig.subplots_adjust(left=0.05, right=0.88, top=0.93, bottom=0.08,
+    fig.subplots_adjust(left=0.05, right=0.90, top=0.93, bottom=0.08,
                         wspace=0.15, hspace=0.25)
     return fig
 
@@ -752,16 +790,18 @@ def plot_fig8_totals():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         # N_total
         N_f = np.sum(fort['Nk'], axis=1) / BOXVOL
         N_s = np.sum(seq['Nk'], axis=1) / BOXVOL
+        N_p = np.sum(ppm['Nk'], axis=1) / BOXVOL
         N_c = np.sum(coup['Nk'], axis=1) / BOXVOL
 
         ax = axes[row, 0]
         ax.plot(hours, N_f, **LS_FORTRAN)
         ax.plot(hours, N_s, **LS_SEQ)
+        ax.plot(hours, N_p, **LS_PPM)
         ax.plot(hours, N_c, **LS_COUP)
         if row == 0:
             ax.set_title(col_labels[0], fontsize=11)
@@ -773,11 +813,13 @@ def plot_fig8_totals():
         # M_dry
         M_f = np.sum(fort['Mk'][:, :, :SRTH2O], axis=(1, 2))
         M_s = np.sum(seq['Mk'][:, :, :SRTH2O], axis=(1, 2))
+        M_p = np.sum(ppm['Mk'][:, :, :SRTH2O], axis=(1, 2))
         M_c = np.sum(coup['Mk'][:, :, :SRTH2O], axis=(1, 2))
 
         ax = axes[row, 1]
         ax.semilogy(hours, M_f, **LS_FORTRAN)
         ax.semilogy(hours, M_s, **LS_SEQ)
+        ax.semilogy(hours, M_p, **LS_PPM)
         ax.semilogy(hours, M_c, **LS_COUP)
         if row == 0:
             ax.set_title(col_labels[1], fontsize=11)
@@ -786,10 +828,11 @@ def plot_fig8_totals():
 
         # Wall time annotation
         seq_t = seq['wall_time_s']
+        ppm_t = ppm['wall_time_s']
         coup_t = coup['wall_time_s']
         ax.text(0.03, 0.03,
-                f"Wall: seq={seq_t:.2f}s, coup={coup_t:.2f}s",
-                transform=ax.transAxes, fontsize=8,
+                f"Wall: tfl={seq_t:.1f}s, ppm={ppm_t:.1f}s, coup={coup_t:.1f}s",
+                transform=ax.transAxes, fontsize=7,
                 bbox=dict(boxstyle='round,pad=0.2',
                           facecolor='lightyellow', alpha=0.8))
 
@@ -818,13 +861,14 @@ def plot_fig9_relerror():
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
-        fort, seq, coup = _load_results(label)
+        fort, seq, ppm, coup = _load_results(label)
 
         for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
             dN_f = _dN_dlogDp(fort['Nk'][hr], dlogDp)
             dN_s = _dN_dlogDp(seq['Nk'][hr], dlogDp)
+            dN_p = _dN_dlogDp(ppm['Nk'][hr], dlogDp)
             dN_c = _dN_dlogDp(coup['Nk'][hr], dlogDp)
 
             # Only where Fortran has significant signal
@@ -833,14 +877,19 @@ def plot_fig9_relerror():
             active = dN_f > threshold
 
             err_s = np.full(NBINS, np.nan)
+            err_p = np.full(NBINS, np.nan)
             err_c = np.full(NBINS, np.nan)
             err_s[active] = ((dN_s[active] - dN_f[active])
+                             / denom[active])
+            err_p[active] = ((dN_p[active] - dN_f[active])
                              / denom[active])
             err_c[active] = ((dN_c[active] - dN_f[active])
                              / denom[active])
 
             ax.semilogx(dp, err_s * 100, color=LS_SEQ['color'],
                         ls='--', lw=2, marker='o', ms=3)
+            ax.semilogx(dp, err_p * 100, color=LS_PPM['color'],
+                        ls='-.', lw=2, marker='^', ms=3)
             ax.semilogx(dp, err_c * 100, color=LS_COUP['color'],
                         ls='-', lw=2, marker='s', ms=3)
 
@@ -861,7 +910,9 @@ def plot_fig9_relerror():
     from matplotlib.lines import Line2D
     err_handles = [
         Line2D([0], [0], color=LS_SEQ['color'], ls='--', lw=2,
-               marker='o', ms=3, label='Sequential'),
+               marker='o', ms=3, label='Seq TFL'),
+        Line2D([0], [0], color=LS_PPM['color'], ls='-.', lw=2,
+               marker='^', ms=3, label='Seq PPM'),
         Line2D([0], [0], color=LS_COUP['color'], ls='-', lw=2,
                marker='s', ms=3, label='Coupled'),
     ]
