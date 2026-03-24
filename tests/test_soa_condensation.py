@@ -851,3 +851,167 @@ class TestSubStepping:
 
         np.testing.assert_allclose(float(total_after), float(total_before),
                                    rtol=1e-8)
+
+
+# =========================================================================
+# PPM Redistribution Tests
+# =========================================================================
+
+class TestPPMRedistribution:
+    """Tests for redistribution='ppm' in the sequential SOA solver."""
+
+    def test_mass_conservation(self):
+        """PPM redistribution conserves total organic mass (gas + particle)."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        total_before = jnp.sum(Gc[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                       jnp.sum(Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            redistribution='ppm',
+        )
+
+        total_after = jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]) + \
+                      jnp.sum(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS])
+
+        np.testing.assert_allclose(float(total_after), float(total_before),
+                                   rtol=1e-8)
+
+    def test_number_conservation(self):
+        """PPM redistribution conserves total particle number."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        Nk_new, Mk_new, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            redistribution='ppm',
+        )
+
+        np.testing.assert_allclose(
+            float(jnp.sum(Nk_new)), float(jnp.sum(Nk)), rtol=1e-8)
+
+    def test_gas_depletion(self):
+        """PPM redistribution depletes gas (low C* should condense)."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        Gc = Gc.at[SRTORG1].set(1e-12)
+        Mk = Mk.at[:, SRTORG1].set(0.0)
+
+        from tomas_jax.physics.vbs_config import VBSConfig
+        cfg = VBSConfig(
+            n_bins=1,
+            cstar_ref_ug=CSTAR_REF_UG[:1],
+            delta_Hvap_kJ=DELTA_HVAP_KJ[:1],
+            mw=MW_ORG[:1],
+            sigma=0.025, rho=1200.0, sv=120.0, t_ref=298.0,
+            species_indices=(SRTORG1,),
+        )
+
+        _, _, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 3600.0,
+            vbs_config=cfg, redistribution='ppm',
+        )
+
+        assert float(Gc_new[SRTORG1]) < float(Gc[SRTORG1]) * 0.9
+
+    def test_same_direction_as_tfl(self):
+        """PPM and TFL produce gas changes in the same direction."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        _, _, Gc_tfl = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            redistribution='tfl',
+        )
+
+        _, _, Gc_ppm = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            redistribution='ppm',
+        )
+
+        for j in range(N_VBS_BINS):
+            idx = SRTORG1 + j
+            dG_tfl = float(Gc_tfl[idx] - Gc[idx])
+            dG_ppm = float(Gc_ppm[idx] - Gc[idx])
+            if abs(dG_tfl) > 1e-30 and abs(dG_ppm) > 1e-30:
+                assert jnp.sign(dG_tfl) == jnp.sign(dG_ppm), \
+                    f"VBS {j}: direction mismatch tfl={dG_tfl:.3e} ppm={dG_ppm:.3e}"
+
+    def test_non_negative_mass(self):
+        """PPM redistribution never produces negative particle mass."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        Mk = Mk.at[:, SRTORG1].set(1e-30)
+        Gc = Gc.at[SRTORG1].set(0.0)
+
+        from tomas_jax.physics.vbs_config import VBSConfig
+        cfg = VBSConfig(
+            n_bins=1,
+            cstar_ref_ug=jnp.array([1000.0]),
+            delta_Hvap_kJ=jnp.array([80.0]),
+            mw=jnp.array([200.0]),
+            sigma=0.025, rho=1200.0, sv=120.0, t_ref=298.0,
+            species_indices=(SRTORG1,),
+        )
+
+        _, Mk_new, _ = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 3600.0,
+            vbs_config=cfg, redistribution='ppm',
+        )
+
+        assert jnp.all(Mk_new[:, SRTORG1] >= 0.0)
+
+    def test_invalid_redistribution_raises(self):
+        """Invalid redistribution name raises ValueError."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        with pytest.raises(ValueError, match="Unknown redistribution"):
+            soa_condensation_step(
+                Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+                redistribution='bogus',
+            )
+
+    def test_backward_compat_use_ppm_true(self):
+        """Old use_ppm=True maps to redistribution='tfl'."""
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        # Old API
+        _, _, Gc_old = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            use_ppm=True,
+        )
+        # New API
+        _, _, Gc_new = soa_condensation_step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+            redistribution='tfl',
+        )
+
+        np.testing.assert_allclose(Gc_old, Gc_new, rtol=1e-15)
+
+    def test_make_step_ppm_redistribution(self):
+        """make_step with soa_redistribution='ppm' runs correctly."""
+        from tomas_jax.solvers.condensation import make_step
+        step = make_step(['soa_condensation'], cond_method='ppm_jit',
+                         soa_redistribution='ppm')
+
+        Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
+        for j in range(N_VBS_BINS):
+            Gc = Gc.at[SRTORG1 + j].set(1e-15)
+
+        Nk_out, Mk_out, Gc_out, bv_out = step(
+            Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
+        )
+
+        # Basic shape check
+        assert Nk_out.shape == Nk.shape
+        assert Mk_out.shape == Mk.shape
+
+        # Gas should have changed (condensation occurred)
+        total_gas_change = float(jnp.sum(
+            Gc_out[SRTORG1:SRTORG1 + N_VBS_BINS] -
+            Gc[SRTORG1:SRTORG1 + N_VBS_BINS]))
+        assert total_gas_change != 0.0
