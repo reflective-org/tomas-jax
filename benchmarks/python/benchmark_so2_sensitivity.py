@@ -151,8 +151,7 @@ def run_scenario(so2_init, mode, alt_key, nbins, xk, verbose=True):
 
     # Build step function
     processes = MODE_PROCESSES[mode]
-    step_fn = make_step(processes, cond_method='ppm_jit')
-    step_fn_jit = jax.jit(step_fn)
+    step_fn_jit = make_step(processes, cond_method='ppm_jit')
 
     # Build kwargs
     kw = dict(oh_conc=OH_CONC)

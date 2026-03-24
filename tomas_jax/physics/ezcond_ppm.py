@@ -1,5 +1,9 @@
 """PPM-aware simple condensation driver for TOMAS-JAX.
 
+.. deprecated::
+    NOT JIT-compilable (numpy wrapper). For GPU deployment, use
+    ``ezcond_ppm_jax`` (``method='ppm_jit'``).
+
 Analogous to ezcond.py but replaces the TFL tmcond call with the
 PPM advection scheme (ppm_condensation_step). The TAU computation
 uses the full mcond (not subdivided by nsteps) since PPM handles

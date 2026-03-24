@@ -48,6 +48,7 @@ Usage::
     )
     # history shape (nsteps, 3): columns [N_tot, M_dry, Gc_SO4]
 """
+import warnings
 import jax
 import numpy as np
 import jax.numpy as jnp
@@ -74,6 +75,7 @@ from ..physics.condensation_tfl_jax import ezcond_tfl_jax
 from ..physics.nh3_equilibrium import eznh3eqm
 from ..physics.water_equilibrium import calc_equilibrium_water
 from ..core.mnfix_jax import mnfix_jax
+from ..solvers.diffrax import coag_euler_step
 
 
 # =========================================================================
@@ -135,6 +137,13 @@ def condensation_step(
             jnp.asarray(boxvol), jnp.asarray(rh),
             jnp.asarray(alpha), jnp.asarray(dt)
         )
+
+    # Legacy numpy paths — not JIT-compilable, not GPU-compatible
+    warnings.warn(
+        f"method='{method}' uses sequential numpy and is NOT JIT-compilable. "
+        "Use 'ppm_jit' or 'tfl_jit' for GPU deployment.",
+        DeprecationWarning, stacklevel=2,
+    )
 
     # Convert to numpy for sequential operations
     Nk_np = np.array(Nk)
@@ -320,8 +329,6 @@ condensation_step_tfl_jit = jax.jit(condensation_step_tfl_jax)
 def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                         ezcond_fn, icomp_nodiag=42, n_coag_substeps=3):
     """Coagulation + condensation in one step, parameterized by ezcond_fn."""
-    from .diffrax import coag_euler_step
-
     # 1. Coagulation (forward Euler + MNFIX)
     Nk, Mk = coag_euler_step(
         Nk, Mk, xk, temp, pres, boxvol,
@@ -347,8 +354,6 @@ def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
     max_nucleation_frac * N_total, the nucleation timestep is subdivided
     (up to max_nuc_substeps) with MNFIX between substeps.
     """
-    from .diffrax import coag_euler_step
-
     # 1. Adaptive nucleation sub-stepping
     fn = estimate_nucleation_rate(
         Gc, temp, pres, boxvol,
@@ -715,7 +720,8 @@ def run_full_scan(
 
 def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
               n_coag_substeps=10,
-              max_nucleation_frac=0.5, max_nuc_substeps=20):
+              max_nucleation_frac=0.5, max_nuc_substeps=20,
+              jit=True):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
@@ -738,9 +744,13 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         n_coag_substeps: Number of forward-Euler substeps for coagulation
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
+        jit: If True (default), wrap the returned function in ``jax.jit``.
+            Callers no longer need to wrap manually. Double-JIT is a no-op.
 
     Returns:
-        A callable step function.
+        A callable step function (JIT-compiled by default).
+
+    For JIT stability, always pass the same set of kwargs across calls.
 
     Example::
 
@@ -783,7 +793,8 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 # Rate estimate always uses Ricco+Dunne (fast, conservative)
                 fn = estimate_nucleation_rate(
                     Gc, temp, pres, boxvol,
-                    kwargs.get('org_conc', 0.0), kwargs['nh3_conc'], kwargs['fion'],
+                    kwargs.get('org_conc', 0.0), kwargs.get('nh3_conc', 0.0),
+                    kwargs.get('fion', 0.0),
                     kwargs.get('enable_organic', 1.0),
                     kwargs.get('enable_inorganic', 1.0),
                     kwargs.get('fn_scale', 1.0),
@@ -803,7 +814,8 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                         Nk_s, Mk_s, Gc_s = zhao2024_nucleation_step(
                             Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
                             kwargs.get('org_conc', 0.0),
-                            kwargs['nh3_conc'], kwargs['fion'],
+                            kwargs.get('nh3_conc', 0.0),
+                            kwargs.get('fion', 0.0),
                             hno3=kwargs.get('hno3', 0.0),
                             ulvoc=kwargs.get('ulvoc', 0.0),
                             dma=kwargs.get('dma', 0.0),
@@ -818,7 +830,9 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                         Nk_s, Mk_s, Gc_s = carry
                         Nk_s, Mk_s, Gc_s = nucleation_step(
                             Nk_s, Mk_s, Gc_s, xk, temp, pres, boxvol, dt_nuc,
-                            kwargs['org_conc'], kwargs['nh3_conc'], kwargs['fion'],
+                            kwargs.get('org_conc', 0.0),
+                            kwargs.get('nh3_conc', 0.0),
+                            kwargs.get('fion', 0.0),
                             kwargs.get('enable_organic', 1.0),
                             kwargs.get('enable_inorganic', 1.0),
                             kwargs.get('fn_scale', 1.0),
@@ -830,7 +844,6 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                     0, n_nuc, nuc_body, (Nk, Mk, Gc))
 
             elif process == 'coagulation':
-                from .diffrax import coag_euler_step
                 Nk, Mk = coag_euler_step(
                     Nk, Mk, xk, temp, pres, boxvol,
                     dt=dt,
@@ -846,10 +859,10 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 kdil = kwargs.get('kdil', 0.0)
                 Nk, Mk, Gc = dilution_step(
                     Nk, Mk, Gc, dt, kdil,
-                    Nk_bg=kwargs.get('Nk_bg', None),
-                    Mk_bg=kwargs.get('Mk_bg', None),
-                    Gc_bg=kwargs.get('Gc_bg', None),
+                    kwargs.get('Nk_bg', jnp.zeros_like(Nk)),
+                    kwargs.get('Mk_bg', jnp.zeros_like(Mk)),
+                    kwargs.get('Gc_bg', jnp.zeros_like(Gc)),
                 )
         return Nk, Mk, Gc
 
-    return step_fn
+    return jax.jit(step_fn) if jit else step_fn

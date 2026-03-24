@@ -1,5 +1,9 @@
 """Simple condensation driver for TOMAS-JAX.
 
+.. deprecated::
+    NOT JIT-compilable. For GPU deployment, use ``ezcond_tfl_jax``
+    (``method='tfl_jit'``) or ``ezcond_ppm_jax`` (``method='ppm_jit'``).
+
 Exact port of ezcond.f (Jeff Pierce, May 2007).
 
 Takes a prescribed amount of condensing mass (``mcond`` [kg/grid cell])

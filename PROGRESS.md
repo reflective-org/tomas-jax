@@ -4,6 +4,42 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-24 (Mon) — JAX/GPU-Readiness Audit
+
+**Time**: ~evening PST
+
+### Summary
+Comprehensive audit of all ~25 tomas_jax modules for GPU deployment readiness. The JIT-compiled fast paths were already excellent pure JAX. This audit fixed patterns that would cause issues on GPU: `None` default args breaking JIT tracing, missing kwarg defaults, scattered `jax.config.update` calls, and undocumented legacy numpy paths.
+
+### Changes
+1. **Moved coag import to module level** in `solvers/condensation.py` — was inside 3 function bodies, now at top with other imports.
+2. **Removed 12 redundant `jax.config.update("jax_enable_x64", True)`** calls from library modules (`core/mnfix_jax.py`, `core/mnfix_fortran.py`, `physics/condensation_sink.py`, `physics/coagulation_rates.py`, `physics/coagulation_kernel.py`, `physics/density.py`, `physics/gas_properties.py`, `physics/nh3_equilibrium.py`, `physics/water_equilibrium.py`, `physics/properties.py`, `solvers/euler.py`, `solvers/diffrax.py`). Only `core/config.py` retains the call.
+3. **Fixed `dilution_step` None defaults** — removed `None` default args that break JIT when call patterns change. Now requires explicit arrays. Updated callers: `solvers/condensation.py`, `tests/test_dilution.py`, `run_box_model.py`.
+4. **Fixed `make_step` kwargs** — replaced bare `kwargs['nh3_conc']`, `kwargs['fion']`, `kwargs['org_conc']` with `kwargs.get('key', 0.0)` to prevent KeyError crashes.
+5. **Added deprecation warnings** to legacy numpy paths (`method='tfl'`, `method='ppm'`) in `condensation_step()`. Updated docstrings in `condensation.py`, `ezcond.py`, `ezcond_ppm.py`.
+6. **Auto-JIT `make_step`** — added `jit=True` parameter; returns JIT-compiled function by default. Removed redundant `jax.jit()` wrapping from `run_box_model.py`, `benchmark_dilution.py`, `benchmark_so2_sensitivity.py`, `run_sai_simulation.py`.
+7. **Created `docs/gpu_deployment.md`** — float64 by GPU type, `JAX_PLATFORMS` usage, code path selection, `jax.vmap` batch processing, memory estimates, JIT stability tips.
+8. **Updated CLAUDE.md** — added GPU deployment section, centralized x64 config note, dilution_step change, file layout entry.
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` (import, kwargs, dilution, deprecation, auto-JIT)
+- `tomas_jax/physics/dilution.py` (removed None defaults)
+- `tomas_jax/physics/condensation.py`, `ezcond.py`, `ezcond_ppm.py` (deprecation docstrings)
+- 12 files: removed redundant `jax.config.update` calls
+- `tests/test_dilution.py` (explicit zero backgrounds)
+- `run_box_model.py` (auto-JIT, explicit backgrounds)
+- `benchmarks/python/benchmark_dilution.py`, `benchmark_so2_sensitivity.py` (auto-JIT)
+- `experimental_case/run_sai_simulation.py` (auto-JIT)
+
+### Files Created
+- `docs/gpu_deployment.md`
+
+### Known Issues
+- Tests and benchmarks retain their own `jax.config.update` calls (they may be run as standalone scripts)
+- No actual GPU testing performed (audit is structural/code-level only)
+
+---
+
 ## 2026-03-14 (Fri) — SAI 96h Box Model Simulation
 
 **Time**: ~10:15 PM PST

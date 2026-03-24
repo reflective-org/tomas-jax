@@ -14,7 +14,7 @@ Use this for benchmark validation against FORTRAN output.
 For production, use mnfix_jax.py (faster, JIT-friendly).
 """
 import jax
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple
 
