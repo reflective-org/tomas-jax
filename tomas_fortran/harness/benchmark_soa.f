@@ -24,10 +24,10 @@ C     Output: hourly CSV files in output/soa/
 C-----VARIABLE DECLARATIONS-------------------------------------------
       integer k, j, istep, iscen
       double precision dt
-      parameter(dt=60.0d0)
+      parameter(dt=10.0d0)
 
-      integer nscenarios, nsteps, nhours
-      parameter(nscenarios=3, nsteps=1440, nhours=24)
+      integer nscenarios, nsteps, nhours, snap_interval
+      parameter(nscenarios=3, nsteps=8640, nhours=24, snap_interval=360)
 
       double precision pi, kBoltz, Rgas, Neps
       parameter(pi=3.141592654d0, kBoltz=1.38d-23)
@@ -67,12 +67,12 @@ C     Scenario A: Pure condensation (surface, low C*, high gas)
       sc_N(1) = 1.0d4
       sc_GMD(1) = 50.0d-9
       sc_GSD(1) = 1.6d0
-      sc_Gc_org(1,1) = 1.0d-8
-      sc_Gc_org(2,1) = 1.0d-8
-      sc_Gc_org(3,1) = 5.0d-9
-      sc_Gc_org(4,1) = 5.0d-9
-      sc_Gc_org(5,1) = 1.0d-9
-      sc_Gc_org(6,1) = 1.0d-9
+      sc_Gc_org(1,1) = 1.0d-10
+      sc_Gc_org(2,1) = 1.0d-10
+      sc_Gc_org(3,1) = 1.0d-9
+      sc_Gc_org(4,1) = 3.0d-9
+      sc_Gc_org(5,1) = 1.0d-8
+      sc_Gc_org(6,1) = 2.0d-8
 
 C     Scenario B: Mixed condensation/evaporation (cold, moderate)
       sc_temp(2) = 270.0d0
@@ -81,12 +81,12 @@ C     Scenario B: Mixed condensation/evaporation (cold, moderate)
       sc_N(2) = 5.0d3
       sc_GMD(2) = 80.0d-9
       sc_GSD(2) = 1.5d0
-      sc_Gc_org(1,2) = 5.0d-9
-      sc_Gc_org(2,2) = 5.0d-9
-      sc_Gc_org(3,2) = 5.0d-9
-      sc_Gc_org(4,2) = 5.0d-9
-      sc_Gc_org(5,2) = 5.0d-9
-      sc_Gc_org(6,2) = 5.0d-9
+      sc_Gc_org(1,2) = 1.0d-10
+      sc_Gc_org(2,2) = 1.0d-10
+      sc_Gc_org(3,2) = 1.0d-9
+      sc_Gc_org(4,2) = 3.0d-9
+      sc_Gc_org(5,2) = 1.0d-8
+      sc_Gc_org(6,2) = 2.0d-8
 
 C     Scenario C: Warm evaporative (high T, low gas)
       sc_temp(3) = 310.0d0
@@ -155,9 +155,10 @@ C        Zero out unused organic species (7-41)
          enddo
 
 C        Compute temperature-corrected psatorg (Clausius-Clapeyron)
+C        Fixed: was using Rgas*298 instead of Rgas*temp
          do j=1,iorg
             psatorg(j) = (cstar(j)*1.0d-9) / (mworg(j)*1.0d-3)
-     &                   * Rgas * 298.0d0
+     &                   * Rgas * temp
      &                   * exp((-Hvap(j)*1000.d0/Rgas)
      &                         * (1.d0/temp - 1.d0/298.d0))
          enddo
@@ -222,8 +223,9 @@ C        Zero gas for unused organic species
             Gc(srtorg1+j-1) = 0.0d0
          enddo
 
-C        --- Write initial state (minute 0) ---
+C        --- Write initial state ---
          call write_soa_minute(0, sc_label(iscen))
+         call write_soa_hourly(0, sc_label(iscen))
 
 C        --- Time stepping loop ---
          call cpu_time(t_start)
@@ -246,12 +248,15 @@ C           SOA condensation only (no H2SO4 condensation)
 C           MNFIX
             call mnfix(Nk, Mk)
 
-C           Write every-minute output
-            call write_soa_minute(istep, sc_label(iscen))
+C           Write Nk every minute (every 6 steps at dt=10s)
+            if (mod(istep, 6) .eq. 0) then
+               iminute = istep / 6
+               call write_soa_minute(iminute, sc_label(iscen))
+            endif
 
-C           Write hourly output (kept for backward compat)
-            if (mod(istep, 60) .eq. 0) then
-               ihour = istep / 60
+C           Write full state (Nk+Mk+Gc) every snap_interval minutes
+            if (mod(istep, snap_interval) .eq. 0) then
+               ihour = istep / snap_interval
                call write_soa_hourly(ihour, sc_label(iscen))
             endif
 

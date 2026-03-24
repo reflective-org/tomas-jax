@@ -131,6 +131,9 @@ def calc_organic_condensation_sink(
     Dbk: float = 1.0e-10,
     kc: float = 0.0,
     use_gasside_only: bool = False,
+    density_override: jnp.ndarray = None,
+    neps: float = None,
+    r_gas: float = None,
 ) -> tuple:
     """Organic condensation sink following Zaveri et al. (2014).
 
@@ -161,6 +164,13 @@ def calc_organic_condensation_sink(
         Dbk: Particle-phase diffusion coefficient [m²/s]
         kc: First-order loss rate in particle phase [s⁻¹]
         use_gasside_only: If True, return gas-side CS (Approximation 1).
+        density_override: If provided, use this density array instead of
+            computing from Mk.  Matches Fortran soacond.f behavior where
+            density is computed from the COMMON block Mk (start-of-timestep
+            state) while mp/Mktot use the working copy Mkf.
+        neps: Override NEPS_CONDSINK threshold for has_particles check.
+            Fortran soacond.f uses 1e-5, while getCondSink uses 1e10.
+        r_gas: Gas constant [J/mol/K] override. Pass 8.314 to match Fortran.
 
     Returns:
         CS: Condensation sink [s⁻¹]
@@ -171,14 +181,25 @@ def calc_organic_condensation_sink(
     """
     # Gas diffusivity and mean free path
     Di = calc_gas_diffusivity(temp, pres, molecular_weight, diffusion_volume)
-    mfp = calc_mean_free_path(temp, pres, molecular_weight, diffusion_volume)
+    mfp_kwargs = {}
+    if r_gas is not None:
+        mfp_kwargs['r_gas'] = r_gas
+    mfp = calc_mean_free_path(temp, pres, molecular_weight, diffusion_volume,
+                              **mfp_kwargs)
 
     # Dpk and density (same logic as calc_condensation_sink)
-    has_particles = Nk > NEPS_CONDSINK
+    neps_val = neps if neps is not None else NEPS_CONDSINK
+    has_particles = Nk > neps_val
 
     Mktot = jnp.sum(Mk, axis=1)
     mp_actual = Mktot / jnp.maximum(Nk, 1e-30)
-    density_actual = calc_density(Mk)
+
+    # Density: use override if provided (Fortran COMMON block behavior),
+    # otherwise compute from current Mk.
+    if density_override is not None:
+        density_actual = density_override
+    else:
+        density_actual = calc_density(Mk)
 
     mp_default = 1.4 * xk[:-1]
     density_default = 1500.0
@@ -186,7 +207,13 @@ def calc_organic_condensation_sink(
     mp = jnp.where(has_particles, mp_actual, mp_default)
     density = jnp.where(has_particles, density_actual, density_default)
 
-    Dpk = jnp.cbrt(mp / density * (6.0 / PI))
+    # Fortran soacond.f line 238: Dpk = ((mp/density)*(6/pi))**(0.333)
+    # When called from SOA code (neps override provided), match Fortran's
+    # truncated 0.333 exponent. Otherwise use exact 1/3 (getCondSink.f).
+    if neps is not None:
+        Dpk = jnp.power(mp / density * (6.0 / PI), 0.333)
+    else:
+        Dpk = jnp.cbrt(mp / density * (6.0 / PI))
     Rpk = Dpk / 2.0
 
     # Knudsen number

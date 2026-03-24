@@ -111,7 +111,8 @@ cdbg      integer numcalls          !number of times cond routine is called
 	  
       double precision tau_p ! report tau, added by Emily
       double precision test_time
-      double precision kB, Na, morg(iorg), mair, dorg, dair	  
+      double precision kB, Na, morg(iorg), mair, dorg, dair
+      double precision cstar_T  ! temperature-corrected C* [ug/m3]
 
       DOUBLE PRECISION ACCOM       ! accomodation coefficient
       DOUBLE PRECISION FC(IBINS)   ! Fuch's correction factor
@@ -128,8 +129,8 @@ cdbg      integer numcalls          !number of times cond routine is called
 C     VARIABLE COMMENTS...
 
 C-----EXTERNAL FUNCTIONS------------------------------------------------
-      double precision aerodens, gasdiff
-      external aerodens, gasdiff
+      double precision aerodens
+      external aerodens
 
 C-----ADJUSTABLE PARAMETERS---------------------------------------------
 
@@ -183,13 +184,17 @@ C      mworg(jo)=(0.434 - 0.045*log10(cstar(jo)))*1000. !keep consistent with wa
       j=srtorg1+jo-1
       ms=sqrt(8.0*R*temp/(pi*mworg(jo)*1.0d-3)) !S&P2 eqn 9.2
 C      Di=diorg(jo)*(temp/T1)**ditemporg(jo)      !J's diffusivity of organic vapors
-	  Di = (2./3.)*sqrt(kB*temp/pi*0.5*(1./morg(jo)+1/mair))*1./ 
-     &	       (pi*(0.5*(dorg + dair))**2.)/Na*(R*temp/pres) ! Andy's diffusivity of organic vapors, m2/s
-C      print *, 'Di'
-C   	  print *, Di
+C OLD (Andy's kinetic theory, ~2x too low):
+C      Di = (2./3.)*sqrt(kB*temp/pi*0.5*(1./morg(jo)+1/mair))*1./
+C     &       (pi*(0.5*(dorg + dair))**2.)/Na*(R*temp/pres)
+C Use Fuller-Schettler-Giddings (same as gasdiff.f for H2SO4):
+      call gasdiff(temp,pres,mworg(jo),120.d0,Di)
       mfp=2.d0*Di/ms ! for use with Dahneke correction factor
       tj=2.*pi*mworg(jo)*1.0d-3/(R*temp)
-      
+C     Temperature-corrected C* for Kgkk two-film resistance
+      cstar_T = cstar(jo) * exp((-Hvap(jo)*1000.d0/R)
+     &          * (1.d0/temp - 1.d0/298.d0))
+
 C Repeat from this point if multiple internal time steps are needed
  10   continue
 
@@ -241,7 +246,7 @@ CCCCC ==========================================================================
          Dgk = Di               ! gas-phase diffusion coefficient, m2/s (constant? if yes, can we vary this based on information about the SOM species)
          accom = alpha          ! mass accommodation coefficient, unitless
          FC(k) = 0.75 * accom * (1.0+Kn) / (Kn*(1.0+Kn)
-     &        + 0.238*accom*Kn + 0.75*accom) ! Fuchs correction, unitless, eqn (14)
+     &        + 0.283*accom*Kn + 0.75*accom) ! Fuchs correction, unitless, eqn (14) [fixed: was 0.238]
 C         FC(k) = (1.+Kn)/(1.+2.*Kn*(1.+Kn)/alpha) !S&P eqn 11.35         
 C         Dbk = 1.0e-10          ! particle-phase diffusion coefficient [m2/s]
 C         kc = 0.0               ! first-order loss rate of species in the particle phase [1/s]
@@ -283,8 +288,9 @@ C            print*, 'mfp    =', mfp
             end if
          end if
          
-         Kgkk(k) = Rpk(k) * 1.0 / (1.0/kgk(k) + 1.0/kpk(k) * ! ???????????????????????????????????
-     &        (cstar(jo)/density/1.0e9))
+C        Use temperature-corrected C*(T) in Kgkk (was using reference cstar(jo))
+         Kgkk(k) = Rpk(k) * 1.0 / (1.0/kgk(k) + 1.0/kpk(k) *
+     &        (cstar_T/density/1.0e9))
 CCCCC ============================================================================================
 !     AliA - calculate Kgk
          

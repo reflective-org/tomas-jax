@@ -22,7 +22,7 @@ import jax.numpy as jnp
 from ..core.config import R_GAS, KB, AVOGADRO, MOLAR_MASS_AIR
 
 
-def calc_boxmass(temp, pres, boxvol):
+def calc_boxmass(temp, pres, boxvol, r_gas=R_GAS):
     """Mass of air in grid cell [kg].
 
     boxmass = pres × boxvol_m3 × Mair / (R × T)
@@ -31,15 +31,16 @@ def calc_boxmass(temp, pres, boxvol):
         temp: Temperature [K]
         pres: Pressure [Pa]
         boxvol: Grid cell volume [cm³]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         boxmass: Air mass [kg]
     """
     boxvol_m3 = boxvol * 1.0e-6  # cm³ → m³
-    return pres * boxvol_m3 * MOLAR_MASS_AIR / (R_GAS * temp)
+    return pres * boxvol_m3 * MOLAR_MASS_AIR / (r_gas * temp)
 
 
-def calc_ambient_pressure(Gc_species, mw, temp, pres, boxvol):
+def calc_ambient_pressure(Gc_species, mw, temp, pres, boxvol, r_gas=R_GAS):
     """Ambient vapor pressure from gas-phase concentration.
 
     Converts gas mass in grid cell to partial pressure via ideal gas law:
@@ -53,12 +54,13 @@ def calc_ambient_pressure(Gc_species, mw, temp, pres, boxvol):
         temp: Temperature [K]
         pres: Pressure [Pa]
         boxvol: Grid cell volume [cm³]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         pamb: Ambient vapor pressure [Pa]
     """
     mw_kg = mw * 1.0e-3
-    boxmass = calc_boxmass(temp, pres, boxvol)
+    boxmass = calc_boxmass(temp, pres, boxvol, r_gas=r_gas)
     n_gas = Gc_species / mw_kg            # moles of gas
     n_air = boxmass / MOLAR_MASS_AIR      # moles of air
     pamb = jnp.where(n_air > 1.0e-30, (n_gas / n_air) * pres, 0.0)
@@ -111,13 +113,14 @@ def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk,
     """Per-particle equilibrium mass change for each bin.
 
     From soacond.f lines 364–371:
-        masseqm = pamb / (C* / Mtot × Ke)
+        masseqm = pamb / (psatorg / totphase × scalefactor)
+                = pamb × Mtot / (C* × Ke)
         maddEQ(k) = (masseqm − Mk_j(k)) / Nk(k)
 
-    When Q is provided (Zaveri Approximation 1, fast reactions), the
-    effective saturation pressure is psat/Q, so the equilibrium mass is:
-        masseqm = pamb / (C* × Ke / (Mtot × Q))
-                = pamb × Mtot × Q / (C* × Ke)
+    Q is a kinetic parameter (particle-phase diffusion resistance) that
+    affects the *rate* of mass transfer, NOT the thermodynamic equilibrium.
+    It is applied to the driving force and CS, not to masseqm.
+    The Q parameter is accepted but ignored for backward compatibility.
 
     Args:
         pamb: Ambient vapor pressure [Pa]
@@ -126,8 +129,7 @@ def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk,
         kelvin: Kelvin correction per bin, shape (nbins,)
         Mk_species: Mass of this species per bin [kg], shape (nbins,)
         Nk: Number per bin [#], shape (nbins,)
-        Q: Quasi-steady-state parameter per bin, shape (nbins,), or None.
-           When provided, equilibrium uses effective psat/Q (Zaveri Approx 1).
+        Q: Ignored. Kept for backward compatibility.
 
     Returns:
         maddEQ: Per-particle equilibrium mass change [kg], shape (nbins,)
@@ -137,11 +139,10 @@ def calc_equilibrium_mass(pamb, cstar_Pa, Mtot_org, kelvin, Mk_species, Nk,
 
     # Equilibrium total mass of this species in each bin
     # masseqm = pamb / (C* × Ke / Mtot)  [soacond.f line 369]
-    # With Q correction: masseqm = pamb × Mtot × Q / (C* × Ke)
-    Q_factor = jnp.maximum(Q, 1.0e-10) if Q is not None else 1.0
+    # Q is NOT included here — it's kinetic, not thermodynamic.
     masseqm = jnp.where(
         (Mtot_org > 1.0e-30) & (cstar_Pa > 1.0e-30),
-        pamb * safe_Mtot * Q_factor / (cstar_Pa * kelvin),
+        pamb * safe_Mtot / (cstar_Pa * kelvin),
         0.0,
     )
 

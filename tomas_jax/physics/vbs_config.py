@@ -95,7 +95,7 @@ DEFAULT_VBS_CONFIG = VBSConfig(
 # Temperature correction
 # =========================================================================
 
-def calc_Cstar_T(cstar_ref_ug, delta_Hvap_kJ, temp, t_ref=T_REF):
+def calc_Cstar_T(cstar_ref_ug, delta_Hvap_kJ, temp, t_ref=T_REF, r_gas=R_GAS):
     """Temperature-corrected C* via Clausius-Clapeyron.
 
     C*(T) = C*(Tref) × exp(−ΔHvap/R × (1/T − 1/Tref))
@@ -105,12 +105,13 @@ def calc_Cstar_T(cstar_ref_ug, delta_Hvap_kJ, temp, t_ref=T_REF):
         delta_Hvap_kJ: Enthalpy of vaporization [kJ/mol]
         temp: Temperature [K]
         t_ref: Reference temperature [K]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         C* at temperature T [µg/m³]
     """
     delta_Hvap_J = delta_Hvap_kJ * 1000.0
-    exponent = -(delta_Hvap_J / R_GAS) * (1.0 / temp - 1.0 / t_ref)
+    exponent = -(delta_Hvap_J / r_gas) * (1.0 / temp - 1.0 / t_ref)
     return cstar_ref_ug * jnp.exp(exponent)
 
 
@@ -118,7 +119,7 @@ def calc_Cstar_T(cstar_ref_ug, delta_Hvap_kJ, temp, t_ref=T_REF):
 # Unit conversions
 # =========================================================================
 
-def cstar_ug_to_Pa(cstar_ug, mw, temp):
+def cstar_ug_to_Pa(cstar_ug, mw, temp, r_gas=R_GAS):
     """Convert C* from µg/m³ to Pa.
 
     Using ideal gas: P = (C/MW) × R × T
@@ -128,13 +129,14 @@ def cstar_ug_to_Pa(cstar_ug, mw, temp):
         cstar_ug: Saturation concentration [µg/m³]
         mw: Molecular weight [g/mol]
         temp: Temperature [K]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         C* in [Pa]
     """
     cstar_kg = cstar_ug * 1.0e-9  # µg/m³ → kg/m³
     mw_kg = mw * 1.0e-3           # g/mol → kg/mol
-    return (cstar_kg / mw_kg) * R_GAS * temp
+    return (cstar_kg / mw_kg) * r_gas * temp
 
 
 def cstar_ug_to_molec_cm3(cstar_ug, mw):

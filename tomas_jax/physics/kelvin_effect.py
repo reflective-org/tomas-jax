@@ -27,7 +27,7 @@ import jax.numpy as jnp
 from ..core.config import PI, R_GAS
 
 
-def calc_kelvin_factor(Dpk, sigma, mw, rho, temp):
+def calc_kelvin_factor(Dpk, sigma, mw, rho, temp, r_gas=R_GAS):
     """Kelvin correction factor for each size bin.
 
     Ke = exp(4 × σ × MW / (R × T × ρ × Dp))
@@ -45,12 +45,13 @@ def calc_kelvin_factor(Dpk, sigma, mw, rho, temp):
         mw: Molecular weight [g/mol] (e.g. 200 for SOA)
         rho: Organic density [kg/m³] (e.g. 1200)
         temp: Temperature [K]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         Ke: Kelvin correction factors, shape (nbins,). Always >= 1.0.
     """
     mw_kg = mw * 1.0e-3  # g/mol → kg/mol
-    exponent = 4.0 * sigma * mw_kg / (R_GAS * temp * rho * jnp.maximum(Dpk, 1.0e-30))
+    exponent = 4.0 * sigma * mw_kg / (r_gas * temp * rho * jnp.maximum(Dpk, 1.0e-30))
     Ke = jnp.exp(exponent)
     return jnp.maximum(Ke, 1.0)
 
