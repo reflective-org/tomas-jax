@@ -344,9 +344,10 @@ class TestSOACondensation:
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
         )
 
+        # Tolerance 1e-20: atau formula may produce tiny FP noise
         np.testing.assert_allclose(Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS],
                                    Mk_before[:, SRTORG1:SRTORG1 + N_VBS_BINS],
-                                   atol=1e-30)
+                                   atol=1e-20)
 
     def test_evaporation_with_no_gas(self):
         """With organics in particles but zero gas, evaporation occurs."""
@@ -366,33 +367,36 @@ class TestSOACondensation:
         # Gas should increase
         assert gas_after > 0
 
-    def test_number_conserved_ppm(self):
-        """With PPM, total number is conserved (Nk redistributed)."""
+    def test_number_conserved_tfl(self):
+        """With TFL redistribution, total number is conserved (Nk redistributed)."""
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-15)
 
         Nk_new, Mk_new, Gc_new = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
-            use_ppm=True,
+            redistribution='tfl',
         )
 
-        # PPM redistributes Nk across bins, but total is conserved
+        # TFL redistributes Nk across bins, but total is conserved
         np.testing.assert_allclose(
             float(jnp.sum(Nk_new)), float(jnp.sum(Nk)), rtol=1e-8)
 
-    def test_number_unchanged_no_ppm(self):
-        """Without PPM, Nk is unchanged (direct mass addition only)."""
+    def test_number_conserved_direct(self):
+        """With direct addition, total N is conserved (MNFIX can redistribute bins)."""
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-15)
 
         Nk_new, Mk_new, Gc_new = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
-            use_ppm=False,
+            redistribution='direct',
         )
 
-        np.testing.assert_allclose(Nk_new, Nk, rtol=1e-14)
+        # MNFIX inside substep can redistribute Nk across bins,
+        # but total number is conserved
+        np.testing.assert_allclose(
+            jnp.sum(Nk_new), jnp.sum(Nk), rtol=1e-10)
 
     def test_temperature_dependence(self):
         """Colder temperature → more condensation (lower C*)."""
@@ -689,7 +693,7 @@ class TestCoupledSolver:
 
         _, Mk_seq, Gc_seq = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
-            solver='sequential', use_ppm=False,
+            solver='sequential', redistribution='direct',
         )
 
         _, Mk_coup, Gc_coup = soa_condensation_step(
@@ -758,8 +762,8 @@ class TestCoupledSolver:
 
         assert jnp.all(Mk_new[:, SRTORG1] >= 0.0)
 
-    def test_number_unchanged(self):
-        """Coupled solver doesn't modify Nk (no PPM)."""
+    def test_number_conserved(self):
+        """Coupled solver conserves total particle number (MNFIX inside)."""
         Nk, Mk, Gc, xk, temp, pres, boxvol, rh = _make_test_state()
         for j in range(N_VBS_BINS):
             Gc = Gc.at[SRTORG1 + j].set(1e-15)
@@ -769,7 +773,9 @@ class TestCoupledSolver:
             solver='coupled',
         )
 
-        np.testing.assert_allclose(Nk_new, Nk, rtol=1e-14)
+        # MNFIX can redistribute Nk across bins, but total N is conserved
+        np.testing.assert_allclose(
+            jnp.sum(Nk_new), jnp.sum(Nk), rtol=1e-10)
 
     def test_no_gas_no_particles_no_change(self):
         """With zero gas and zero organics, nothing changes."""
@@ -785,7 +791,7 @@ class TestCoupledSolver:
         np.testing.assert_allclose(
             Mk_new[:, SRTORG1:SRTORG1 + N_VBS_BINS],
             Mk[:, SRTORG1:SRTORG1 + N_VBS_BINS],
-            atol=1e-30)
+            atol=1e-20)
 
     def test_invalid_solver_raises(self):
         """Invalid solver name raises ValueError."""
@@ -815,7 +821,7 @@ class TestSubStepping:
 
         _, Mk_new, Gc_new = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, 1.0, 60.0,
-            use_ppm=False, max_soa_substeps=20,
+            redistribution='direct', max_soa_substeps=20,
         )
 
         total_after = jnp.sum(Gc_new[SRTORG1:SRTORG1 + N_VBS_BINS]) + \

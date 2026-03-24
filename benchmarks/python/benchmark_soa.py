@@ -58,11 +58,11 @@ NBINS = NBINS_LEGACY  # 36 bins — match Fortran exactly
 MO = 1.0e-21 * 2.0 ** (-6)  # = 1.5625e-23 kg, exact Fortran initbounds.f
 DENS_INIT = 1770.0   # kg/m3 (pure sulfate)
 BOXVOL = 1.0e6       # cm3
-DT = 60.0            # seconds per step
+DT = 10.0            # seconds per step — match Fortran dt=10s
 ALPHA = 1.0
 N_VBS = 6            # 6 VBS bins
 NHOURS = 24
-NSTEPS = NHOURS * 60
+NSTEPS = NHOURS * 3600 // 10  # 8640 steps at dt=10s = 24h
 
 FORTRAN_DIR = os.path.join(os.path.dirname(__file__), '..', '..',
                            'tomas_fortran', 'output', 'soa')
@@ -89,13 +89,15 @@ SCENARIOS = {
         'temp': 288.0, 'pres': 101325.0, 'rh': 0.5,
         'n_total': 1e4, 'gmd': 50e-9, 'gsd': 1.6,
         # VBS gas concentrations [kg/cell] — match Fortran harness
-        'Gc_org': [1e-8, 1e-8, 5e-9, 5e-9, 1e-9, 1e-9],
+        # µg/m³: [0.1, 0.1, 1, 3, 10, 20] (more mass in volatile bins)
+        'Gc_org': [1e-10, 1e-10, 1e-9, 3e-9, 1e-8, 2e-8],
     },
     'sB': {
         'label': 'B: Mixed cond/evap (270K)',
         'temp': 270.0, 'pres': 80000.0, 'rh': 0.3,
         'n_total': 5e3, 'gmd': 80e-9, 'gsd': 1.5,
-        'Gc_org': [5e-9, 5e-9, 5e-9, 5e-9, 5e-9, 5e-9],
+        # µg/m³: [0.1, 0.1, 1, 3, 10, 20]
+        'Gc_org': [1e-10, 1e-10, 1e-9, 3e-9, 1e-8, 2e-8],
     },
     'sC': {
         'label': 'C: Warm evaporative (310K)',
@@ -229,7 +231,7 @@ def run_scenario(label, verbose=True):
         # SOA condensation with PPM redistribution
         Nk, Mk, Gc = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-            use_ppm=True,
+            redistribution='tfl',
         )
         # MNFIX after SOA step
         Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
@@ -253,8 +255,9 @@ def run_scenario(label, verbose=True):
     for i in range(NSTEPS):
         Nk, Mk, Gc = soa_step(Nk, Mk, Gc)
 
-        if (i + 1) % 60 == 0:
-            hr = (i + 1) // 60
+        steps_per_hour = 3600 // int(DT)  # 360 at dt=10s
+        if (i + 1) % steps_per_hour == 0:
+            hr = (i + 1) // steps_per_hour
             Nk_hourly[hr] = np.array(Nk)
             Mk_hourly[hr] = np.array(Mk)
             Gc_hourly[hr] = np.array(Gc)

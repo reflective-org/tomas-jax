@@ -718,7 +718,7 @@ def run_full_scan(
 def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
               n_coag_substeps=10,
               max_nucleation_frac=0.5, max_nuc_substeps=20,
-              soa_solver='sequential'):
+              soa_solver='sequential', soa_redistribution='tfl'):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
@@ -746,6 +746,8 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
         soa_solver: SOA condensation solver — 'sequential' (default) or 'coupled'
+        soa_redistribution: Bin redistribution for sequential SOA solver —
+            'tfl' (default, Fortran-matching), 'ppm' (smoother), 'direct'
 
     Returns:
         A callable step function.
@@ -858,10 +860,13 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 )
             elif process == 'soa_condensation':
                 vbs_cfg = kwargs.get('vbs_config', DEFAULT_VBS_CONFIG)
-                soa_use_ppm = kwargs.get('soa_use_ppm', True)
+                redist = kwargs.get('soa_redistribution', soa_redistribution)
+                # Backward compat: old soa_use_ppm kwarg
+                if 'soa_use_ppm' in kwargs:
+                    redist = 'tfl' if kwargs['soa_use_ppm'] else 'direct'
                 Nk, Mk, Gc = soa_condensation_step(
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                    vbs_config=vbs_cfg, use_ppm=soa_use_ppm,
+                    vbs_config=vbs_cfg, redistribution=redist,
                     solver=soa_solver,
                 )
             elif process == 'dilution':

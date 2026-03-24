@@ -1,36 +1,39 @@
 """SOA Solver Comparison: Fortran (top-hat) vs Sequential vs Coupled.
 
 3-way comparison of SOA/VBS condensation solvers on 2 scenarios using the
-36-bin legacy grid.  Both Python solvers use ``use_ppm=False`` (top-hat
-redistribution) to isolate the coupling-algorithm difference from the
-redistribution difference.
+36-bin legacy grid.  24-hour simulation with hourly snapshots.
 
 Scenarios (matching Fortran benchmark_soa.f):
-    sA — Pure condensation  (288 K, 1 atm,  N=1e4, GMD=50 nm, GSD=1.6)
-    sB — Mixed cond/evap    (270 K, 800 hPa, N=5e3, GMD=80 nm, GSD=1.5)
+    sA -- Pure condensation  (288 K, 1 atm,  N=1e4, GMD=50 nm, GSD=1.6)
+    sB -- Mixed cond/evap    (270 K, 800 hPa, N=5e3, GMD=80 nm, GSD=1.5)
 
 Solvers:
-    Fortran      — top-hat redistribution (soacond.f reference)
-    Sequential   — Python Gauss-Seidel VBS loop, use_ppm=False
-    Coupled      — Python vectorised fixed-point (Jacobi), use_ppm=False
+    Fortran      -- top-hat redistribution (soacond.f reference)
+    Sequential   -- Python Gauss-Seidel VBS loop, use_ppm=True (TFL tmcond_jax)
+    Coupled      -- Python vectorised fixed-point (Jacobi), direct mass addition
+
+The sequential solver uses tmcond_jax (TFL Lagrangian remapping) to match
+Fortran's tmcond call inside soacond.f.  The coupled solver uses direct mass
+addition + MNFIX (no tmcond).  Both produce correct total N, M, and gas
+depletion.  Known limitation: the sequential solver develops oscillatory
+size-distribution artifacts from TFL bin-boundary sensitivity.
 
 Figures (9):
-    1. dN/dlogDp  (log-log)        4 snapshots x 2 scenarios
-    2. dN/dlogDp  (semilog-x)      4 snapshots x 2 scenarios
-    3. dM_dry/dlogDp (log-log)     4 snapshots x 2 scenarios
-    4. dM_dry/dlogDp (semilog-x)   4 snapshots x 2 scenarios
-    5. VBS gas Gc(t)               6 panels x 2 scenarios
-    6. VBS particle mass bars      4 snapshots x 2 scenarios
-    7. Banana plots                3 cols x 2 scenarios
-    8. Totals N(t) & M_dry(t)     2 cols x 2 scenarios
-    9. Relative error vs Fortran   4 snapshots x 2 scenarios
+    1. dN/dlogDp  (log-log)        at 0h, 6h, 12h, 24h x 2 scenarios
+    2. dN/dlogDp  (semilog-x)      at 0h, 6h, 12h, 24h x 2 scenarios
+    3. dM_dry/dlogDp (log-log)     at 0h, 6h, 12h, 24h x 2 scenarios
+    4. dM_dry/dlogDp (semilog-x)   at 0h, 6h, 12h, 24h x 2 scenarios
+    5. VBS gas Gc(t)               6 VBS bins x 2 scenarios (semilogy)
+    6. VBS particle mass bars      at 0h, 6h, 12h, 24h x 2 scenarios
+    7. Banana plots                3 solvers x 2 scenarios (pcolormesh)
+    8. Totals N(t) & M_dry(t)     2 metrics x 2 scenarios
+    9. Relative error vs Fortran   at 0h, 6h, 12h, 24h x 2 scenarios
 
 Usage::
 
     python -m benchmarks.python.compare_soa_solvers --run
     python -m benchmarks.python.compare_soa_solvers --plot-only
 """
-
 import os
 import time
 import argparse
@@ -60,6 +63,9 @@ RESULTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'results',
 
 SCENARIO_ORDER = ['sA', 'sB']
 
+# Snapshot hours for size dist, bars, and error figures
+SNAP_HOURS = [0, 6, 12, 24]
+
 # =========================================================================
 # Line styles (presentation-quality, consistent across all figures)
 # =========================================================================
@@ -67,30 +73,16 @@ LS_FORTRAN = dict(color='#bbbbbb', lw=4.0, ls='-', zorder=1, alpha=0.9)
 LS_SEQ = dict(color='#1f77b4', lw=2.5, ls='--', zorder=3)
 LS_COUP = dict(color='#d62728', lw=2.5, ls='-', zorder=2)
 
-_SOLVER_DEFS = [
-    ('Fortran',     LS_FORTRAN),
-    ('Sequential',  LS_SEQ),
-    ('Coupled',     LS_COUP),
-]
-
 
 def _conditions_text(sc):
     """Format scenario conditions for text-box annotation."""
-    # Convert Gc_org from kg/cell to µg/m³
-    # boxvol = 1e6 cm³ = 1e-6 m³
-    vol_m3 = BOXVOL * 1e-6
-    gc_ugm3 = [g / vol_m3 * 1e9 for g in sc['Gc_org']]
-    gc_str = ', '.join(f'{g:.0f}' for g in gc_ugm3)
     return (f"T={sc['temp']:.0f} K, P={sc['pres']/100:.0f} hPa\n"
             f"N={sc['n_total']:.0e} cm$^{{-3}}$\n"
-            f"GMD={sc['gmd']*1e9:.0f} nm, GSD={sc['gsd']:.1f}\n"
-            f"Init: 91% SO$_4$ + 9% org seed, no H$_2$SO$_4$ gas\n"
-            f"Gc_org=[{gc_str}] µg/m³\n"
-            f"C*=[0.01, 0.1, 1, 10, 100, 1000] µg/m³")
+            f"GMD={sc['gmd']*1e9:.0f} nm, GSD={sc['gsd']:.1f}")
 
 
 def _add_conditions(ax, sc):
-    """Add a conditions text box to the upper-right of *ax*."""
+    """Add conditions text box to upper-right of *ax*."""
     ax.text(0.97, 0.97, _conditions_text(sc),
             transform=ax.transAxes, fontsize=8,
             ha='right', va='top',
@@ -130,11 +122,11 @@ def _apply_rcparams():
 # Simulation
 # =========================================================================
 
-def run_python_solver(label, solver, use_ppm=False, verbose=True):
-    """Run one SOA-only scenario with the specified solver.
+def run_python_solver(label, solver, redistribution='tfl', verbose=True):
+    """Run one SOA-only scenario for 24 hours at dt matching Fortran.
 
-    Returns dict with Nk (25,NBINS), Mk (25,NBINS,ICOMP),
-    Gc (25,N_GAS_SPECIES), Nk_full (NSTEPS+1,NBINS), wall_time_s.
+    Returns dict with Nk (NHOURS+1, NBINS), Mk (NHOURS+1, NBINS, ICOMP),
+    Gc (NHOURS+1, N_GAS_SPECIES), Nk_full (n_minutes+1, NBINS), wall_time_s.
     """
     sc = SCENARIOS[label]
     xk = _make_xk()
@@ -151,7 +143,7 @@ def run_python_solver(label, solver, use_ppm=False, verbose=True):
     def step(Nk, Mk, Gc):
         Nk, Mk, Gc = soa_condensation_step(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha_j, dt,
-            use_ppm=use_ppm, solver=solver,
+            redistribution=redistribution, solver=solver,
         )
         Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
         return Nk, Mk, Gc
@@ -159,12 +151,17 @@ def run_python_solver(label, solver, use_ppm=False, verbose=True):
     # JIT warmup
     _ = step(Nk, Mk, Gc)
 
-    # Storage: hourly (25 snapshots) + full-resolution Nk (1441 snapshots)
+    # Storage: hourly snapshots + minute-resolution Nk for banana plots
+    # Minute resolution = every 6 steps at dt=10s (matching Fortran output)
+    steps_per_minute = max(1, 60 // int(DT))  # 6 at dt=10s
+    steps_per_hour = 3600 // int(DT)           # 360 at dt=10s
+    n_minutes = NHOURS * 60                     # 1440
     Nk_hourly = np.zeros((NHOURS + 1, NBINS))
     Mk_hourly = np.zeros((NHOURS + 1, NBINS, ICOMP))
     Gc_hourly = np.zeros((NHOURS + 1, N_GAS_SPECIES))
-    Nk_full = np.zeros((NSTEPS + 1, NBINS))
+    Nk_full = np.zeros((n_minutes + 1, NBINS))
 
+    # Initial state
     Nk_hourly[0] = np.array(Nk)
     Mk_hourly[0] = np.array(Mk)
     Gc_hourly[0] = np.array(Gc)
@@ -173,12 +170,20 @@ def run_python_solver(label, solver, use_ppm=False, verbose=True):
     t0 = time.time()
     for i in range(NSTEPS):
         Nk, Mk, Gc = step(Nk, Mk, Gc)
-        Nk_full[i + 1] = np.array(Nk)
-        if (i + 1) % 60 == 0:
-            hr = (i + 1) // 60
+
+        # Minute-resolution Nk (every 6 steps at dt=10s)
+        if (i + 1) % steps_per_minute == 0:
+            imin = (i + 1) // steps_per_minute
+            if imin <= n_minutes:
+                Nk_full[imin] = np.array(Nk)
+
+        # Hourly snapshot
+        if (i + 1) % steps_per_hour == 0:
+            hr = (i + 1) // steps_per_hour
             Nk_hourly[hr] = np.array(Nk)
             Mk_hourly[hr] = np.array(Mk)
             Gc_hourly[hr] = np.array(Gc)
+
     wall_time = time.time() - t0
 
     if verbose:
@@ -200,8 +205,8 @@ def run_all(verbose=True):
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     print("=" * 72)
-    print(f"SOA Solver Comparison — {NHOURS}h, {NBINS} bins")
-    print("  Solvers: sequential (use_ppm=False), coupled (use_ppm=False)")
+    print(f"SOA Solver Comparison -- {NHOURS}h (dt={DT:.0f}s), {NBINS} bins")
+    print("  Solvers: sequential (TFL), PPM sequential, coupled")
     print("  Reference: Fortran soacond.f (top-hat)")
     print("=" * 72)
 
@@ -209,8 +214,10 @@ def run_all(verbose=True):
         sc = SCENARIOS[label]
         print(f"\n  Scenario {sc['label']}")
 
-        seq = run_python_solver(label, 'sequential', use_ppm=False, verbose=verbose)
-        coup = run_python_solver(label, 'coupled', use_ppm=False, verbose=verbose)
+        seq = run_python_solver(label, 'sequential', redistribution='tfl',
+                                verbose=verbose)
+        coup = run_python_solver(label, 'coupled', redistribution='tfl',
+                                 verbose=verbose)
 
         fname = os.path.join(RESULTS_DIR,
                              f'soa_comparison_{label}_{NBINS}bin.npz')
@@ -233,17 +240,18 @@ def run_all(verbose=True):
 # =========================================================================
 
 def _load_fortran_minute_Nk(label):
-    """Load minute-resolution Nk from Fortran CSV files.
+    """Load minute-resolution Nk from Fortran CSV files (0..1440).
 
-    Returns array (NSTEPS+1, NBINS) or None if files don't exist.
+    The Fortran writes every-minute Nk as sX_soa_min{imin:04d}_Nk.csv.
+    Returns (1441, NBINS) or None if files are missing.
     """
-    # Check first file
+    n_minutes = NHOURS * 60  # 1440
     f0 = os.path.join(FORTRAN_DIR, f'{label}_soa_min0000_Nk.csv')
     if not os.path.exists(f0):
         return None
 
-    Nk_full = np.zeros((NSTEPS + 1, NBINS))
-    for i in range(NSTEPS + 1):
+    Nk_full = np.zeros((n_minutes + 1, NBINS))
+    for i in range(n_minutes + 1):
         fname = os.path.join(FORTRAN_DIR,
                              f'{label}_soa_min{i:04d}_Nk.csv')
         if not os.path.exists(fname):
@@ -258,14 +266,15 @@ def _load_fortran_minute_Nk(label):
 def _load_results(label):
     """Load Fortran + both Python solver results.
 
-    Returns (fort, seq, coup) dicts with keys Nk, Mk, Gc[, Nk_full,
-    wall_time_s].
+    Returns (fort, seq, coup) dicts with keys Nk, Mk, Gc, Nk_full,
+    wall_time_s.
     """
-    # Fortran (hourly + minute Nk)
+    # Fortran hourly snapshots via benchmark_soa loader
     fort = load_fortran_scenario(label)
+    # Add minute-level Nk for banana plots
     fort['Nk_full'] = _load_fortran_minute_Nk(label)
 
-    # Python
+    # Python solvers
     fname = os.path.join(RESULTS_DIR,
                          f'soa_comparison_{label}_{NBINS}bin.npz')
     if not os.path.exists(fname):
@@ -278,14 +287,14 @@ def _load_results(label):
         'Nk': d['seq_Nk'],
         'Mk': d['seq_Mk'],
         'Gc': d['seq_Gc'],
-        'Nk_full': d.get('seq_Nk_full', None),
+        'Nk_full': d.get('seq_Nk_full'),
         'wall_time_s': float(d['seq_wall_time']),
     }
     coup = {
         'Nk': d['coup_Nk'],
         'Mk': d['coup_Mk'],
         'Gc': d['coup_Gc'],
-        'Nk_full': d.get('coup_Nk_full', None),
+        'Nk_full': d.get('coup_Nk_full'),
         'wall_time_s': float(d['coup_wall_time']),
     }
     return fort, seq, coup
@@ -306,8 +315,14 @@ def _dM_dlogDp(Mk_snap, dlogDp):
     return M_dry / BOXVOL / dlogDp
 
 
+def _fort_dM_dlogDp(Mk_snap, dlogDp):
+    """dM_dry/dlogDp for Fortran Mk (44 species, same indexing as Python)."""
+    M_dry = np.sum(Mk_snap[:, :SRTH2O], axis=1)
+    return M_dry / BOXVOL / dlogDp
+
+
 # =========================================================================
-# Figure 1: dN/dlogDp (log-log) at 0, 6, 12, 24 h
+# Figure 1: dN/dlogDp (log-log) -- 4 snapshots x 2 scenarios
 # =========================================================================
 
 def plot_fig1_sizedist_log():
@@ -317,42 +332,36 @@ def plot_fig1_sizedist_log():
     xk_np = _make_xk_np()
     dp = _dp_midpoints(xk_np) * 1e9
     dlogDp = _dlogDp(xk_np)
-    times = [0, 6, 12, 24]
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True, sharey='row')
-    fig.suptitle('Size Distribution (dN/dlogDp) — log-log',
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8),
+                             sharex=True, sharey='row')
+    fig.suptitle('Size Distribution (dN/dlogDp) -- log-log',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
-            # Fortran (thick gray background)
-            dN_f = _dN_dlogDp(fort['Nk'][hr], dlogDp)
-            ax.loglog(dp, dN_f, **LS_FORTRAN)
-
-            # Sequential
-            dN_s = _dN_dlogDp(seq['Nk'][hr], dlogDp)
-            ax.loglog(dp, dN_s, **LS_SEQ)
-
-            # Coupled
-            dN_c = _dN_dlogDp(coup['Nk'][hr], dlogDp)
-            ax.loglog(dp, dN_c, **LS_COUP)
+            ax.loglog(dp, _dN_dlogDp(fort['Nk'][hr], dlogDp), **LS_FORTRAN)
+            ax.loglog(dp, _dN_dlogDp(seq['Nk'][hr], dlogDp), **LS_SEQ)
+            ax.loglog(dp, _dN_dlogDp(coup['Nk'][hr], dlogDp), **LS_COUP)
 
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\ndN/dlogDp [#/cm³]', fontsize=9)
+                ax.set_ylabel(f'{sc["label"]}\ndN/dlogDp [#/cm\u00b3]',
+                              fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
                 ax.set_xlabel('Dp [nm]')
             ax.set_xlim(1, 2e4)
 
     _make_legend(fig)
-    fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+    fig.tight_layout(rect=[0, 0, 0.92, 0.96])
     return fig
 
 
@@ -367,40 +376,37 @@ def plot_fig2_sizedist_linear():
     xk_np = _make_xk_np()
     dp = _dp_midpoints(xk_np) * 1e9
     dlogDp = _dlogDp(xk_np)
-    times = [0, 6, 12, 24]
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True, sharey='row')
-    fig.suptitle('Size Distribution (dN/dlogDp) — linear y',
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8),
+                             sharex=True, sharey='row')
+    fig.suptitle('Size Distribution (dN/dlogDp) -- linear y',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
-            dN_f = _dN_dlogDp(fort['Nk'][hr], dlogDp)
-            ax.plot(dp, dN_f, **LS_FORTRAN)
-
-            dN_s = _dN_dlogDp(seq['Nk'][hr], dlogDp)
-            ax.plot(dp, dN_s, **LS_SEQ)
-
-            dN_c = _dN_dlogDp(coup['Nk'][hr], dlogDp)
-            ax.plot(dp, dN_c, **LS_COUP)
+            ax.plot(dp, _dN_dlogDp(fort['Nk'][hr], dlogDp), **LS_FORTRAN)
+            ax.plot(dp, _dN_dlogDp(seq['Nk'][hr], dlogDp), **LS_SEQ)
+            ax.plot(dp, _dN_dlogDp(coup['Nk'][hr], dlogDp), **LS_COUP)
 
             ax.set_xscale('log')
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\ndN/dlogDp [#/cm³]', fontsize=9)
+                ax.set_ylabel(f'{sc["label"]}\ndN/dlogDp [#/cm\u00b3]',
+                              fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
                 ax.set_xlabel('Dp [nm]')
             ax.set_xlim(1, 2e4)
 
     _make_legend(fig)
-    fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+    fig.tight_layout(rect=[0, 0, 0.92, 0.96])
     return fig
 
 
@@ -415,22 +421,21 @@ def plot_fig3_massdist_log():
     xk_np = _make_xk_np()
     dp = _dp_midpoints(xk_np) * 1e9
     dlogDp = _dlogDp(xk_np)
-    times = [0, 6, 12, 24]
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True, sharey='row')
-    fig.suptitle('Mass Distribution (dM_dry/dlogDp) — log-log',
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8),
+                             sharex=True, sharey='row')
+    fig.suptitle('Mass Distribution (dM_dry/dlogDp) -- log-log',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
-            # Fortran dry mass: species 0..41 (Fortran has 43 species; H2O=42 excluded)
-            Mk_f_dry = np.sum(fort['Mk'][hr, :, :42], axis=1)
-            dM_f = Mk_f_dry / BOXVOL / dlogDp
+            dM_f = _fort_dM_dlogDp(fort['Mk'][hr], dlogDp)
             ax.loglog(dp, np.maximum(dM_f, 1e-30), **LS_FORTRAN)
 
             dM_s = _dM_dlogDp(seq['Mk'][hr], dlogDp)
@@ -442,7 +447,7 @@ def plot_fig3_massdist_log():
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\ndM_dry/dlogDp [kg/cm³]',
+                ax.set_ylabel(f'{sc["label"]}\ndM_dry/dlogDp [kg/cm\u00b3]',
                               fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
@@ -450,7 +455,7 @@ def plot_fig3_massdist_log():
             ax.set_xlim(1, 2e4)
 
     _make_legend(fig)
-    fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+    fig.tight_layout(rect=[0, 0, 0.92, 0.96])
     return fig
 
 
@@ -465,21 +470,21 @@ def plot_fig4_massdist_linear():
     xk_np = _make_xk_np()
     dp = _dp_midpoints(xk_np) * 1e9
     dlogDp = _dlogDp(xk_np)
-    times = [0, 6, 12, 24]
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True, sharey='row')
-    fig.suptitle('Mass Distribution (dM_dry/dlogDp) — linear y',
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8),
+                             sharex=True, sharey='row')
+    fig.suptitle('Mass Distribution (dM_dry/dlogDp) -- linear y',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
-            Mk_f_dry = np.sum(fort['Mk'][hr, :, :42], axis=1)
-            dM_f = Mk_f_dry / BOXVOL / dlogDp
+            dM_f = _fort_dM_dlogDp(fort['Mk'][hr], dlogDp)
             ax.plot(dp, dM_f, **LS_FORTRAN)
 
             dM_s = _dM_dlogDp(seq['Mk'][hr], dlogDp)
@@ -492,7 +497,7 @@ def plot_fig4_massdist_linear():
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\ndM_dry/dlogDp [kg/cm³]',
+                ax.set_ylabel(f'{sc["label"]}\ndM_dry/dlogDp [kg/cm\u00b3]',
                               fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
@@ -500,7 +505,7 @@ def plot_fig4_massdist_linear():
             ax.set_xlim(1, 2e4)
 
     _make_legend(fig)
-    fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+    fig.tight_layout(rect=[0, 0, 0.92, 0.96])
     return fig
 
 
@@ -512,11 +517,11 @@ def plot_fig5_gas_evolution():
     import matplotlib.pyplot as plt
     _apply_rcparams()
 
-    hours = np.arange(NHOURS + 1)
+    hours = np.arange(NHOURS + 1, dtype=float)
     cstar_labels = ['0.01', '0.1', '1', '10', '100', '1000']
 
     fig, axes = plt.subplots(2, 6, figsize=(24, 8), sharex=True)
-    fig.suptitle('VBS Gas-Phase Evolution — Gc(t) per C* bin',
+    fig.suptitle('VBS Gas-Phase Evolution -- Gc(t) per C* bin',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
@@ -525,17 +530,16 @@ def plot_fig5_gas_evolution():
 
         for col in range(N_VBS):
             ax = axes[row, col]
-            # Fortran index: species 1..6 in 43-element Gc
-            f_idx = 1 + col
-            # Python index
-            p_idx = SRTORG1 + col
+            f_idx = 1 + col       # Fortran 0-indexed VBS species
+            p_idx = SRTORG1 + col  # Python VBS species
 
             ax.semilogy(hours, fort['Gc'][:, f_idx], **LS_FORTRAN)
             ax.semilogy(hours, seq['Gc'][:, p_idx], **LS_SEQ)
             ax.semilogy(hours, coup['Gc'][:, p_idx], **LS_COUP)
 
             if row == 0:
-                ax.set_title(f"C*={cstar_labels[col]} µg/m³", fontsize=10)
+                ax.set_title(f"C*={cstar_labels[col]} \u00b5g/m\u00b3",
+                             fontsize=10)
             if col == 0:
                 ax.set_ylabel(f'{sc["label"]}\nGc [kg/cell]', fontsize=9)
                 _add_conditions(ax, sc)
@@ -548,59 +552,94 @@ def plot_fig5_gas_evolution():
 
 
 # =========================================================================
-# Figure 6: VBS particle mass grouped bars
+# Figure 6: VBS particle mass bars at 4 snapshots
 # =========================================================================
 
 def plot_fig6_vbs_particle():
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
     _apply_rcparams()
 
-    times = [0, 6, 12, 24]
     cstar_labels = ['0.01', '0.1', '1', '10', '100', '1000']
     x = np.arange(N_VBS)
     w = 0.25
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8))
-    fig.suptitle('VBS Particle-Phase Mass per Bin',
+    # Solver colors matching line styles
+    solver_colors = {
+        'Fortran':    ('#bbbbbb', '#666666'),
+        'Sequential': ('#1f77b4', '#0d4a7a'),
+        'Coupled':    ('#d62728', '#8b1a1a'),
+    }
+
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8))
+    fig.suptitle('VBS Mass Budget -- Particle (solid) + Gas (hatched)',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
-            # Fortran
-            fort_org = np.array([np.sum(fort['Mk'][hr, :, 1 + j])
+            # --- Fortran ---
+            fort_part = np.array([np.sum(fort['Mk'][hr, :, 1 + j])
+                                  for j in range(N_VBS)])
+            fort_gas = np.array([fort['Gc'][hr, 1 + j]
                                  for j in range(N_VBS)])
-            ax.bar(x - w, fort_org, w, color='#bbbbbb', edgecolor='#666666',
-                   label='Fortran')
+            fc, fe = solver_colors['Fortran']
+            ax.bar(x - w, fort_part, w,
+                   color=fc, edgecolor=fe)
+            ax.bar(x - w, fort_gas, w, bottom=fort_part,
+                   color=fc, edgecolor=fe, hatch='///', alpha=0.5)
 
-            # Sequential
-            seq_org = np.array([np.sum(seq['Mk'][hr, :, SRTORG1 + j])
+            # --- Sequential ---
+            seq_part = np.array([np.sum(seq['Mk'][hr, :, SRTORG1 + j])
+                                 for j in range(N_VBS)])
+            seq_gas = np.array([seq['Gc'][hr, SRTORG1 + j]
                                 for j in range(N_VBS)])
-            ax.bar(x, seq_org, w, color='#1f77b4', edgecolor='#0d4a7a',
-                   label='Sequential')
+            sc2, se = solver_colors['Sequential']
+            ax.bar(x, seq_part, w,
+                   color=sc2, edgecolor=se)
+            ax.bar(x, seq_gas, w, bottom=seq_part,
+                   color=sc2, edgecolor=se, hatch='///', alpha=0.5)
 
-            # Coupled
-            coup_org = np.array([np.sum(coup['Mk'][hr, :, SRTORG1 + j])
+            # --- Coupled ---
+            coup_part = np.array([np.sum(coup['Mk'][hr, :, SRTORG1 + j])
+                                  for j in range(N_VBS)])
+            coup_gas = np.array([coup['Gc'][hr, SRTORG1 + j]
                                  for j in range(N_VBS)])
-            ax.bar(x + w, coup_org, w, color='#d62728', edgecolor='#8b1a1a',
-                   label='Coupled')
+            cc, ce = solver_colors['Coupled']
+            ax.bar(x + w, coup_part, w,
+                   color=cc, edgecolor=ce)
+            ax.bar(x + w, coup_gas, w, bottom=coup_part,
+                   color=cc, edgecolor=ce, hatch='///', alpha=0.5)
 
             ax.set_xticks(x)
-            ax.set_xticklabels(cstar_labels, fontsize=8)
-            ax.ticklabel_format(axis='y', style='scientific', scilimits=(-2, 2))
+            ax.set_xticklabels(cstar_labels, fontsize=8, rotation=45)
+            ax.ticklabel_format(axis='y', style='scientific',
+                                scilimits=(-2, 2))
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\nMk_org [kg/cell]', fontsize=9)
+                ax.set_ylabel(f'{sc["label"]}\nMass [kg/cell]', fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
-                ax.set_xlabel('C* [µg/m³]')
+                ax.set_xlabel('C* [\u00b5g/m\u00b3]')
             if row == 0 and col == 0:
-                ax.legend(fontsize=8)
+                ax.legend(handles=[
+                    Patch(facecolor='#bbbbbb', edgecolor='#666666',
+                          label='Fortran'),
+                    Patch(facecolor='#1f77b4', edgecolor='#0d4a7a',
+                          label='Sequential'),
+                    Patch(facecolor='#d62728', edgecolor='#8b1a1a',
+                          label='Coupled'),
+                    Patch(facecolor='white', edgecolor='gray',
+                          label='Particle'),
+                    Patch(facecolor='white', edgecolor='gray',
+                          hatch='///', alpha=0.5, label='Gas'),
+                ], fontsize=6, loc='upper left')
 
     fig.tight_layout()
     return fig
@@ -623,43 +662,50 @@ def plot_fig7_banana():
 
     solver_names = ['Fortran', 'Sequential', 'Coupled']
 
-    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
-    fig.suptitle('Banana Plots — dN/dlogDp evolution (60 s resolution)',
+    fig, axes = plt.subplots(2, 3, figsize=(20, 8))
+    fig.suptitle(f'Banana Plots -- dN/dlogDp evolution ({NHOURS}h)',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        # Minute-resolution time edges (shared by all solvers that have it)
-        t_min_h = np.arange(NSTEPS + 1) * (DT / 3600.0)
-        te_min = np.concatenate([t_min_h - DT / 7200.0,
-                                 [t_min_h[-1] + DT / 7200.0]])
-        te_hourly = np.arange(NHOURS + 2) - 0.5
+        # Time edges in hours (1-minute resolution = n_minutes+1 points)
+        n_minutes = NHOURS * 60  # 1440
+        dt_min_h = 1.0 / 60.0   # 1 minute in hours
+        t_h = np.arange(n_minutes + 1) * dt_min_h
+        te_h = np.concatenate([t_h - dt_min_h / 2, [t_h[-1] + dt_min_h / 2]])
 
-        # Build per-solver dN arrays + time edges
-        def _pick_full(data):
-            if data.get('Nk_full') is not None:
-                return (data['Nk_full'] / BOXVOL / dlogDp[np.newaxis, :],
-                        te_min)
-            return (data['Nk'] / BOXVOL / dlogDp[np.newaxis, :],
-                    te_hourly)
+        # Build per-solver dN/dlogDp arrays
+        def _make_dN(data):
+            Nk_f = data.get('Nk_full')
+            if Nk_f is not None and Nk_f.shape[0] == n_minutes + 1:
+                return Nk_f / BOXVOL / dlogDp[np.newaxis, :]
+            # Fallback: use hourly snapshots (coarser)
+            return data['Nk'] / BOXVOL / dlogDp[np.newaxis, :]
 
-        dN_fort, te_fort = _pick_full(fort)
-        dN_seq, te_seq = _pick_full(seq)
-        dN_coup, te_coup = _pick_full(coup)
+        dN_fort = _make_dN(fort)
+        dN_seq = _make_dN(seq)
+        dN_coup = _make_dN(coup)
 
         # Shared vmin/vmax from Fortran reference
         vmax = np.max(dN_fort[dN_fort > 0]) if np.any(dN_fort > 0) else 1.0
         vmin = vmax * 1e-4
 
         all_dN = [dN_fort, dN_seq, dN_coup]
-        all_te = [te_fort, te_seq, te_coup]
 
-        for col, (dN, te, sname) in enumerate(
-                zip(all_dN, all_te, solver_names)):
+        for col, (dN, sname) in enumerate(zip(all_dN, solver_names)):
             ax = axes[row, col]
             dN_safe = np.maximum(dN, vmin * 0.1)
+
+            # Choose time edges based on data resolution
+            if dN.shape[0] == n_minutes + 1:
+                te = te_h
+            else:
+                # Hourly snapshots
+                th = np.arange(dN.shape[0], dtype=float)
+                dth = 0.5
+                te = np.concatenate([th - dth, [th[-1] + dth]])
 
             pcm = ax.pcolormesh(
                 te, dp_edges, dN_safe.T,
@@ -677,12 +723,13 @@ def plot_fig7_banana():
             if row == 1:
                 ax.set_xlabel('Time [h]')
 
-        # Shared colorbar per row
-        cbar = fig.colorbar(pcm, ax=axes[row, :].tolist(), shrink=0.8,
-                            pad=0.02)
-        cbar.set_label('dN/dlogDp [#/cm³]', fontsize=9)
+        # Colorbar for each row
+        bbox = axes[row, 2].get_position()
+        cax = fig.add_axes([0.90, bbox.y0, 0.015, bbox.height])
+        cbar = fig.colorbar(pcm, cax=cax)
+        cbar.set_label('dN/dlogDp [#/cm\u00b3]', fontsize=9)
 
-    fig.subplots_adjust(left=0.05, right=0.92, top=0.93, bottom=0.08,
+    fig.subplots_adjust(left=0.05, right=0.88, top=0.93, bottom=0.08,
                         wspace=0.15, hspace=0.25)
     return fig
 
@@ -695,13 +742,13 @@ def plot_fig8_totals():
     import matplotlib.pyplot as plt
     _apply_rcparams()
 
-    hours = np.arange(NHOURS + 1)
+    hours = np.arange(NHOURS + 1, dtype=float)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     fig.suptitle('Total Number & Dry Mass Timeseries',
                  fontsize=14, fontweight='bold', y=0.98)
 
-    col_labels = ['N_total [#/cm³]', 'M_dry [kg/cell]']
+    col_labels = ['N_total [#/cm\u00b3]', 'M_dry [kg/cell]']
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
@@ -713,17 +760,18 @@ def plot_fig8_totals():
         N_c = np.sum(coup['Nk'], axis=1) / BOXVOL
 
         ax = axes[row, 0]
-        ax.semilogy(hours, N_f, **LS_FORTRAN)
-        ax.semilogy(hours, N_s, **LS_SEQ)
-        ax.semilogy(hours, N_c, **LS_COUP)
+        ax.plot(hours, N_f, **LS_FORTRAN)
+        ax.plot(hours, N_s, **LS_SEQ)
+        ax.plot(hours, N_c, **LS_COUP)
         if row == 0:
             ax.set_title(col_labels[0], fontsize=11)
         ax.set_ylabel(f'{sc["label"]}', fontsize=9)
         if row == 1:
             ax.set_xlabel('Hours')
+        _add_conditions(ax, sc)
 
         # M_dry
-        M_f = np.sum(fort['Mk'][:, :, :42], axis=(1, 2))
+        M_f = np.sum(fort['Mk'][:, :, :SRTH2O], axis=(1, 2))
         M_s = np.sum(seq['Mk'][:, :, :SRTH2O], axis=(1, 2))
         M_c = np.sum(coup['Mk'][:, :, :SRTH2O], axis=(1, 2))
 
@@ -736,17 +784,14 @@ def plot_fig8_totals():
         if row == 1:
             ax.set_xlabel('Hours')
 
-        # Wall-time annotation
+        # Wall time annotation
+        seq_t = seq['wall_time_s']
+        coup_t = coup['wall_time_s']
         ax.text(0.03, 0.03,
-                f"Wall: seq={seq['wall_time_s']:.2f}s, "
-                f"coup={coup['wall_time_s']:.2f}s",
+                f"Wall: seq={seq_t:.2f}s, coup={coup_t:.2f}s",
                 transform=ax.transAxes, fontsize=8,
                 bbox=dict(boxstyle='round,pad=0.2',
                           facecolor='lightyellow', alpha=0.8))
-
-        # Conditions text on left panel
-        if row == 0 or row == 1:
-            _add_conditions(axes[row, 0], sc)
 
     _make_legend(fig)
     fig.tight_layout(rect=[0, 0, 0.88, 0.96])
@@ -754,7 +799,7 @@ def plot_fig8_totals():
 
 
 # =========================================================================
-# Figure 9: Relative error vs Fortran at 4 snapshots
+# Figure 9: Relative error vs Fortran
 # =========================================================================
 
 def plot_fig9_relerror():
@@ -764,39 +809,41 @@ def plot_fig9_relerror():
     xk_np = _make_xk_np()
     dp = _dp_midpoints(xk_np) * 1e9
     dlogDp = _dlogDp(xk_np)
-    times = [0, 6, 12, 24]
 
-    fig, axes = plt.subplots(2, 4, figsize=(20, 8), sharex=True)
-    fig.suptitle('Per-Bin Relative Error vs Fortran — dN/dlogDp',
+    n_cols = len(SNAP_HOURS)
+    fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols, 8),
+                             sharex=True)
+    fig.suptitle('Per-Bin Relative Error vs Fortran -- dN/dlogDp',
                  fontsize=14, fontweight='bold', y=0.98)
 
     for row, label in enumerate(SCENARIO_ORDER):
         sc = SCENARIOS[label]
         fort, seq, coup = _load_results(label)
 
-        for col, hr in enumerate(times):
+        for col, hr in enumerate(SNAP_HOURS):
             ax = axes[row, col]
 
             dN_f = _dN_dlogDp(fort['Nk'][hr], dlogDp)
             dN_s = _dN_dlogDp(seq['Nk'][hr], dlogDp)
             dN_c = _dN_dlogDp(coup['Nk'][hr], dlogDp)
 
-            # Threshold: only where Fortran has significant signal
+            # Only where Fortran has significant signal
             threshold = np.max(dN_f) * 1e-4
             denom = np.maximum(np.abs(dN_f), threshold)
             active = dN_f > threshold
 
             err_s = np.full(NBINS, np.nan)
             err_c = np.full(NBINS, np.nan)
-            err_s[active] = (dN_s[active] - dN_f[active]) / denom[active]
-            err_c[active] = (dN_c[active] - dN_f[active]) / denom[active]
+            err_s[active] = ((dN_s[active] - dN_f[active])
+                             / denom[active])
+            err_c[active] = ((dN_c[active] - dN_f[active])
+                             / denom[active])
 
             ax.semilogx(dp, err_s * 100, color=LS_SEQ['color'],
-                        ls='--', lw=2, marker='o', ms=3, label='Sequential')
+                        ls='--', lw=2, marker='o', ms=3)
             ax.semilogx(dp, err_c * 100, color=LS_COUP['color'],
-                        ls='-', lw=2, marker='s', ms=3, label='Coupled')
+                        ls='-', lw=2, marker='s', ms=3)
 
-            # Reference lines
             ax.axhline(0, color='k', ls='-', lw=0.5)
             for pct in [10, -10, 50, -50]:
                 ax.axhline(pct, color='gray', ls=':', lw=0.5, alpha=0.5)
@@ -804,13 +851,13 @@ def plot_fig9_relerror():
             if row == 0:
                 ax.set_title(f't = {hr}h', fontsize=11)
             if col == 0:
-                ax.set_ylabel(f'{sc["label"]}\nRelative error [%]', fontsize=9)
+                ax.set_ylabel(f'{sc["label"]}\nRelative error [%]',
+                              fontsize=9)
                 _add_conditions(ax, sc)
             if row == 1:
                 ax.set_xlabel('Dp [nm]')
             ax.set_xlim(1, 2e4)
 
-    # Legend for error plots (sequential + coupled only)
     from matplotlib.lines import Line2D
     err_handles = [
         Line2D([0], [0], color=LS_SEQ['color'], ls='--', lw=2,
@@ -820,7 +867,7 @@ def plot_fig9_relerror():
     ]
     fig.legend(handles=err_handles, loc='upper right', fontsize=11,
                framealpha=0.9)
-    fig.tight_layout(rect=[0, 0, 0.88, 0.96])
+    fig.tight_layout(rect=[0, 0, 0.92, 0.96])
     return fig
 
 

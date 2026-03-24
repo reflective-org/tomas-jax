@@ -421,7 +421,7 @@ Nk, Mk, Gc, boxvol = step_fn(
 
     # SOA condensation
     vbs_config=DEFAULT_VBS_CONFIG,
-    soa_use_ppm=True,
+    soa_redistribution='tfl',  # 'tfl', 'ppm', or 'direct'
 
     # Dilution
     kdil=1e-4,             # [s⁻¹]
@@ -534,7 +534,7 @@ for i in range(1440):
 | | Mk_bg_conc | kg/cm³ | Optional | None (clean) | kwarg |
 | | Gc_bg_conc | kg/cm³ | Optional | None (clean) | kwarg |
 | **VBS config** | vbs_config | VBSConfig | No | DEFAULT_VBS_CONFIG | kwarg |
-| | soa_use_ppm | bool | No | True | kwarg |
+| | soa_redistribution | str | No | 'tfl' | kwarg/make_step |
 | **Build opts** | processes | list | Yes | — | make_step |
 | | cond_method | str | No | 'ppm_jit' | make_step |
 | | nucl_scheme | str | No | 'ricco_dunne' | make_step |
