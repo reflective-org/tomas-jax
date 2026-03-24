@@ -122,6 +122,62 @@ A single TOMAS state (40 bins, 44 components) is small:
 
 The main memory consumer is the coagulation kernel matrix (40 x 40 = 1,600 entries). Even with 1000 vmap'd scenarios, total GPU memory is < 100 MB. Memory is not a constraint.
 
+## Performance Optimization Opportunities
+
+Current CPU performance baseline (single scenario, 24h at dt=60s, 1440 steps):
+
+| Component | JAX (CPU) | Fortran | Ratio |
+|-----------|-----------|---------|-------|
+| Coagulation (Euler) | ~0.15s | ~0.27s | **0.57x** (JAX faster) |
+| Condensation (PPM JIT) | ~0.26s | ~0.08s | 3.4x slower |
+| Combined (Euler+PPM) | ~0.41s | ~0.33s | 1.27x slower |
+
+### 1. GPU execution (highest impact)
+
+The single biggest speedup. The N^2 coagulation kernel and vectorized condensation
+map naturally to GPU parallelism. All JIT-compiled paths are GPU-ready after the
+audit (centralized float64, no None defaults, no inline imports).
+
+```bash
+JAX_PLATFORMS=gpu python run_box_model.py --make-step
+```
+
+Use datacenter GPUs (A100, H100, MI250X) for float64 workloads. Consumer GPUs
+throttle float64 to 1/32 of float32 throughput.
+
+### 2. `jax.vmap` for ensemble/batch runs (high impact)
+
+When running 50+ scenarios (Monte Carlo, parameter sweeps, LHC benchmarks),
+`vmap` batches them into a single GPU kernel instead of sequential Python calls.
+Expected 10–50x speedup for batch processing. See the [vmap section](#batch-processing-with-vmap) above.
+
+### 3. Scan-fused time loops (moderate impact, already available)
+
+The scan-fused functions (`run_full_scan`, `run_combined_scan_ppm`, etc.) compile
+the entire 1440-step time loop into a single XLA program, eliminating all Python
+dispatch overhead between timesteps. These are already implemented and should be
+preferred over Python `while` loops calling `make_step` per timestep.
+
+For custom process combinations, wrap `make_step` in `jax.lax.scan`:
+
+```python
+step_fn = make_step(['nucleation', 'coagulation', 'condensation'])
+
+def scan_body(carry, _):
+    Nk, Mk, Gc = carry
+    Gc = Gc.at[SRTSO4].add(prod_rate * dt)
+    Nk, Mk, Gc = step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                           org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+    return (Nk, Mk, Gc), jnp.sum(Nk)
+
+(Nk_f, Mk_f, Gc_f), N_history = jax.lax.scan(scan_body, (Nk, Mk, Gc), None, length=1440)
+```
+
+### Not recommended
+
+- **Reducing MNFIX calls**: MNFIX enforces mass-number consistency after each process. Removing calls risks silent drift that compounds over 1440 steps, especially after nucleation creates particles far from bin centers. The cost of MNFIX is small compared to coagulation/condensation.
+- **Mixed float32/float64 precision**: Aerosol microphysics requires float64 throughout. Condensation sink thresholds, mass conservation at 1e-15, and MNFIX bin boundary comparisons all depend on full precision. Float32 intermediates would introduce subtle mass errors that accumulate over 24h simulations and corrupt size distributions. The 2x memory savings is irrelevant (total state is <100 KB).
+
 ## Known Limitations
 
 - **No multi-GPU**: TOMAS-JAX does not use `jax.pmap` or sharding. For multi-GPU, use `vmap` on a single GPU and `pmap` across GPUs for independent scenarios.
