@@ -4,6 +4,221 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-03-23 (Sun) — PPM Redistribution for SOA Condensation
+
+**Time**: late evening PST
+
+### Summary
+Added PPM redistribution as an option for the sequential SOA solver. Renamed the confusing `use_ppm` parameter (which actually called TFL!) to `redistribution` with clear values: `'tfl'`, `'ppm'`, `'direct'`. PPM follows the existing H2SO4 ezcond_ppm_jax pattern: transport first, then mass addition.
+
+### Files Modified
+- `tomas_jax/physics/soa_condensation.py`: Renamed `use_ppm` → `redistribution` in `soa_condensation_step`, `_soa_sequential`, `_condense_one_species`. Added PPM branch using `ppm_condensation_step`. Backward compat for old `use_ppm` kwarg.
+- `tomas_jax/solvers/condensation.py`: Added `soa_redistribution='tfl'` to `make_step()`. Backward compat for old `soa_use_ppm` kwarg.
+- `tests/test_soa_condensation.py`: Renamed existing `use_ppm` params. Added `TestPPMRedistribution` class (8 tests: mass conservation, number conservation, gas depletion, same direction as TFL, non-negative mass, invalid name raises, backward compat, make_step integration).
+- `benchmarks/python/compare_soa_solvers.py`: 4-way comparison (Fortran, Seq TFL, Seq PPM, Coupled). PPM curves on all 9 figures, banana plot 2×4 layout.
+- `benchmarks/python/benchmark_soa.py`: Updated to `redistribution='tfl'`.
+- `docs/soa_vbs.md`: Redistribution options table, updated solver docs, usage examples, benchmark description, test count (58).
+- `CLAUDE.md`: SOA section updated with `redistribution`/`soa_redistribution` params.
+
+### Verification
+- 58/58 SOA tests pass (50 existing + 8 new PPM tests)
+
+### Known Limitations
+- PPM sequential has not been benchmarked against Fortran yet (run `compare_soa_solvers.py --run` to generate figures)
+
+---
+
+## 2026-03-23 (Sun) — SOA Cleanup: Debug Removal, Docs Update
+
+**Time**: evening PST
+
+### Summary
+Cleanup after SOA divergence investigation. Removed 17 debug scripts, cleaned debug code from Fortran `soacond.f` (kept all bug fixes), updated `docs/soa_vbs.md` with TFL sensitivity findings and Fortran fix notes, removed leftover debug CSV files.
+
+### Files Modified
+- Removed 13 debug scripts from project root (`debug_*.py`)
+- Removed 4 debug scripts from `benchmarks/python/` (`debug_*.py`)
+- `tomas_fortran/src/soacond.f`: Removed debug dump code (debug_dump flag, density_k array, 3 CSV dump blocks). Kept all bug fixes (Fuller D_g, 0.283 Fuchs, cstar_T in Kgkk, Kelvin 4σ).
+- `docs/soa_vbs.md`: Updated "Known Differences" section to reflect that D_g, Fuchs, cstar_T are now fixed in Fortran. Added TFL Size-Distribution Sensitivity section. Added Benchmark section. Updated test count (50 tests).
+- Removed `tomas_fortran/output/soa/debug_*.csv` (4 files)
+
+### Verification
+- Fortran compiles and runs cleanly after debug removal
+- 50/50 SOA tests pass
+
+---
+
+## 2026-03-23 (Sun) — SOA Divergence Investigation & 24h Benchmark Regeneration
+
+**Time**: afternoon PST
+
+### Summary
+Comprehensive investigation of why the Python sequential SOA solver produces bimodal size distributions while Fortran produces smooth unimodal ones. Fixed XK0_LEGACY constant, matched tmcond overflow to Fortran sequential ordering, and regenerated full 24h benchmark with all code fixes applied.
+
+### Root Cause Analysis
+1. **XK0_LEGACY was wrong**: `config.py` had `1.6033e-23` but Fortran `initbounds.f` uses `1.0e-21 * 2^(-6) = 1.5625e-23`. Fixed. This caused 2.6% error in `mp` for any code using the legacy 36-bin grid from config (benchmark scripts had the correct value already).
+
+2. **Intermediates match perfectly**: After the XK0_LEGACY fix, ALL SOA intermediates (density, mp, Dpk, Kgkk, sinkfrac, atau, CS, tk, mfp, Kelvin factor) match Fortran to machine precision (~1e-8%).
+
+3. **tmcond output matches perfectly for species 1**: Running a single VBS species through tmcond_jax produces identical output (0.0000% error) for all bins when given identical inputs.
+
+4. **TFL remapping sensitivity causes bimodal artifacts**: Over multiple species and timesteps, ULP-level floating-point differences in `jnp.power()` vs Fortran `**` compound through tmcond's discrete bin remapping, particularly at distribution tails (bins with few particles). The top-hat construction is sensitive because narrow distributions near bin boundaries produce different overlap fractions from tiny perturbations.
+
+5. **Water equilibrium helps**: With water equilibrium between species (matching Fortran), errors are smallest (RMS 33%). Without it, errors are 3x worse (RMS 107%).
+
+### Quantitative Results (24h, sA scenario)
+- **Total N**: 0.00% error — perfectly conserved (both solvers)
+- **Total dry mass**: <0.1% error at all hours
+- **Gas phase (6 VBS bins)**: <2% error at all hours
+- **Peak location**: Correct (bin 14, 73 nm) at all hours
+- **Size distribution**: Sequential solver develops oscillatory artifacts (bins emptying/filling) at distribution tails that cascade inward over hours; coupled solver produces smoother but different distributions
+
+### Performance (24h, dt=10s, 36 bins)
+- Sequential (use_ppm=True): ~95s/scenario
+- Coupled: ~8s/scenario (12x faster)
+- Fortran reference: embedded in existing data
+
+### Files Modified
+- `tomas_jax/core/config.py`: Fixed `XK0_LEGACY = 1.0e-21 * 2.0**(-6)` (was 1.6033e-23)
+- `tomas_jax/physics/condensation_tfl_jax.py`: Changed overflow cascade from vectorized single-pass to sequential `jax.lax.fori_loop` (matches Fortran `do k=1,ibins-1` loop). No impact on results — overflow isn't triggered in practice.
+- `tomas_fortran/src/soacond.f`: Added temporary debug CSV output (removed in cleanup above)
+- `benchmarks/results/soa_comparison/`: Regenerated all 9 figures + 2 NPZ files with latest code
+
+### Known Limitations
+- Sequential solver's bimodal artifact is fundamental to the TFL Lagrangian remapping: discrete bin assignment amplifies floating-point differences at tails. This is NOT a bug but a numerical sensitivity inherent to the algorithm.
+- Coupled solver produces smoother distributions but differs from Fortran because it uses Jacobi (simultaneous) rather than Gauss-Seidel (sequential) species ordering and analytical gas depletion instead of tmcond.
+- For applications where total N, total M, and gas phase matter more than exact per-bin distribution, both solvers are suitable.
+
+### Tests
+- 50/50 SOA tests pass
+- 250/251 non-SOA tests pass (1 pre-existing PPM mass conservation failure)
+
+---
+
+## 2026-03-20 (Thu) — SOA Solver Comparison Benchmark (24h, 3-way)
+
+**Time**: afternoon PST
+
+### Summary
+Implemented full 24-hour SOA solver comparison benchmark: Fortran (top-hat) vs Sequential (Gauss-Seidel) vs Coupled (Jacobi). 2 scenarios (sA: pure condensation, sB: mixed cond/evap), 36-bin legacy grid, 9 presentation-quality figures.
+
+### Files Modified
+- `tomas_fortran/harness/benchmark_soa.f`: Updated from 10-min to 24h simulation (nsteps=8640 at dt=10s, hourly snapshots, minute-level Nk for banana plots)
+- `benchmarks/python/compare_soa_solvers.py`: Complete rewrite for 24h 3-way comparison with both Python solvers using `use_ppm=False` to isolate coupling algorithm difference
+
+### Key Results
+- **Sequential solver**: 0.40-0.41s per scenario (24h, dt=60s)
+- **Coupled solver**: 1.24-1.25s per scenario (24h, dt=60s)
+- **Fortran reference**: 13.6-15.1s per scenario (24h, dt=10s)
+- Both Python solvers produce smooth distributions; Fortran shows characteristic top-hat oscillations
+- Sequential and Coupled solvers agree closely with each other
+- Gas depletion tracks match across all 3 solvers
+
+### Figures Generated (9)
+1. `fig1_sizedist_log.png` — dN/dlogDp (log-log) at 0h, 6h, 12h, 24h
+2. `fig2_sizedist_linear.png` — dN/dlogDp (semilog-x, linear y)
+3. `fig3_massdist_log.png` — dM_dry/dlogDp (log-log)
+4. `fig4_massdist_linear.png` — dM_dry/dlogDp (semilog-x, linear y)
+5. `fig5_gas_evolution.png` — VBS gas Gc(t) per C* bin
+6. `fig6_vbs_particle.png` — Grouped bar: particle mass per VBS bin
+7. `fig7_banana.png` — Banana plots (3 solvers, pcolormesh)
+8. `fig8_totals.png` — N_total(t) and M_dry(t) timeseries
+9. `fig9_relerror.png` — Per-bin relative error vs Fortran
+
+### Output
+- NPZ: `benchmarks/results/soa_comparison/soa_comparison_{sA,sB}_36bin.npz`
+- PNGs: `benchmarks/results/soa_comparison/fig{1-9}_*.png`
+
+---
+
+## 2026-03-20 (Thu) — Fix Coupled SOA Solver & Fortran Bugs
+
+**Time**: afternoon PST
+
+### Summary
+Fixed 4 Fortran soacond.f bugs and 4 Python physics bugs affecting SOA condensation accuracy. Rewrote the coupled SOA solver to eliminate numerical instability. Updated benchmark to dt=10s, 10 min, 1-min snapshots for finer diagnostics.
+
+### Fortran Bugs Fixed (`tomas_fortran/src/soacond.f`)
+1. **FC coefficient**: 0.238 → 0.283 (Seinfeld & Pandis Table 13.1)
+2. **Di diffusivity**: Kinetic-only → Fuller-Schettler-Giddings (FSG) formula
+3. **cstar_T**: Was using reference C* directly → now applies Clausius-Clapeyron T-correction
+4. **psatorg**: Was using `R*298` → now uses `R*temp` in vapor pressure calculation
+
+### Python Physics Bugs Fixed (`tomas_jax/physics/soa_condensation.py`)
+1. **Q in masseqm**: Removed Q (kinetic parameter) from thermodynamic equilibrium mass calculation
+2. **CS recomputation**: Moved condensation sink recalculation inside adaptive sub-step loop (was frozen)
+3. **atau formula**: Added m^(2/3) geometric growth integral for sequential solver mass distribution
+4. **Evaporation clamping**: Added per-bin clamp to prevent removing more mass than available
+
+### Coupled Solver Rewrite
+The coupled solver (Jacobi iteration, all 6 VBS species simultaneously) had catastrophic blow-up. Root causes:
+- atau m^(2/3) inversion incompatible with simultaneous species (collective overshoot)
+- Frozen CS/Ke/Dpk (not recomputed per sub-step)
+- No MNFIX inside sub-steps
+
+Final coupled solver design:
+- **Analytical gas depletion**: `Gc(t) = Gc_eq + (Gc_0 - Gc_eq) × exp(-CS×t)` with sinkfrac×dp distribution (no atau)
+- **CS recomputed each sub-step** from current Dpk
+- **Adaptive sub-timestep**: `cdt = min(remaining, ln(100)/max(CS))`
+- **fodc always applied** when mass_ratio > 1e-30 (not just on overshoot)
+- **Per-bin evaporation clamping**
+- **MNFIX inside each sub-step** (Nk flows through carry tuple)
+
+### Benchmark Changes
+- Fortran `benchmark_soa.f`: dt=10s, nsteps=60, snap_interval=6 (10 min total, 1-min snapshots)
+- Python `compare_soa_solvers.py`: matching parameters, 11 snapshots per scenario
+
+### Test Changes
+- `test_number_unchanged` → `test_number_conserved`: checks total N conservation (MNFIX redistributes per-bin Nk)
+
+### Verification
+- All 50 SOA tests pass
+- Sequential solver matches Fortran gas depletion across all 6 VBS bins
+- Coupled solver stable: no NaN/Inf/spikes, max dN/dlogDp lower than sequential
+- N_total perfectly stable for both solvers
+- Wall time: sequential ~0.04s, coupled ~0.05s
+
+---
+
+## 2026-03-19 (Wed) — Fix SOA Mass-Add Ordering Bug
+
+**Time**: evening PST
+
+### Summary
+Fixed a critical bug in `soa_condensation.py` where mass was added to particles AFTER PPM redistribution, causing incorrect per-bin mass assignment and catastrophic size distribution errors.
+
+### Root Cause
+In `_condense_one_species()`, the old code computed `tau` from `mass_change`, ran PPM to redistribute particles to new bins, then added `mass_change` to the post-PPM bins. This was wrong because `mass_change` was computed for the pre-PPM particle assignment — after PPM moved particles between bins, the per-bin mass_change no longer corresponded to the right particles. Larger bins gained too much mass while smaller bins lost mass they should have kept.
+
+Fortran's `soacond.f`+`tmcond.f` handles redistribution and mass addition simultaneously via the YUC/YLC formulas in the top-hat remapping. Python's PPM is a pure transport step that doesn't add new mass, so the mass addition must be explicit.
+
+### Fix
+Swapped the ordering: **add mass BEFORE PPM** (not after). This ensures particles carry their new condensed mass as PPM moves them to the correct bins. `tau` is still computed from the pre-addition state (encoding the growth forcing), which gives PPM the correct shift.
+
+```python
+# Before (buggy): PPM first, then mass_add → wrong bins get the mass
+# After (fixed): mass_add first, then PPM → particles carry new mass to correct bins
+```
+
+### Changes
+- `tomas_jax/physics/soa_condensation.py`: Reordered mass addition and PPM in `_condense_one_species()`. When `use_ppm=True`, tau computed from pre-addition state, mass added, then PPM. When `use_ppm=False`, direct mass addition (unchanged).
+
+### Verification
+- All 50 SOA condensation tests pass
+- Re-ran `compare_soa_solvers.py --run` (2 scenarios, 36-bin, 24h):
+  - Size distributions shift cleanly rightward (condensation growth) ✓
+  - VBS particle-phase mass per C* bin matches Fortran closely ✓
+  - Gas depletion curves match across all 3 solvers ✓
+  - Total dry mass evolution matches Fortran ✓
+  - Number conservation maintained ✓
+
+### Remaining Differences
+- Sequential (PPM) produces smoother distributions than Fortran (top-hat) — expected algorithmic difference
+- Per-bin distribution across size bins differs slightly: Python's dp-weighted mass distribution vs Fortran's atau formula gives different per-bin shares of the same total
+- Coupled solver shows MNFIX-driven bin transitions (sharp features in banana plot) — expected without PPM smoothing
+
+---
+
 ## 2026-03-17 (Mon) — SOA Solver Comparison Benchmark
 
 **Time**: evening PST
