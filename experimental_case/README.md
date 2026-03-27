@@ -229,4 +229,5 @@ NPZ files and 6 PNG figures in `experimental_case/results/`:
 | `plume_concentration.py` | Concentration calculator (function-based + CLI) |
 | `run_sai_simulation.py` | 96h SAI box model simulation (3 cases, 6 figures) |
 | `results/` | Output directory (NPZ data + PNG figures) |
+| `literature_review.md` | Stratospheric background aerosol literature review (Deshler 2003, Norgren 2024) |
 | `README.md` | This document |
