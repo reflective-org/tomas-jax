@@ -8,8 +8,7 @@ Reference:
     aerosols of atmospheric importance. JGR, 102, 1883-1893.
 """
 import jax
-# Enforce float64 for thermodynamics
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import NamedTuple
 

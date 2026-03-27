@@ -42,6 +42,9 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **Condensation orchestrator uses layered cores:** `_condensation_step_core(ezcond_fn)` is the single implementation for PPM/TFL; `_combined_step_core()` adds coag; `_full_step_core()` adds nucl+coag; `_run_scan()` is the single scan loop. All public functions are thin wrappers.
 - **MNFIX multi-bin shift:** Uses analytical log2 computation to find target bin for large mass shifts (e.g., nucleated particles jumping 12+ bins). Formula: `kk = ceil(log2(avg*1.1/xk[0])) - 1`.
 - **Scan-fused modes:** `run_condensation_scan_tfl()` (cond-only), `run_nucleation_condensation_scan()` (nucl+cond), `run_full_scan()` (nucl+coag+cond). All compile into single XLA programs for zero Python dispatch overhead.
+- **GPU deployment:** See `docs/gpu_deployment.md`. Use only `*_jit` methods and `make_step()`. Legacy numpy paths (`method='tfl'`, `method='ppm'`) emit `DeprecationWarning` and are not GPU-compatible. `make_step()` returns a JIT-compiled function by default (`jit=True`). For batch/ensemble runs, use `jax.vmap(step_fn)`.
+- **Centralized float64 config:** Only `core/config.py` calls `jax.config.update("jax_enable_x64", True)`. All other library modules reference it via comment. Do not add redundant x64 config calls.
+- **dilution_step requires explicit background arrays** (no `None` defaults). Pass `jnp.zeros_like(Nk)` etc. for clean-air dilution. This ensures JIT safety.
 
 ## File Layout
 
@@ -100,6 +103,7 @@ tomas_fortran/
   README.md                   — Build instructions and file descriptions
 
 docs/
+  gpu_deployment.md           — GPU deployment guide (float64, JAX_PLATFORMS, vmap, code paths)
   architecture.md             — Condensation pipeline architecture
   ppm_condensation.md         — PPM algorithm documentation
   24h_benchmark.md            — 24h benchmark suite documentation

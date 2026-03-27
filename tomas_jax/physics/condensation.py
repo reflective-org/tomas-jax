@@ -1,5 +1,9 @@
 """TFL condensation algorithm for TOMAS-JAX (Fortran-faithful sequential version).
 
+.. deprecated::
+    NOT JIT-compilable. For GPU deployment, use ``condensation_tfl_jax.py``
+    (``method='tfl_jit'``) or ``ezcond_ppm_jax.py`` (``method='ppm_jit'``).
+
 Phase 1: Direct port of tmcond.f and dmdt_int.f using sequential Python loops.
 NOT JIT-compatible (uses Python for-loops and in-place mutation).
 

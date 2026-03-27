@@ -225,9 +225,9 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
         print(f"Dilution rate:     {dilution_rate:.1e} s^-1 "
               f"(tau = {1.0/dilution_rate:.0f} s = {1.0/dilution_rate/3600:.1f} h)")
     else:
-        Nk_bg = None
-        Mk_bg = None
-        Gc_bg = None
+        Nk_bg = jnp.zeros_like(Nk)
+        Mk_bg = jnp.zeros_like(Mk)
+        Gc_bg = jnp.zeros_like(Gc)
 
     # Calculate initial totals for conservation check
     total_N_init = jnp.sum(Nk)
@@ -248,8 +248,7 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
             processes.append('condensation')
         if enable_dilution:
             processes.append('dilution')
-        step_fn = make_step(processes, cond_method=method, nucl_scheme=nucl_scheme)
-        step_fn_jit = jax.jit(step_fn)
+        step_fn_jit = make_step(processes, cond_method=method, nucl_scheme=nucl_scheme)
         print(f"\n[System] Using make_step({processes}, nucl_scheme='{nucl_scheme}')")
         # Warmup
         _kw = {}

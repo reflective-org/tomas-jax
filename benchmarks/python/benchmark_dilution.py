@@ -204,8 +204,7 @@ def run_scenario(case_key, nbins, xk, verbose=True):
     if kdil > 0:
         processes.append('dilution')
 
-    step_fn = make_step(processes, cond_method='ppm_jit')
-    step_fn_jit = jax.jit(step_fn)
+    step_fn_jit = make_step(processes, cond_method='ppm_jit')
 
     # kwargs
     oh_conc = jnp.float64(prof['oh_conc'])

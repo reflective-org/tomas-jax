@@ -8,8 +8,7 @@ References:
     Phillips (1975) - Flux matching approximation for Diffusivity
 """
 import jax
-# Enforce float64
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple, Union
 

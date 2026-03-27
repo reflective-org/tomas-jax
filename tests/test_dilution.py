@@ -25,7 +25,9 @@ class TestDilution:
         kdil = 1e-4
         dt = 3600.0  # 1 hour
 
-        Nk_new, Mk_new, Gc_new = dilution_step(Nk, Mk, Gc, dt, kdil)
+        Nk_new, Mk_new, Gc_new = dilution_step(
+            Nk, Mk, Gc, dt, kdil,
+            jnp.zeros_like(Nk), jnp.zeros_like(Mk), jnp.zeros_like(Gc))
 
         expected_decay = np.exp(-kdil * dt)
         np.testing.assert_allclose(Nk_new, Nk * expected_decay, rtol=1e-12)
@@ -58,7 +60,9 @@ class TestDilution:
         """kdil = 0 -> no change."""
         Nk, Mk, Gc = setup
 
-        Nk_new, Mk_new, Gc_new = dilution_step(Nk, Mk, Gc, 3600.0, 0.0)
+        Nk_new, Mk_new, Gc_new = dilution_step(
+            Nk, Mk, Gc, 3600.0, 0.0,
+            jnp.zeros_like(Nk), jnp.zeros_like(Mk), jnp.zeros_like(Gc))
 
         np.testing.assert_array_equal(Nk_new, Nk)
         np.testing.assert_array_equal(Mk_new, Mk)
@@ -73,7 +77,9 @@ class TestDilution:
         kdil = 1e-4
         dt = 3600.0
 
-        _, Mk_new, _ = dilution_step(Nk, Mk, Gc, dt, kdil)
+        _, Mk_new, _ = dilution_step(
+            Nk, Mk, Gc, dt, kdil,
+            jnp.zeros_like(Nk), jnp.zeros_like(Mk), jnp.zeros_like(Gc))
 
         decay = np.exp(-kdil * dt)
         np.testing.assert_allclose(Mk_new[:, 0], 1e-12 * decay, rtol=1e-12)
@@ -97,7 +103,9 @@ class TestDilution:
         """dilution_step should be JIT-compilable."""
         Nk, Mk, Gc = setup
         f = jax.jit(dilution_step)
-        Nk_new, Mk_new, Gc_new = f(Nk, Mk, Gc, 3600.0, 1e-4)
+        Nk_new, Mk_new, Gc_new = f(
+            Nk, Mk, Gc, 3600.0, 1e-4,
+            jnp.zeros_like(Nk), jnp.zeros_like(Mk), jnp.zeros_like(Gc))
         assert float(jnp.sum(Nk_new)) < float(jnp.sum(Nk))
 
 

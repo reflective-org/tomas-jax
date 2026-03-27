@@ -18,8 +18,7 @@ References:
     - mnfix.f (Peter Adams, September 2000)
 """
 import jax
-# Enforce 64-bit precision for mass conservation
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple
 

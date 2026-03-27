@@ -6,8 +6,7 @@ Implements 'Operator Splitting' for the Coagulation Kernel.
 Uses jax.lax.scan instead of fori_loop to support Automatic Differentiation.
 """
 import jax
-# Enforce float64 for mass conservation precision
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 import jax.tree_util
 import diffrax

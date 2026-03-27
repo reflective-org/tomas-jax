@@ -8,8 +8,7 @@ References:
     to the Stochastic Collection Equation", J. Atmos. Sci., 44, 3139-3149.
 """
 import jax
-# Ensure we use 64-bit precision for physics stability
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple
 
