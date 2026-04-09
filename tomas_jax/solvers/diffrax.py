@@ -16,6 +16,7 @@ from ..physics.properties import calc_particle_properties
 from ..physics.coagulation_kernel import calc_coagulation_kernel
 from ..physics.coagulation_rates import calc_coagulation_rates
 from ..core.mnfix_jax import mnfix_jax
+from ..core.config import ICOMP_NODIAG
 
 # Optimized Argument Container
 class CoagArgs(NamedTuple):
@@ -44,7 +45,7 @@ def diffrax_step(
     pres: float,
     boxvol: float,
     dt: float,
-    icomp_nodiag: int = 42,
+    icomp_nodiag: int = ICOMP_NODIAG,
     n_substeps: int = 10,
     rtol: float = 1e-4,
     atol: float = 1e-10,
@@ -125,7 +126,7 @@ def coag_euler_step(
     pres: float,
     boxvol: float,
     dt: float = 60.0,
-    icomp_nodiag: int = 42,
+    icomp_nodiag: int = ICOMP_NODIAG,
     n_substeps: int = 3,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Fixed-step forward Euler coagulation solver (scan-fusable).

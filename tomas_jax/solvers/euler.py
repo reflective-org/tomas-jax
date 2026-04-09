@@ -24,6 +24,7 @@ from ..physics.coagulation_kernel import calc_coagulation_kernel
 from ..physics.coagulation_rates import calc_coagulation_rates
 from ..core.mnfix_jax import mnfix_jax
 from ..core.mnfix_fortran import mnfix_fortran
+from ..core.config import ICOMP_NODIAG
 
 
 def _compute_adaptive_dt(
@@ -32,7 +33,7 @@ def _compute_adaptive_dt(
     dNdt: jnp.ndarray,
     dMdt: jnp.ndarray,
     dt_remaining: float,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> jnp.ndarray:
     """Compute adaptive timestep matching FORTRAN multicoag.f logic.
 
@@ -84,7 +85,7 @@ def euler_step(
     pres: float,
     boxvol: float,
     dt: float,
-    icomp_nodiag: int = 42,
+    icomp_nodiag: int = ICOMP_NODIAG,
     use_fortran_mnfix: bool = False,
     recompute_kernel: bool = False,
     max_substeps: int = 10000
@@ -176,7 +177,7 @@ def euler_single_step(
     kij: jnp.ndarray,
     xk: jnp.ndarray,
     dt_sub: float,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Single Forward Euler step without MNFIX (for benchmarking level 9).
 

@@ -12,6 +12,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
+from ..core.config import ICOMP_NODIAG
+
 # Default for standard TOMAS (p=2, mass doubling) — multicoag.f line 98
 ZETA_DEFAULT = 1.0625
 NEPS = 1.0e-3
@@ -58,7 +60,7 @@ def calc_xbar_phi_eff(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate xbar, phi, and eff for TFL algorithm.
     
@@ -99,7 +101,7 @@ def calc_coagulation_rates(
     Mk: jnp.ndarray,
     kij: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate coagulation rates dNdt and dMdt using TFL algorithm.
 

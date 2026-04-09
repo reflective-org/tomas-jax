@@ -348,7 +348,7 @@ condensation_step_tfl_jit = jax.jit(condensation_step_tfl_jax)
 # =========================================================================
 
 def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                        ezcond_fn, icomp_nodiag=42, n_coag_substeps=3):
+                        ezcond_fn, icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3):
     """Coagulation + condensation in one step, parameterized by ezcond_fn."""
     # 1. Coagulation (forward Euler + MNFIX)
     Nk, Mk = coag_euler_step(
@@ -367,7 +367,7 @@ def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     ezcond_fn, org_conc, nh3_conc, fion,
                     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
-                    icomp_nodiag=42, n_coag_substeps=10,
+                    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=10,
                     max_nucleation_frac=0.5, max_nuc_substeps=20):
     """Nucleation + coagulation + condensation in one step.
 
@@ -420,7 +420,7 @@ def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 
 def combined_step_ppm_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    icomp_nodiag=42, n_coag_substeps=3,
+    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Combined coagulation + PPM condensation step (JIT-compilable)."""
     return _combined_step_core(
@@ -432,7 +432,7 @@ def combined_step_ppm_jax(
 
 def combined_step_tfl_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    icomp_nodiag=42, n_coag_substeps=3,
+    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Combined coagulation + TFL condensation step (JIT-compilable)."""
     return _combined_step_core(
@@ -502,7 +502,7 @@ def full_step_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
     org_conc, nh3_conc, fion,
     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
-    use_tfl=1.0, icomp_nodiag=42,
+    use_tfl=1.0, icomp_nodiag=ICOMP_NODIAG,
     max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Full step: nucleation + coagulation + condensation (JIT-compilable).
