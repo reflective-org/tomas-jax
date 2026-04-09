@@ -130,7 +130,7 @@ def calc_knudsen_number(
 
 def calc_fuchs_sutugin_correction(
     knudsen_number: jnp.ndarray,
-    accommodation_coeff: float = 1.0
+    alpha: float = 1.0
 ) -> jnp.ndarray:
     """Fuchs-Sutugin (Dahneke) correction factor (getCondSink.f line 112).
 
@@ -138,13 +138,12 @@ def calc_fuchs_sutugin_correction(
 
     Args:
         knudsen_number: Kn (dimensionless)
-        accommodation_coeff: alpha, default 1.0
+        alpha: Accommodation coefficient, default 1.0
 
     Returns:
         beta: Correction factor (dimensionless)
     """
     Kn = knudsen_number
-    alpha = accommodation_coeff
     return (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn) / alpha)
 
 
