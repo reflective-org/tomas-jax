@@ -5,6 +5,8 @@ Implements 'Operator Splitting' for the Coagulation Kernel.
 
 Uses jax.lax.scan instead of fori_loop to support Automatic Differentiation.
 """
+import warnings
+
 import jax
 # float64 enforced by core/config.py
 import jax.numpy as jnp
@@ -163,5 +165,11 @@ def coag_euler_step(
     return Nk_f, Mk_f
 
 
-# Deprecated alias (was misnamed as RK4 when it's actually forward Euler)
-coag_rk4_step = coag_euler_step
+def coag_rk4_step(*args, **kwargs):
+    """Deprecated alias for coag_euler_step."""
+    warnings.warn(
+        "coag_rk4_step is deprecated, use coag_euler_step instead. "
+        "The solver was always forward Euler, not RK4.",
+        DeprecationWarning, stacklevel=2,
+    )
+    return coag_euler_step(*args, **kwargs)
