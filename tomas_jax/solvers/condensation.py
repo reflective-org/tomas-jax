@@ -77,6 +77,27 @@ from ..physics.water_equilibrium import calc_equilibrium_water
 from ..core.mnfix_jax import mnfix_jax
 from ..solvers.diffrax import coag_euler_step
 
+# Valid kwargs for make_step() step function — used for typo detection
+_VALID_MAKE_STEP_KWARGS = {
+    # so2_chemistry
+    'oh_conc',
+    # nucleation (common)
+    'org_conc', 'nh3_conc', 'fion', 'fn_scale',
+    # nucleation (ricco_dunne)
+    'enable_organic', 'enable_inorganic',
+    # nucleation (zhao2024)
+    'hno3', 'ulvoc', 'dma', 'hio3', 'enable_masks',
+    # coagulation
+    'icomp_nodiag',
+    # dilution
+    'kdil', 'Nk_bg', 'Mk_bg', 'Gc_bg',
+}
+
+# Canonical physical process ordering
+_CANONICAL_PROCESS_ORDER = [
+    'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution',
+]
+
 
 # =========================================================================
 # Layer 0: Non-JIT dispatcher (sequential numpy paths)
@@ -776,6 +797,17 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
 
+    # Warn if process order deviates from canonical physical ordering
+    canonical_indices = [_CANONICAL_PROCESS_ORDER.index(p) for p in processes]
+    if canonical_indices != sorted(canonical_indices):
+        canonical_subset = [p for p in _CANONICAL_PROCESS_ORDER if p in processes]
+        warnings.warn(
+            f"Non-standard process order: {list(processes)}. "
+            f"Canonical physical order is: {canonical_subset}. "
+            f"Non-standard ordering may produce physically incorrect results.",
+            UserWarning, stacklevel=2,
+        )
+
     valid_schemes = {'ricco_dunne', 'zhao2024'}
     if nucl_scheme not in valid_schemes:
         raise ValueError(f"Unknown nucl_scheme '{nucl_scheme}'. Valid: {sorted(valid_schemes)}")
@@ -783,6 +815,14 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
     use_zhao = nucl_scheme == 'zhao2024'
 
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
+        unknown = set(kwargs) - _VALID_MAKE_STEP_KWARGS
+        if unknown:
+            warnings.warn(
+                f"Unknown kwargs passed to make_step step function: {unknown}. "
+                f"These will be silently ignored. "
+                f"Valid kwargs: {sorted(_VALID_MAKE_STEP_KWARGS)}",
+                UserWarning, stacklevel=2,
+            )
         for process in processes:
             if process == 'so2_chemistry':
                 oh_conc = kwargs.get('oh_conc', 0.0)
