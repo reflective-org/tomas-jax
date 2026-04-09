@@ -47,7 +47,8 @@ def diffrax_step(
     icomp_nodiag: int = 42,
     n_substeps: int = 10,
     rtol: float = 1e-4,
-    atol: float = 1e-10
+    atol: float = 1e-10,
+    return_status: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Integrate coagulation over timestep dt using Tsit5 adaptive solver.
 
@@ -56,6 +57,8 @@ def diffrax_step(
 
     Args:
         n_substeps: Number of MNFIX splitting intervals (static integer).
+        return_status: If True, returns (Nk, Mk, all_ok) where all_ok is
+            a boolean JAX scalar indicating whether all substeps converged.
     """
 
     # 1. Physics Setup
@@ -78,6 +81,7 @@ def diffrax_step(
 
     # 2. Integration Loop (Splitting for MNFIX)
     def scan_body(current_state, _):
+        Nk_prev, Mk_prev = current_state
         solution = diffrax.diffeqsolve(
             term,
             solver,
@@ -95,13 +99,21 @@ def diffrax_step(
         # Extract result
         Nk_sol, Mk_sol = jax.tree_util.tree_map(lambda x: x[0], solution.ys)
 
+        # Check solver status: revert to previous state on failure
+        ok = diffrax.is_successful(solution.result)
+        Nk_out = jnp.where(ok, Nk_sol, Nk_prev)
+        Mk_out = jnp.where(ok, Mk_sol, Mk_prev)
+
         # Apply MNFIX
-        Nk_fixed, Mk_fixed = mnfix_jax(Nk_sol, Mk_sol, xk, icomp_nodiag)
+        Nk_fixed, Mk_fixed = mnfix_jax(Nk_out, Mk_out, xk, icomp_nodiag)
 
-        return (Nk_fixed, Mk_fixed), None
+        return (Nk_fixed, Mk_fixed), ok
 
-    (final_Nk, final_Mk), _ = jax.lax.scan(scan_body, (Nk, Mk), None, length=n_substeps)
+    (final_Nk, final_Mk), substep_ok = jax.lax.scan(
+        scan_body, (Nk, Mk), None, length=n_substeps)
 
+    if return_status:
+        return final_Nk, final_Mk, jnp.all(substep_ok)
     return final_Nk, final_Mk
 
 
