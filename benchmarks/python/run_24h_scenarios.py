@@ -423,7 +423,8 @@ def run_scenario(scenario, mode, method='ppm_jit', verbose=False):
     }
 
 
-def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False):
+def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False,
+                      force=False):
     """Run all (or selected) scenarios and save results as NPZ files.
 
     Args:
@@ -431,6 +432,7 @@ def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False
         scenario_ids: List of 1-based scenario IDs. Default: all 50.
         modes: List of modes. Default: ['coag_only', 'cond_only', 'combined']
         verbose: Print progress per hour.
+        force: If True, overwrite existing NPZ files. Default: False (skip).
     """
     if methods is None:
         methods = ['tfl', 'ppm']
@@ -464,9 +466,9 @@ def run_all_scenarios(methods=None, scenario_ids=None, modes=None, verbose=False
                 label = f"s{sid:02d}_{mode}_{method}"
                 npz_path = os.path.join(results_dir, f"{label}.npz")
 
-                # Skip if already exists
-                if os.path.exists(npz_path):
-                    print(f"[{run_count}/{total_runs}] {label} — already exists, skipping")
+                # Skip if already exists (unless --force)
+                if os.path.exists(npz_path) and not force:
+                    print(f"[{run_count}/{total_runs}] {label} — already exists, skipping (use --force to overwrite)")
                     continue
 
                 print(f"[{run_count}/{total_runs}] Running {label}...")
@@ -530,6 +532,8 @@ if __name__ == '__main__':
                         help='Scenario IDs to run (1-based). Default: all')
     parser.add_argument('--verbose', action='store_true',
                         help='Print hourly progress')
+    parser.add_argument('--force', action='store_true',
+                        help='Overwrite existing NPZ files instead of skipping')
     args = parser.parse_args()
 
     run_all_scenarios(
@@ -537,4 +541,5 @@ if __name__ == '__main__':
         scenario_ids=args.scenarios,
         modes=args.mode,
         verbose=args.verbose,
+        force=args.force,
     )
