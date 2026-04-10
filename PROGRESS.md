@@ -4,6 +4,39 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-10 (Thu) — Code Review Round 2: Robustness, Tests, Documentation
+
+**Time**: morning PST
+
+### Summary
+Second round of code review hardening. Focus on numerical robustness, test quality, test coverage, and physics documentation.
+
+### Changes
+1. **Euler solver robustness** — replaced hardcoded `1e-15`/`1e-25` thresholds with `TINY_N`/`TINY_M` from config. Added `return_info` parameter to detect when `max_substeps` truncates integration.
+2. **Tightened PPM flux test** — `rtol=0.1` (10%) → `rtol=1e-10` for test where analytical answer is exact.
+3. **Shared test fixtures** — created `tests/conftest.py` with `xk` fixture and `make_lognormal` helper. Removed duplicate grid construction from 3 test files.
+4. **Deleted stale `pyproj.toml`** (typo'd filename, outdated metadata). Removed dead `ZETA_DEFAULT` constant. Fixed misleading Dpk=0 comment in coagulation kernel.
+5. **Literature references** — added citations for Riccobono 2014, Dunne 2016, Tang 1997, Sutherland viscosity, and TOMAS MFP formula.
+6. **Smoke tests** — 8 lightweight tests (~5s) exercising coagulation, condensation, and full pipeline. Always run, no Fortran data needed.
+7. **Physics foundation tests** — 22 unit tests for `density.py`, `properties.py`, `gas_properties.py` (previously zero coverage). Tests against reference values and physical limits.
+
+### Files Modified/Created
+- `tomas_jax/solvers/euler.py` (thresholds, return_info)
+- `tomas_jax/physics/coagulation_rates.py` (removed ZETA_DEFAULT)
+- `tomas_jax/physics/coagulation_kernel.py` (comment fix)
+- `tomas_jax/physics/nucleation.py` (citations)
+- `tomas_jax/physics/density.py` (citation)
+- `tomas_jax/physics/properties.py` (citation)
+- `tomas_jax/physics/gas_properties.py` (MFP explanation)
+- `tests/conftest.py` (new — shared fixtures)
+- `tests/test_smoke.py` (new — 8 smoke tests)
+- `tests/test_physics_foundations.py` (new — 22 unit tests)
+- `tests/test_ppm_condensation.py` (tightened tolerance)
+- `tests/test_nucleation.py`, `test_tfl_jit_condensation.py`, `test_ppm_jit_condensation.py` (use shared fixtures)
+- Deleted: `pyproj.toml`
+
+---
+
 ## 2026-04-09 (Wed) — Code Review Fixes
 
 **Time**: evening PST
