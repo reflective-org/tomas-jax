@@ -227,9 +227,9 @@ def tmcond_jax(
 
         return ANK_out, AMK_out
 
-    # Handle trivial case: no forcing
-    ANK_trivial = ANKD.copy()
-    AMK_trivial = AMKD.copy()
+    # Handle trivial case: no forcing (JAX arrays are immutable, no copy needed)
+    ANK_trivial = ANKD
+    AMK_trivial = AMKD
 
     ANK_init = jnp.zeros(ibins)
     AMK_init = jnp.zeros((ibins, icomp))
