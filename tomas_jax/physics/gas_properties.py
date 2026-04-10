@@ -89,7 +89,10 @@ def calc_mean_free_path(
 ) -> Union[float, jnp.ndarray]:
     """Mean free path using TOMAS-specific formula mfp = 2*Di/ms (getCondSink.f line 84).
 
-    NOT the standard kinetic theory formula.
+    NOT the standard kinetic theory formula (mfp = 2*mu/(rho*c_bar)).
+    This definition is paired with the Dahneke/Fuchs-Sutugin correction factor
+    in condensation_sink.py. Using the standard kinetic-theory MFP here would
+    require a different correction factor to produce the same condensation rate.
 
     Args:
         temp: Temperature [K]

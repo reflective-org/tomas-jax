@@ -106,9 +106,10 @@ def calc_density(Mk: jnp.ndarray) -> jnp.ndarray:
     
     xtot = xan + xs0 + xs1 + xs2 + xnacl
 
-    # 7. Binary Densities (Tang 1997) via Horner's Method
+    # 7. Binary Densities via Horner's Method
+    # Tang (1997), JGR 102:1883-1893, Tables 2-6, evaluated at 25C.
+    # Each polynomial gives density [g/cm3] as f(weight-percent solute).
     # Horner's method reduces numerical error and operation count.
-    # Form: a + x(b + x(c + x(d...)))
 
     # Ammonium Nitrate
     # 0.9971 + 4.05e-3*x + 9.0e-6*x^2
