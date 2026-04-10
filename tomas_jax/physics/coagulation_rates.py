@@ -14,8 +14,6 @@ from typing import Tuple
 
 from ..core.config import ICOMP_NODIAG
 
-# Default for standard TOMAS (p=2, mass doubling) — multicoag.f line 98
-ZETA_DEFAULT = 1.0625
 NEPS = 1.0e-3
 
 
