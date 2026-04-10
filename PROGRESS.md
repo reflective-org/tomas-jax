@@ -4,6 +4,43 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-09 (Wed) — Code Review Fixes
+
+**Time**: evening PST
+
+### Summary
+Addressed issues found during comprehensive dev branch code review. Focus on API safety, solver robustness, naming consistency, and test infrastructure.
+
+### Changes
+1. **kwargs validation in `make_step()`** — warns on unknown kwargs (catches typos that silently default to 0.0). Validates against set of 17 known parameter names.
+2. **Process order validation** — warns when process order deviates from canonical physical ordering (so2_chemistry → nucleation → coagulation → condensation → dilution).
+3. **diffrax solver status checking** — checks `solution.result` after each Tsit5 substep; reverts to previous state on failure instead of silently using partial results. Optional `return_status=True` flag for callers.
+4. **`icomp_nodiag` constant cleanup** — replaced all hardcoded `=42` defaults with `ICOMP_NODIAG` from config across 6 files.
+5. **Renamed `accommodation_coeff` → `alpha`** — standardized parameter name across `condensation_sink.py`, `gas_properties.py`, and 10 call sites to match TomasState convention.
+6. **Stale README reference** — removed deleted `run_sensitivity_analysis.py` from project structure.
+7. **`coag_rk4_step` deprecation** — now emits `DeprecationWarning` instead of being a silent alias.
+8. **Top-bin overflow tracking for coagulation mass budget** — `calc_coagulation_rates` now returns a third value `dM_overflow` (mass rate that would enter a hypothetical bin above the grid, i.e., the terms `shift_right` truncates). Both `coag_euler_step` and `diffrax_step` accumulate overflow via `return_overflow=True`. Root cause of coag mass conservation test failures: top-bin self-coagulation produces particles exceeding the grid boundary — this mass is physically lost. Now tracked explicitly so `M(0) = M(24h) + overflow` closes to <1e-8 relative.
+9. **Rewrote `test_coag_mass_conservation`** — no longer loads stale NPZ data; runs solver inline with overflow tracking and verifies mass budget closure across all 50 scenarios.
+10. **`--force` flag for benchmark runner** — `run_24h_scenarios.py` now supports `--force` to overwrite existing NPZ files.
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` (kwargs validation, process order, ICOMP_NODIAG)
+- `tomas_jax/solvers/diffrax.py` (solver status, ICOMP_NODIAG, coag_rk4_step deprecation, overflow tracking)
+- `tomas_jax/solvers/euler.py` (ICOMP_NODIAG, overflow unpacking)
+- `tomas_jax/solvers/coagulation_jax.py` (overflow unpacking)
+- `tomas_jax/physics/coagulation_rates.py` (ICOMP_NODIAG, dM_overflow return)
+- `tomas_jax/physics/condensation_sink.py` (alpha rename)
+- `tomas_jax/physics/gas_properties.py` (alpha rename)
+- `tomas_jax/physics/ezcond.py`, `ezcond_ppm.py`, `ezcond_ppm_jax.py`, `condensation_tfl_jax.py` (alpha rename)
+- `tomas_jax/core/mnfix_jax.py`, `mnfix_fortran.py` (ICOMP_NODIAG)
+- `tomas_jax/utils/diagnostics.py` (overflow unpacking)
+- `tests/test_24h_scenarios.py` (rewrote coag mass conservation test)
+- `benchmarks/python/run_24h_scenarios.py` (--force flag)
+- `benchmarks/python/level07_rates.py` (overflow unpacking)
+- `README.md` (stale reference)
+
+---
+
 ## 2026-03-24 (Mon) — JAX/GPU-Readiness Audit
 
 **Time**: ~evening PST
