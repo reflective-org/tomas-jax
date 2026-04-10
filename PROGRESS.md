@@ -4,6 +4,68 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-10 (Thu) — JAX Performance Optimization
+
+**Time**: evening PST
+
+### Summary
+Comprehensive JAX/JIT performance audit and optimization. Identified and fixed redundant computation in hot loops, unnecessary memory allocations, and unused scan arrays.
+
+### Changes
+
+1. **PPM substep loop-invariant hoisting** (`tomas_jax/physics/condensation_ppm.py`)
+   - Moved `compute_edge_velocity()` and `_compute_moment_integrals()` out of `fori_loop` in both `ppm_condensation_step` and `ppm_advect_number_only`
+   - All inputs are constant across CFL substeps — explicit hoisting guarantees no redundant computation regardless of XLA LICM behavior
+
+2. **Removed `.copy()` on immutable JAX arrays** (`tomas_jax/physics/condensation_tfl_jax.py`)
+   - `ANKD.copy()` / `AMKD.copy()` replaced with direct references — JAX arrays are immutable
+
+3. **Eliminated unused scan carry allocation** (`tomas_jax/solvers/condensation.py`)
+   - `jnp.arange(nsteps)` passed to `jax.lax.scan` but never read by body → replaced with `None`
+
+### Deferred (not worth the churn)
+- `static_argnums` → `static_argnames`: cleaner but requires updating all call sites
+- `compute_zeta(xk)` caching: just a few scalar FLOPs, XLA LICM handles this
+- kwargs validation restructure: current trace-time behavior is correct
+
+### Verification
+All 550 tests pass (0 failures). PPM, TFL JIT, and smoke tests verified.
+
+---
+
+## 2026-04-10 (Thu) — Radiative Forcing Module (Phase 9)
+
+**Time**: afternoon PST
+
+### Summary
+Added direct shortwave radiative forcing calculation based on Chylek & Wong (1995), following Pierce et al. (2010).
+
+### Files created
+- `tomas_jax/physics/bhmie.py` — Bohren-Huffman Mie scattering (numpy, cleaned from reference)
+- `tomas_jax/physics/radiative_forcing.py` — RF module: Mie precomputation per TOMAS bin, upscatter fraction (Wiscombe & Grams 1976), optical depth, Chylek & Wong RF equation
+- `tests/test_radiative_forcing.py` — 29 tests (all passing), covers Mie, upscatter, RF, MSE, Pierce Fig 1 validation
+- `docs/radiative_forcing.md` — Full documentation with usage examples
+
+### Key features
+- `precompute_mie_properties(xk)`: Qsca, Qext, gsca, global-avg upscatter for each bin
+- `compute_rf(Nk, mie, column_area)`: RF [W/m²] from Chylek & Wong 1995
+- `compute_rf_efficiency(Nk, Mk, mie)`: RF per unit burden [W/m² per g/m²]
+- `compute_mass_scattering_efficiency(Nk, Mk, mie)`: MSE [m²/g]
+- `scattering_efficiency_vs_radius()`: Reproduces Pierce et al. 2010 Figure 1 curve
+- `compute_rf_latitude_resolved()`: Full lat/month calculation as in getRF_monthly.py
+
+### References
+- Chylek & Wong (1995), GRL 22, 929-931
+- Pierce et al. (2010), GRL 37, L18805
+- Wiscombe & Grams (1976), J. Atmos. Sci. 33, 2440-2451
+- Bohren & Huffman (1983), Absorption and Scattering of Light by Small Particles
+
+### Next steps
+- Multi-wavelength integration across solar spectrum
+- Gravitational settling efficiency (Pierce Fig 1 right axis)
+
+---
+
 ## 2026-04-10 (Thu) — Code Review Round 2: Robustness, Tests, Documentation
 
 **Time**: morning PST
