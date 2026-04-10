@@ -25,6 +25,6 @@ def get_coagulation_rates(
     kij = kernel.calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
     
     # 3. Calculate Rates (O(N^2))
-    dNdt, dMdt = rates.calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
-    
+    dNdt, dMdt, _overflow = rates.calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
+
     return dNdt, dMdt

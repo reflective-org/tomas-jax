@@ -144,7 +144,7 @@ def euler_step(
         )
 
         # Compute rates
-        dNdt, dMdt = calc_coagulation_rates(Nk_s, Mk_s, kij_use, xk, icomp_nodiag)
+        dNdt, dMdt, _overflow = calc_coagulation_rates(Nk_s, Mk_s, kij_use, xk, icomp_nodiag)
 
         # Adaptive timestep
         dt_remaining = dt - t_elapsed
@@ -192,7 +192,7 @@ def euler_single_step(
     Returns:
         Nk_new, Mk_new after one Euler step
     """
-    dNdt, dMdt = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
+    dNdt, dMdt, _overflow = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
 
     Nk_new = Nk + dt_sub * dNdt
     Mk_new = Mk + dt_sub * dMdt
