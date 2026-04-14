@@ -33,7 +33,7 @@ Each timestep:
 tomas_jax/
 │
 ├── core/
-│   ├── config.py                  ─── Constants, NBINS=36, ICOMP=44, species indices
+│   ├── config.py                  ─── Constants, NBINS=40 (1.7nm start), ICOMP=44, grid presets, species indices
 │   ├── state.py                   ─── TomasState NamedTuple
 │   └── mnfix_jax.py               ─── Mass-number consistency (Fortran partial-transfer)
 │
@@ -360,13 +360,15 @@ The naive `F_M = F_N * r_avg_donor` caused 81% N loss over 24h. Replaced with ex
 ### 8.1 Basic Usage
 
 ```bash
-# Install
-pip install -e .
+# Install (uv recommended)
+uv sync --extra dev
+# Or: pip install -e ".[dev]"
 
-# Box model (coagulation + condensation, 24h)
-python run_box_model.py                       # default: TFL sequential
-python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching, fast)
-python run_box_model.py --method ppm_jit      # PPM JIT (fastest condensation)
+# Box model (nucleation + coagulation + condensation, 24h)
+python run_box_model.py                       # default: PPM JIT
+python run_box_model.py --method tfl_jit      # TFL JIT (Fortran-matching)
+python run_box_model.py --no-nucleation       # coag + cond only
+python run_box_model.py --no-nucleation --no-condensation  # coag only
 
 # Run all tests
 python -m pytest tests/ -v
@@ -477,10 +479,61 @@ Water (species 43) is diagnostic — recomputed each step by equilibrium. Mass c
 
 ---
 
-## 12. Future Roadmap
+## 12. Modular Process Orchestrator
+
+`solvers/condensation.py` uses a layered architecture to eliminate duplication while preserving backward compatibility:
+
+### 12.1 Internal Core Helpers
+
+```
+Layer 1: _condensation_step_core(ezcond_fn)
+         Single condensation implementation parameterized by ezcond function.
+         Both PPM and TFL share this exact code path.
+
+Layer 2: _combined_step_core(ezcond_fn)     — coag + condensation
+         _full_step_core(ezcond_fn)          — nucl + coag + condensation
+
+Layer 3: _run_scan(step_fn, nsteps, ...)    — single scan loop
+         Replaces 6 copy-pasted scan implementations.
+
+Layer 4: make_step(processes, cond_method)   — public composable API
+```
+
+### 12.2 Composable API: `make_step()`
+
+```python
+from tomas_jax.solvers.condensation import make_step
+
+# Build a step function with any process combination/ordering
+step = make_step(['nucleation', 'coagulation', 'condensation'],
+                 cond_method='ppm_jit', n_coag_substeps=10)
+
+# JIT-compile and run
+step_jit = jax.jit(step)
+Nk, Mk, Gc = step_jit(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                        org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+
+# Easy to reorder or skip processes
+cond_only = make_step(['condensation'], cond_method='tfl_jit')
+coag_cond = make_step(['coagulation', 'condensation'])
+```
+
+The `for process in processes` loop is Python-level — unrolled at JAX trace time, so there is zero runtime overhead.
+
+### 12.3 Backward Compatibility
+
+All 15+ existing public function names are preserved as thin wrappers:
+- `condensation_step_jax()` → `_condensation_step_core(..., ezcond_fn=ezcond_ppm_jax)`
+- `condensation_step_tfl_jax()` → `_condensation_step_core(..., ezcond_fn=ezcond_tfl_jax)`
+- `combined_step_ppm_jax()` → `_combined_step_core(..., ezcond_fn=ezcond_ppm_jax)`
+- `run_condensation_scan()` → `_run_scan(...)` with PPM step closure
+- etc.
+
+---
+
+## 13. Future Roadmap
 
 - **Remove bin-0 mass dump**: Condensation should not create new particles (that's nucleation)
 - **Multi-species condensation** with VBS partitioning and Kelvin effect
 - **GPU acceleration** for the full pipeline
 - **End-to-end JIT** for coagulation + condensation in a single compiled step
-- **Nucleation module** (planned)

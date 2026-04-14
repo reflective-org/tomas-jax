@@ -6,7 +6,7 @@ in aerosol microphysics (values spanning 1e-23 to 1e12).
 """
 import jax
 # Import config FIRST to trigger the x64 update
-from .config import NBINS, ICOMP, N_GAS_SPECIES
+from .config import ICOMP, N_GAS_SPECIES
 import jax.numpy as jnp
 from typing import NamedTuple, Any
 
@@ -72,7 +72,10 @@ class TomasState(NamedTuple):
         # Only run these checks outside of JIT compilation (concrete values)
         # Inside JIT, shapes are static knowns, but values are tracers.
         if isinstance(Nk_arr, jnp.ndarray):
-            assert Nk_arr.shape[0] == NBINS, f"Expected {NBINS} bins, got {Nk_arr.shape[0]}"
+            assert Nk_arr.ndim == 1, f"Nk must be 1D, got shape {Nk_arr.shape}"
+            assert Mk_arr.shape[0] == Nk_arr.shape[0], (
+                f"Mk bins {Mk_arr.shape[0]} != Nk bins {Nk_arr.shape[0]}"
+            )
 
         return cls(
             Nk=Nk_arr,

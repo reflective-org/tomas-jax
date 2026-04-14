@@ -1,5 +1,9 @@
 """PPM-aware simple condensation driver for TOMAS-JAX.
 
+.. deprecated::
+    NOT JIT-compilable (numpy wrapper). For GPU deployment, use
+    ``ezcond_ppm_jax`` (``method='ppm_jit'``).
+
 Analogous to ezcond.py but replaces the TFL tmcond call with the
 PPM advection scheme (ppm_condensation_step). The TAU computation
 uses the full mcond (not subdivided by nsteps) since PPM handles
@@ -23,7 +27,7 @@ import numpy as np
 import jax.numpy as jnp
 from typing import Tuple
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG, IDIAG
+from ..core.config import ICOMP, ICOMP_NODIAG, IDIAG
 from .condensation_ppm import ppm_condensation_step
 from .condensation_sink import calc_condensation_sink
 from ..core.mnfix_jax import mnfix_jax
@@ -65,7 +69,7 @@ def ezcond_ppm(
         Nkf: Updated number concentration, shape (ibins,)
         Mkf: Updated mass concentration, shape (ibins, icomp)
     """
-    ibins = NBINS
+    ibins = Nki.shape[0]
     icomp = ICOMP
     idiag = IDIAG
 
@@ -87,7 +91,7 @@ def ezcond_ppm(
     CS_jax, sinkfrac_jax = calc_condensation_sink(
         jnp.array(Nk1), jnp.array(Mk1),
         temp, pres, boxvol,
-        accommodation_coeff=alpha
+        accommodation_coeff=alpha, xk=jnp.array(xk_np)
     )
     CS = float(CS_jax)
     sinkfrac = np.array(sinkfrac_jax)

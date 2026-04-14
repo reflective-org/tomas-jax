@@ -8,14 +8,27 @@ References:
     to the Stochastic Collection Equation", J. Atmos. Sci., 44, 3139-3149.
 """
 import jax
-# Ensure we use 64-bit precision for physics stability
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple
 
-# Algorithm parameter (multicoag.f line 98)
-ZETA = 1.0625
+# Default for standard TOMAS (p=2, mass doubling) — multicoag.f line 98
+ZETA_DEFAULT = 1.0625
 NEPS = 1.0e-3
+
+
+def compute_zeta(xk: jnp.ndarray) -> float:
+    """Compute closure parameter ξ̄_p from bin boundaries.
+
+    Tzivion et al. (1987), Eq. (B10):  ξ̄_p = 0.5 * [1 + (p+1)²/(4p)]
+    where p = xk[1]/xk[0] is the bin mass ratio.
+
+    For p=2 (standard TOMAS): ξ̄ = 1.0625
+    For p=√2 (72 bins):       ξ̄ ≈ 1.0152
+    For p=2^{1/4} (144 bins): ξ̄ ≈ 1.0038
+    """
+    p = xk[1] / xk[0]
+    return 0.5 * (1.0 + (p + 1.0) ** 2 / (4.0 * p))
 
 
 def _preprocess_concentrations(
@@ -32,8 +45,10 @@ def _preprocess_concentrations(
 
     # Set all Mk to 0 for empty bins, then add tiny SO4 mass (index 0)
     Mk_safe = jnp.where(mask_empty[:, None], 0.0, Mk)
+    # Use geometric mean sqrt(xk[k]*xk[k+1]) — always inside bin for any p
+    xk_geo = jnp.sqrt(xk[:-1] * xk[1:])
     Mk_safe = Mk_safe.at[:, 0].set(
-        jnp.where(mask_empty, NEPS * 1.4 * xk[:-1], Mk_safe[:, 0])
+        jnp.where(mask_empty, NEPS * xk_geo, Mk_safe[:, 0])
     )
     
     return Nk_safe, Mk_safe
@@ -56,12 +71,14 @@ def calc_xbar_phi_eff(
     xk_lo = xk[:-1]
     xk_hi = xk[1:]
 
-    # TFL equations 13a, 13b
+    # TFL equations 13a, 13b — generalized for arbitrary bin ratio p
+    # Fortran hardcodes p=2; for general p: eff,phi ∝ 1/(p-1)
     ratio = xbar / xk_lo
     factor = 2.0 * Nk / xk_lo
-    
-    eff = factor * (2.0 - ratio)
-    phi = factor * (ratio - 1.0)
+    p = xk_hi / xk_lo  # bin mass ratio (2 for standard, √2 for 72 bins, etc.)
+
+    eff = factor * (p - ratio) / (p - 1.0)
+    phi = factor * (ratio - 1.0) / (p - 1.0)
 
     # Constraints (equation 15)
     # Case 1: xbar < xk_lo
@@ -103,7 +120,11 @@ def calc_coagulation_rates(
     # 1. Preprocess Inputs
     Nk_safe, Mk_safe = _preprocess_concentrations(Nk, Mk, xk)
     xbar, phi, eff = calc_xbar_phi_eff(Nk_safe, Mk_safe, xk, icomp_nodiag)
-    
+
+    # Closure parameter — adapts to bin width (Tzivion 1987, Eq. B10)
+    zeta = compute_zeta(xk)
+    zeta3 = zeta ** 3
+
     # Slices for calculations
     Mk_nodiag = Mk_safe[:, :icomp_nodiag]  # (nbins, icomp_nodiag)
     xk_mid = xk[:-1]
@@ -134,18 +155,18 @@ def calc_coagulation_rates(
     dNdt_curr = (
         -kij_diag * Nk_safe**2
         - phi * k1mtot
-        - ZETA * (eff - phi) / (2.0 * xk_mid) * k1mxtot
+        - zeta * (eff - phi) / (2.0 * xk_mid) * k1mxtot
         - Nk_safe * in_term
     )
-    
+
     # dMdt parts for current k (broadcasting over components)
     dMdt_curr = (
         Nk_safe[:, None] * k1m_vec
         - kij_diag[:, None] * Nk_safe[:, None] * Mk_nodiag
         - Mk_nodiag * in_term[:, None]
         - phi[:, None] * xk_next[:, None] * k1m_vec
-        - 0.5 * ZETA * eff[:, None] * k1mx_vec
-        + ZETA**3 * (phi[:, None] - eff[:, None]) / (2.0 * xk_mid[:, None]) * k1mx2_vec
+        - 0.5 * zeta * eff[:, None] * k1mx_vec
+        + zeta3 * (phi[:, None] - eff[:, None]) / (2.0 * xk_mid[:, None]) * k1mx2_vec
     )
 
     # 4. Calculate terms for Previous Bin (k-1)
@@ -180,16 +201,16 @@ def calc_coagulation_rates(
     dNdt_prev = (
         0.5 * kij_diag_prev * Nk_prev**2
         + phi_prev * sk2mtot
-        + ZETA * (eff_prev - phi_prev) / (2.0 * xk_mid_prev) * sk2mxtot
+        + zeta * (eff_prev - phi_prev) / (2.0 * xk_mid_prev) * sk2mxtot
     )
-    
+
     # dMdt contribution from k-1
     # Note: The second term uses xk[k] (xk_mid), not xk[k-1]
     dMdt_prev = (
         kij_diag_prev[:, None] * Nk_prev[:, None] * Mk_prev
-        + phi_prev[:, None] * xk_mid[:, None] * sk2m_vec 
-        + 0.5 * ZETA * eff_prev[:, None] * sk2mx_vec
-        - ZETA**3 * (phi_prev[:, None] - eff_prev[:, None]) / (2.0 * xk_mid_prev[:, None]) * sk2mx2_vec
+        + phi_prev[:, None] * xk_mid[:, None] * sk2m_vec
+        + 0.5 * zeta * eff_prev[:, None] * sk2mx_vec
+        - zeta3 * (phi_prev[:, None] - eff_prev[:, None]) / (2.0 * xk_mid_prev[:, None]) * sk2mx2_vec
     )
 
     # 5. Combine and Return

@@ -10,8 +10,7 @@ References:
     - Equation 12.51: Knudsen number
 """
 import jax
-# Enforce x64 to match the rest of the high-integrity system
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Union
 
