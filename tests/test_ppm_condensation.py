@@ -48,10 +48,8 @@ from tomas_jax.physics.condensation_ppm import (
     ppm_condensation_step,
 )
 
-# Test configuration
-NBINS = 36
-ICOMP = 44
-ICOMP_NODIAG = 42  # Excluding water and diagnostics
+# Test configuration — use config defaults
+from tomas_jax.core.config import NBINS, ICOMP, ICOMP_NODIAG
 
 
 # =============================================================================

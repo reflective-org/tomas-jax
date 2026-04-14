@@ -46,11 +46,11 @@ Section 2 describes the physical model and algorithms. Section 3 details the JAX
 
 ### 2.1 TOMAS framework
 
-TOMAS is a two-moment aerosol sectional scheme that tracks both number concentration $N_k$ [\# per grid cell] and mass concentration $M_{k,j}$ [kg per grid cell] for each size bin $k = 1, \ldots, 36$ and chemical species $j = 1, \ldots, 44$. The 36 bins form a mass-doubling grid, where the lower boundary of bin $k+1$ is twice that of bin $k$:
+TOMAS is a two-moment aerosol sectional scheme that tracks both number concentration $N_k$ [\# per grid cell] and mass concentration $M_{k,j}$ [kg per grid cell] for each size bin $k = 1, \ldots, 40$ and chemical species $j = 1, \ldots, 44$. The 40 bins form a mass-doubling grid starting at the Dunne (2016) nucleation cluster size (1.7 nm diameter), where the lower boundary of bin $k+1$ is twice that of bin $k$:
 
-$$x_{k+1} = 2 \, x_k, \quad x_0 = 1.6033 \times 10^{-23} \;\text{kg}$$
+$$x_{k+1} = 2 \, x_k, \quad x_0 = \frac{\pi}{6} (1.7 \times 10^{-9})^3 \times 1770 \approx 4.553 \times 10^{-24} \;\text{kg}$$
 
-This spans particle dry diameters from approximately 10 nm to 10 $\mu$m. The 44 species comprise sulfate (SO$_4$, index 0), 41 organic species (indices 1--41), ammonium (NH$_4$, index 42), and water (H$_2$O, index 43). Of these, the first 42 are prognostic (dry) species, while NH$_4$ and H$_2$O are treated as diagnostic. The gas-phase state vector $G_c$ has 43 elements (all species except water).
+This spans particle dry diameters from 1.7 nm to approximately 17.5 $\mu$m. An 80-bin high-resolution grid ($\sqrt{2}$ mass ratio, same diameter range) is available via `make_grid_80bin()`. The 44 species comprise sulfate (SO$_4$, index 0), 41 organic species (indices 1--41), ammonium (NH$_4$, index 42), and water (H$_2$O, index 43). Of these, the first 42 are prognostic (dry) species, while NH$_4$ and H$_2$O are treated as diagnostic. The gas-phase state vector $G_c$ has 43 elements (all species except water).
 
 The complete state vector is $\mathbf{S} = (N_k, M_{k,j}, G_c, T, P, \text{RH}, \alpha)$, where $T$ is temperature [K], $P$ is pressure [Pa], RH is relative humidity, and $\alpha$ is the mass accommodation coefficient. TOMAS-JAX represents this state as an immutable `TomasState` NamedTuple, which is compatible with JAX's functional transformation model.
 
@@ -211,9 +211,9 @@ The gas-phase vector $G_c$, relative humidity, and accommodation coefficient are
 
 ### 3.3 TFL JIT condensation
 
-The original TFL algorithm uses Python for-loops over 36 bins with conditional branching, which is not traceable by JAX. The JIT-compilable version (`condensation_tfl_jax.py`) addresses this through:
+The original TFL algorithm uses Python for-loops over all bins with conditional branching, which is not traceable by JAX. The JIT-compilable version (`condensation_tfl_jax.py`) addresses this through:
 
-- **Vectorized top-hat construction:** The shape factor $\Xi$, half-width $W$, and edge positions $X_U$, $X_L$ are computed for all 36 bins simultaneously using array operations.
+- **Vectorized top-hat construction:** The shape factor $\Xi$, half-width $W$, and edge positions $X_U$, $X_L$ are computed for all bins simultaneously using array operations.
 - **`jax.lax.fori_loop` remapping:** The bin-by-bin redistribution, which requires sequential processing (each bin's output affects subsequent bins), uses `fori_loop` with carried state.
 - **`jax.lax.cond` branching:** The three-way dispatch in `ezcond` (full TFL condensation, simple mass addition, or skip) uses `lax.cond` for traceable branching.
 
@@ -279,7 +279,7 @@ We validate TOMAS-JAX against the original Fortran across 49 diverse atmospheric
 | Initial H$_2$SO$_4$ | $G_c^0$ | $10^{-16}$ -- $10^{-10}$ kg cell$^{-1}$ | Log |
 | H$_2$SO$_4$ production | $\dot{P}$ | $10^5$ -- $10^8$ molec cm$^{-3}$ s$^{-1}$ | Log |
 
-Each scenario is initialized with a lognormal size distribution characterized by ($N_\text{total}$, GMD, GSD) mapped onto the 36-bin grid, then run for 24 simulated hours (1440 steps of $\Delta t = 60$ s) in three modes: coagulation-only, condensation-only, and combined. The box model volume is $\mathcal{V} = 10^6$ cm$^3$.
+Each scenario is initialized with a lognormal size distribution characterized by ($N_\text{total}$, GMD, GSD) mapped onto the 40-bin grid (1.7 nm start), then run for 24 simulated hours (1440 steps of $\Delta t = 60$ s) in three modes: coagulation-only, condensation-only, and combined. The box model volume is $\mathcal{V} = 10^6$ cm$^3$.
 
 ### 4.2 Fortran reference
 
@@ -388,7 +388,7 @@ This is computed in a single backward pass through the 1440-step scan-fused loop
 
 ### 6.2 Jacobian of size distribution
 
-The full Jacobian $\partial N_k / \partial \theta$ for all 36 bins with respect to any input parameter $\theta$ is available via `jax.jacobian`. This reveals which bins are most sensitive to changes in production rate, initial loading, temperature, or other parameters, enabling targeted observational strategies.
+The full Jacobian $\partial N_k / \partial \theta$ for all 40 bins with respect to any input parameter $\theta$ is available via `jax.jacobian`. This reveals which bins are most sensitive to changes in production rate, initial loading, temperature, or other parameters, enabling targeted observational strategies.
 
 ### 6.3 Implications for data assimilation
 
@@ -420,14 +420,14 @@ Several limitations of the current implementation should be noted:
 3. **No Kelvin effect.** Curvature correction for small particles is not applied to the condensation driving force.
 4. **Integrator differences.** The coagulation comparison is between Tsit5 (adaptive, fifth-order) and forward Euler (fixed-step, first-order). This is the dominant source of JAX-Fortran discrepancy.
 5. **CPU-only validation.** GPU benchmarks are planned but not yet performed.
-6. **Fixed bin count.** The 36-bin resolution is hardcoded. Generalizing to arbitrary bin counts would require minor refactoring of array dimensions.
+6. **Configurable bin count.** The default 40-bin grid (1.7 nm start) and 80-bin high-resolution grid are provided, with `make_grid()` supporting arbitrary resolutions. All physics is shape-agnostic.
 
 ### 7.3 Comparison with other implementations
 
 TOMAS-JAX occupies a unique niche as a differentiable sectional aerosol model with JIT compilation:
 
 - **vs. PySDM:** Particle-resolved (Lagrangian) vs. sectional. PySDM resolves individual particle mixing states but at higher computational cost per particle. TOMAS-JAX is deterministic and more efficient for applications not requiring mixing-state resolution.
-- **vs. MAM4:** Modal (4 lognormal modes) vs. sectional (36 bins). TOMAS resolves the full shape of the size distribution, including multimodal structures that emerge from coagulation and condensation.
+- **vs. MAM4:** Modal (4 lognormal modes) vs. sectional (40 bins). TOMAS resolves the full shape of the size distribution, including multimodal structures that emerge from coagulation and condensation.
 - **vs. PartMC-MOSAIC:** Stochastic particle-resolved vs. deterministic sectional. TOMAS-JAX produces no sampling noise, advantageous for sensitivity analysis and optimization.
 
 ### 7.4 Extensibility

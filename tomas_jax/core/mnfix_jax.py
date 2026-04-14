@@ -18,8 +18,7 @@ References:
     - mnfix.f (Peter Adams, September 2000)
 """
 import jax
-# Enforce 64-bit precision for mass conservation
-jax.config.update("jax_enable_x64", True)
+# float64 enforced by core/config.py
 import jax.numpy as jnp
 from typing import Tuple
 
@@ -143,18 +142,15 @@ def mnfix_jax(
         # ===== UPWARD SHIFT (avg > xk[k+1]) =====
         needs_up = (avg > xk_hi) & (k < nbins - 1)
 
-        # Target: bin kk = k+1, with xnew = xk[kk+1]/1.1
-        # For simplicity, handle 1-bin shift (most common case).
-        # Multi-bin drift is handled by repeated MNFIX calls or the Phase 2 trim.
-        kk_up = jnp.minimum(k + 1, nbins - 1)
-        xnew_up = xk[kk_up + 1] / 1.1
-
-        # If xnew_up <= avg, try one more bin up
-        need_extra_up = xnew_up <= avg
-        kk_up2 = jnp.minimum(k + 2, nbins - 1)
-        xnew_up2 = xk[jnp.minimum(kk_up2 + 1, nbins)] / 1.1
-        kk_up = jnp.where(need_extra_up, kk_up2, kk_up)
-        xnew_up = jnp.where(need_extra_up, xnew_up2, xnew_up)
+        # Find target bin kk such that xk[kk+1]/1.1 > avg (Fortran goto loop).
+        # General formula for xk[j] = xk[0] * p^j where p = xk[1]/xk[0]:
+        #   xk[kk+1] > avg*1.1 => p^(kk+1) > avg*1.1/xk[0]
+        #   kk = ceil(log_p(avg*1.1/xk[0])) - 1
+        log_p = jnp.log(xk[1] / xk[0])  # log of doubling factor
+        ratio_up = avg * 1.1 / (xk[0] + EPS)
+        kk_up_raw = jnp.ceil(jnp.log(jnp.maximum(ratio_up, 1.0)) / log_p).astype(jnp.int32) - 1
+        kk_up = jnp.clip(kk_up_raw, k + 1, nbins - 1)
+        xnew_up = xk[jnp.minimum(kk_up + 1, nbins)] / 1.1
 
         nshift_up = (drymass - xold * number) / (xnew_up - xold + EPS)
         nshift_up = jnp.maximum(nshift_up, 0.0)  # Safety: no negative shifts
@@ -174,15 +170,14 @@ def mnfix_jax(
         # ===== DOWNWARD SHIFT (avg < xk[k]) =====
         needs_down = (avg < xk_lo) & (k > 0)
 
-        kk_dn = jnp.maximum(k - 1, 0)
+        # Find target bin kk such that xk[kk]*1.1 < avg (Fortran goto loop).
+        # General formula: xk[j] = xk[0] * p^j where p = xk[1]/xk[0]:
+        #   xk[kk]*1.1 < avg => p^kk < avg/(1.1*xk[0])
+        #   kk = floor(log_p(avg/(1.1*xk[0])))
+        ratio_dn = avg / (1.1 * xk[0] + EPS)
+        kk_dn_raw = jnp.floor(jnp.log(jnp.maximum(ratio_dn, 1.0)) / log_p).astype(jnp.int32)
+        kk_dn = jnp.clip(kk_dn_raw, 0, jnp.maximum(k - 1, 0))
         xnew_dn = xk[kk_dn] * 1.1
-
-        # If xnew_dn >= avg, try one more bin down
-        need_extra_dn = xnew_dn >= avg
-        kk_dn2 = jnp.maximum(k - 2, 0)
-        xnew_dn2 = xk[kk_dn2] * 1.1
-        kk_dn = jnp.where(need_extra_dn, kk_dn2, kk_dn)
-        xnew_dn = jnp.where(need_extra_dn, xnew_dn2, xnew_dn)
 
         nshift_dn = (drymass - xold * number) / (xnew_dn - xold + EPS)
         nshift_dn = jnp.maximum(nshift_dn, 0.0)

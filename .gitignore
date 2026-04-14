@@ -19,9 +19,22 @@ logs/
 # Benchmark output data (large, regeneratable)
 benchmarks/fortran/output/
 benchmarks/results/
+tomas_fortran/output/
 
 # Pytest cache
 .pytest_cache/
 
 # Egg/install metadata
 *.egg-info/
+
+# CSV files
+*.csv
+
+# PNG files
+*.png
+
+# NPZ files
+*.npz
+
+# PDF files
+*.pdf

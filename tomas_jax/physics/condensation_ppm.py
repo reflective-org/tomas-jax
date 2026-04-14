@@ -22,28 +22,60 @@ import jax.numpy as jnp
 from typing import Tuple
 from functools import partial
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG
+from ..core.config import ICOMP, ICOMP_NODIAG
 
 # =============================================================================
 # CONSTANTS
 # =============================================================================
 
-# Grid spacing in log-mass coordinate (mass-doubling bins)
-DELTA_XI = jnp.log(2.0)
+# Default grid spacing in log-mass coordinate (mass-doubling bins)
+DELTA_XI_DEFAULT = jnp.log(2.0)
 
 # Numerical safety constants
 EPSN = 1.0e-30  # For ratios involving Nk (prevent division by zero)
 EPSM = 0.0      # For mass (don't invent mass)
 
-# Precomputed moment integrals for dry-mass calculation
-# I_k = integral_0^1 eta^k exp(a*eta) d_eta, where a = delta_xi = ln(2)
-_A = DELTA_XI
-_EA = jnp.exp(_A)  # = 2.0
-I0 = jnp.expm1(_A) / _A                           # (e^a - 1) / a
-I1 = (_EA * (_A - 1.0) + 1.0) / (_A * _A)
-I2 = (_EA * (_A*_A - 2.0*_A + 2.0) - 2.0) / (_A**3)
+# Backward-compatible alias
+DELTA_XI = DELTA_XI_DEFAULT
 
-# Precomputed inverse powers of a for mass-weighted antiderivatives
+
+def _compute_moment_integrals(a):
+    """Compute moment integrals I0, I1, I2 for mass-weighted PPM integrals.
+
+    I_k = integral_0^1 eta^k * exp(a*eta) d_eta
+
+    Args:
+        a: Log-mass grid spacing (delta_xi = ln(doubling_factor))
+
+    Returns:
+        I0, I1, I2: Moment integrals
+    """
+    ea = jnp.exp(a)
+    I0 = jnp.expm1(a) / a
+    I1 = (ea * (a - 1.0) + 1.0) / (a * a)
+    I2 = (ea * (a * a - 2.0 * a + 2.0) - 2.0) / (a ** 3)
+    return I0, I1, I2
+
+
+def _mass_antideriv_a(eta, a):
+    """Antiderivatives of eta^k * exp(a*eta) for k=0,1,2.
+
+    Parameterized by grid spacing a = delta_xi.
+    """
+    inv_a = 1.0 / a
+    inv_a2 = inv_a * inv_a
+    inv_a3 = inv_a2 * inv_a
+    ea_eta = jnp.exp(a * eta)
+    A0 = ea_eta * inv_a
+    A1 = ea_eta * (eta * inv_a - inv_a2)
+    A2 = ea_eta * (eta * eta * inv_a - 2.0 * eta * inv_a2 + 2.0 * inv_a3)
+    return A0, A1, A2
+
+
+# Precomputed values for default mass-doubling grid (backward compat)
+_A = DELTA_XI_DEFAULT
+_EA = jnp.exp(_A)
+I0, I1, I2 = _compute_moment_integrals(_A)
 _INV_A = 1.0 / _A
 _INV_A2 = _INV_A * _INV_A
 _INV_A3 = _INV_A2 * _INV_A
@@ -486,20 +518,8 @@ def _integrate_parabola_left(
 # =============================================================================
 
 def _mass_antideriv(eta):
-    """Antiderivatives of eta^k * exp(a*eta) for k=0,1,2.
-
-    Used to evaluate definite integrals of m(eta)*n(eta) over departure
-    regions, where m(eta) = m_L * exp(a*eta) is the dry mass at position
-    eta within a bin, and n(eta) is the PPM number density parabola.
-
-    Returns:
-        A0, A1, A2: Antiderivatives evaluated at eta.
-    """
-    ea_eta = jnp.exp(_A * eta)
-    A0 = ea_eta * _INV_A
-    A1 = ea_eta * (eta * _INV_A - _INV_A2)
-    A2 = ea_eta * (eta * eta * _INV_A - 2.0 * eta * _INV_A2 + 2.0 * _INV_A3)
-    return A0, A1, A2
+    """Antiderivatives for default mass-doubling grid. See _mass_antideriv_a."""
+    return _mass_antideriv_a(eta, _A)
 
 
 def _integrate_mass_parabola_right(
@@ -507,7 +527,8 @@ def _integrate_mass_parabola_right(
     n_R: jnp.ndarray,
     n_6: jnp.ndarray,
     m_L: jnp.ndarray,
-    C: jnp.ndarray
+    C: jnp.ndarray,
+    delta_xi: float = DELTA_XI_DEFAULT
 ) -> jnp.ndarray:
     """Mass-weighted integral over right departure region [1-C, 1].
 
@@ -515,26 +536,18 @@ def _integrate_mass_parabola_right(
 
     where n(eta) = n_L + eta*(b) - n_6*eta^2, b = (n_R - n_L) + n_6,
     and m(eta) = m_L * exp(a*eta) is the dry mass at position eta.
-
-    Args:
-        n_L, n_R, n_6: PPM coefficients for donor cell (left of edge)
-        m_L: Mass at left boundary of donor cell [kg]
-        C: Courant number |u*dt/delta_xi|
-
-    Returns:
-        Mass integral [kg] — the dry mass in the departure region.
     """
     b = (n_R - n_L) + n_6
     C_safe = jnp.clip(C, 0.0, 1.0)
 
-    A0_hi, A1_hi, A2_hi = _mass_antideriv(1.0)
-    A0_lo, A1_lo, A2_lo = _mass_antideriv(1.0 - C_safe)
+    A0_hi, A1_hi, A2_hi = _mass_antideriv_a(1.0, delta_xi)
+    A0_lo, A1_lo, A2_lo = _mass_antideriv_a(1.0 - C_safe, delta_xi)
 
     integral = (n_L * (A0_hi - A0_lo)
                 + b * (A1_hi - A1_lo)
                 - n_6 * (A2_hi - A2_lo))
 
-    return DELTA_XI * m_L * integral
+    return delta_xi * m_L * integral
 
 
 def _integrate_mass_parabola_left(
@@ -542,31 +555,24 @@ def _integrate_mass_parabola_left(
     n_R: jnp.ndarray,
     n_6: jnp.ndarray,
     m_L: jnp.ndarray,
-    C: jnp.ndarray
+    C: jnp.ndarray,
+    delta_xi: float = DELTA_XI_DEFAULT
 ) -> jnp.ndarray:
     """Mass-weighted integral over left departure region [0, C].
 
     Computes: delta_xi * m_L * integral_{0}^{C} exp(a*eta) * n(eta) d_eta
-
-    Args:
-        n_L, n_R, n_6: PPM coefficients for donor cell (right of edge)
-        m_L: Mass at left boundary of donor cell [kg]
-        C: Courant number |u*dt/delta_xi|
-
-    Returns:
-        Mass integral [kg] — the dry mass in the departure region.
     """
     b = (n_R - n_L) + n_6
     C_safe = jnp.clip(C, 0.0, 1.0)
 
-    A0_hi, A1_hi, A2_hi = _mass_antideriv(C_safe)
-    A0_lo, A1_lo, A2_lo = _mass_antideriv(0.0)
+    A0_hi, A1_hi, A2_hi = _mass_antideriv_a(C_safe, delta_xi)
+    A0_lo, A1_lo, A2_lo = _mass_antideriv_a(0.0, delta_xi)
 
     integral = (n_L * (A0_hi - A0_lo)
                 + b * (A1_hi - A1_lo)
                 - n_6 * (A2_hi - A2_lo))
 
-    return DELTA_XI * m_L * integral
+    return delta_xi * m_L * integral
 
 
 def ppm_mass_flux(
@@ -606,7 +612,7 @@ def ppm_mass_flux(
     m_L_pos = jnp.concatenate([xk[:1], xk[:-1]])
 
     F_M_pos = _integrate_mass_parabola_right(
-        n_L_ext, n_R_ext, n_6_ext, m_L_pos, jnp.abs(C))
+        n_L_ext, n_R_ext, n_6_ext, m_L_pos, jnp.abs(C), delta_xi)
 
     # --- Negative velocity: flux from right cell (k) ---
     # Pad coefficients: edge nbins has no right cell
@@ -617,7 +623,7 @@ def ppm_mass_flux(
     m_L_neg = jnp.concatenate([xk[:-1], xk[-2:-1]])
 
     F_M_neg = _integrate_mass_parabola_left(
-        n_L_right, n_R_right, n_6_right, m_L_neg, jnp.abs(C))
+        n_L_right, n_R_right, n_6_right, m_L_neg, jnp.abs(C), delta_xi)
 
     # Select based on velocity sign (mass integral already includes delta_xi)
     F_M = jnp.where(u_edges >= 0, F_M_pos, -F_M_neg) / dt_sub
@@ -690,7 +696,10 @@ def species_flux(
 
     # Composition ratio for all species: (nbins, ncomp)
     M_dry_2d = M_dry_analytical[:, None]
-    ratio = jnp.where(M_dry_2d > 1e-30, Mk / M_dry_2d, 0.0)
+    # Safe division: clamp denominator first to avoid NaN in reverse-mode AD,
+    # then zero out bins with no mass (jnp.where evaluates both branches).
+    ratio = Mk / jnp.maximum(M_dry_2d, 1e-30)
+    ratio = jnp.where(M_dry_2d > 1e-30, ratio, 0.0)
 
     # Donor bin indices (upwind)
     idx = jnp.arange(nbins + 1)
@@ -744,8 +753,10 @@ def dry_mass_from_ppm_number(
     # Left-edge mass for each bin
     m_L = xk[:-1]
 
-    # Exact integral using precomputed moment integrals
-    M_dry = delta_xi * m_L * (n_L * I0 + b * I1 - n_6 * I2)
+    # Compute moment integrals for actual grid spacing
+    I0_a, I1_a, I2_a = _compute_moment_integrals(delta_xi)
+
+    M_dry = delta_xi * m_L * (n_L * I0_a + b * I1_a - n_6 * I2_a)
 
     return M_dry
 
@@ -825,8 +836,9 @@ def compute_substeps(
     m_final_safe = jnp.maximum(m_final, xk[0] * 0.1)
     delta_xi_max = jnp.max(jnp.abs(jnp.log(m_final_safe / xk)))
 
-    # Number of substeps
-    n_sub = jnp.ceil(delta_xi_max / (C_max * DELTA_XI)).astype(int)
+    # Number of substeps (use actual grid spacing)
+    actual_delta_xi = jnp.log(xk[1] / xk[0])
+    n_sub = jnp.ceil(delta_xi_max / (C_max * actual_delta_xi)).astype(int)
     n_sub = jnp.maximum(n_sub, 1)
 
     return n_sub
@@ -876,6 +888,9 @@ def ppm_condensation_step(
     nbins = Nk.shape[0]
     ncomp = Mk.shape[1]
 
+    # Derive delta_xi from actual grid spacing
+    delta_xi = jnp.log(xk[1] / xk[0])
+
     # 1. Freeze WR
     WR = compute_wr(Mk, icomp_nodiag)
 
@@ -892,18 +907,18 @@ def ppm_condensation_step(
         u_edges = compute_edge_velocity(xk, TAU_sub, WR, dt_sub)
 
         # 3b. Reconstruct number density
-        n_bar = Nk_curr / DELTA_XI
+        n_bar = Nk_curr / delta_xi
         n_L, n_R, n_6 = ppm_reconstruct(n_bar)
 
         # 3c. Compute number flux and advect
-        F_N = ppm_flux(n_L, n_R, n_6, u_edges, dt_sub, DELTA_XI)
+        F_N = ppm_flux(n_L, n_R, n_6, u_edges, dt_sub, delta_xi)
         Nk_next = advect_totals(Nk_curr, F_N, dt_sub)
 
         # 3d. Compute analytical dry mass flux (mass-weighted integral)
-        F_M_dry = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub, DELTA_XI)
+        F_M_dry = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub, delta_xi)
 
         # 3e. Transport ALL species — vectorized, no loops
-        M_dry_analytical = dry_mass_from_ppm_number(n_L, n_R, n_6, xk)
+        M_dry_analytical = dry_mass_from_ppm_number(n_L, n_R, n_6, xk, delta_xi)
         F_M_all = species_flux(F_M_dry, Mk_curr, M_dry_analytical, u_edges)
         Mk_next = advect_totals(Mk_curr, F_M_all, dt_sub)
 

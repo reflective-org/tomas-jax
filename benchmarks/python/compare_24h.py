@@ -24,13 +24,15 @@ NHOURS = 24
 
 # Directories
 _BASE_DIR = os.path.join(os.path.dirname(__file__), '..')
-FORTRAN_DIR = os.path.join(_BASE_DIR, 'fortran', 'output', '24h')
+FORTRAN_DIR = os.path.join(_BASE_DIR, '..', 'tomas_fortran', 'output', '24h')
 RESULTS_DIR = os.path.join(_BASE_DIR, 'results', '24h')
 
 MODE_NAMES = {
     'coag_only': 'coag',
     'cond_only': 'cond',
     'combined': 'combined',
+    'nucl_cond': 'nucl_cond',
+    'full': 'full',
 }
 
 
@@ -117,12 +119,13 @@ def compare_scenario(scenario_id, mode):
     """
     fort_mode = MODE_NAMES[mode]
 
-    # Load JAX results
-    tfl_method = 'tfl'
-    ppm_method = 'ppm'
-
-    tfl_data = load_jax_results(scenario_id, mode, tfl_method)
-    ppm_data = load_jax_results(scenario_id, mode, ppm_method)
+    # Load JAX results (try JIT variant first, fall back to sequential)
+    tfl_data = load_jax_results(scenario_id, mode, 'tfl_jit')
+    if tfl_data is None:
+        tfl_data = load_jax_results(scenario_id, mode, 'tfl')
+    ppm_data = load_jax_results(scenario_id, mode, 'ppm_jit')
+    if ppm_data is None:
+        ppm_data = load_jax_results(scenario_id, mode, 'ppm')
 
     # For coag_only, both methods are identical (no condensation)
     if mode == 'coag_only':
@@ -262,7 +265,8 @@ def compare_all_scenarios(scenario_ids=None, modes=None):
     if scenario_ids is None:
         scenario_ids = list(range(1, 51))
     if modes is None:
-        modes = ['coag_only', 'cond_only', 'combined']
+        modes = ['coag_only', 'cond_only', 'combined',
+                 'nucl_cond', 'full']
 
     all_metrics = []
     for sid in scenario_ids:
@@ -278,7 +282,8 @@ def print_summary(all_metrics):
     print("24-Hour Benchmark Comparison Summary")
     print("=" * 80)
 
-    for mode in ['coag_only', 'cond_only', 'combined']:
+    for mode in ['coag_only', 'cond_only', 'combined',
+                 'nucl_cond', 'full']:
         mode_metrics = [m for m in all_metrics if m['mode'] == mode]
         if not mode_metrics:
             continue
@@ -306,7 +311,8 @@ def save_comparison_npz(all_metrics, output_dir=None):
     os.makedirs(output_dir, exist_ok=True)
 
     # Organize by mode
-    for mode in ['coag_only', 'cond_only', 'combined']:
+    for mode in ['coag_only', 'cond_only', 'combined',
+                 'nucl_cond', 'full']:
         mode_metrics = [m for m in all_metrics if m['mode'] == mode]
         if not mode_metrics:
             continue
@@ -330,7 +336,8 @@ if __name__ == '__main__':
     parser.add_argument('--scenario', nargs='+', type=int, default=None,
                         help='Scenario IDs (1-based)')
     parser.add_argument('--mode', nargs='+', default=None,
-                        choices=['coag_only', 'cond_only', 'combined'])
+                        choices=['coag_only', 'cond_only', 'combined',
+                                 'nucl_cond', 'full'])
     args = parser.parse_args()
 
     all_metrics = compare_all_scenarios(

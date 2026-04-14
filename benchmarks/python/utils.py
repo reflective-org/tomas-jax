@@ -10,10 +10,21 @@ from typing import Dict, Optional, Tuple
 DEFAULT_DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'results', 'fortran_output')
 
 
+def _fix_fortran_float(s: str) -> str:
+    """Fix Fortran floats with missing E before large exponents.
+
+    Fortran writes e.g. '0.1024186408109169-238' instead of '0.1024186408109169E-238'
+    when the exponent exceeds 3 digits. Insert 'E' before the sign.
+    """
+    import re
+    return re.sub(r'(\d)([-+])(\d{3})', r'\1E\2\3', s)
+
+
 def load_csv(path: str) -> np.ndarray:
     """Load a CSV file written by the FORTRAN benchmark harness.
 
     Handles FORTRAN-style E-format (e.g., 1.234E+05) and comments (#).
+    Also handles missing-E format for large exponents (e.g., 0.123-238).
 
     Args:
         path: Path to CSV file.
@@ -21,7 +32,16 @@ def load_csv(path: str) -> np.ndarray:
     Returns:
         numpy array of float64.
     """
-    return np.loadtxt(path, delimiter=',', dtype=np.float64, comments='#')
+    try:
+        return np.loadtxt(path, delimiter=',', dtype=np.float64, comments='#')
+    except ValueError:
+        # Fortran wrote exponents without 'E' — fix and retry
+        with open(path, 'r') as f:
+            text = f.read()
+        fixed = _fix_fortran_float(text)
+        import io
+        return np.loadtxt(io.StringIO(fixed), delimiter=',', dtype=np.float64,
+                          comments='#')
 
 
 def compare_arrays(

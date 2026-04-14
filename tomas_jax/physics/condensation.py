@@ -1,5 +1,9 @@
 """TFL condensation algorithm for TOMAS-JAX (Fortran-faithful sequential version).
 
+.. deprecated::
+    NOT JIT-compilable. For GPU deployment, use ``condensation_tfl_jax.py``
+    (``method='tfl_jit'``) or ``ezcond_ppm_jax.py`` (``method='ppm_jit'``).
+
 Phase 1: Direct port of tmcond.f and dmdt_int.f using sequential Python loops.
 NOT JIT-compatible (uses Python for-loops and in-place mutation).
 
@@ -32,7 +36,7 @@ References:
 import numpy as np
 from typing import Tuple
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG, IDIAG, SRTSO4
+from ..core.config import ICOMP, ICOMP_NODIAG, IDIAG, SRTSO4
 
 
 # Constants matching Fortran PARAMETER statements
@@ -97,7 +101,7 @@ def tmcond(
         Nk_out: Updated number concentration, shape (ibins,)
         Mk_out: Updated mass concentration, shape (ibins, icomp)
     """
-    ibins = NBINS
+    ibins = Nkd.shape[0]
     icomp = ICOMP
     idiag = IDIAG
 

@@ -18,8 +18,9 @@ import jax
 import jax.numpy as jnp
 
 from tomas_jax.core.config import (
-    NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
-    SRTSO4, SRTH2O, xk_boundaries
+    NBINS_LEGACY as NBINS, XK0_LEGACY,
+    ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
+    SRTSO4, SRTH2O, make_grid,
 )
 from tomas_jax.solvers.condensation import condensation_step_tfl_jit
 from tomas_jax.solvers.coagulation_jax import coagulation_step_jit
@@ -124,7 +125,7 @@ def bin_diameters(xk_np):
 
 def main():
     scenarios = get_scenarios(n=50, seed=42)
-    xk_np = np.array(xk_boundaries())
+    xk_np = np.array(make_grid(NBINS, XK0_LEGACY))
     xk_j = jnp.array(xk_np)
     dp = bin_diameters(xk_np)
 

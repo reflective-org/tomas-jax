@@ -1,1 +1,1 @@
-../../../../original-models/TOMAS/inputs/created_files/sizecode.COM
+../../tomas_fortran/include/sizecode.COM

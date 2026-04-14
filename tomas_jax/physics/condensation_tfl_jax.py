@@ -15,7 +15,7 @@ import jax.numpy as jnp
 from typing import Tuple
 from functools import partial
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG, SRTSO4
+from ..core.config import ICOMP, ICOMP_NODIAG, SRTSO4
 
 # Constants matching Fortran
 TEPS = 1.0e-40
@@ -282,98 +282,107 @@ def ezcond_tfl_jax(
     icomp = Mk.shape[1]
     tdt = 2.0 / 3.0
 
-    # Condensation sink
+    # Condensation sink (needed for outer branch decision)
     CS, sinkfrac = calc_condensation_sink(
         Nk, Mk, temp, pres, boxvol,
-        accommodation_coeff=alpha
-    )
-    totsinkfrac = jnp.sum(sinkfrac)
-
-    # --- CS too small: dump in first bin ---
-    Nk_dump = Nk.at[0].add(mcond / jnp.sqrt(xk[0] * xk[1]))
-    Mk_dump = Mk.at[0, spec].add(mcond)
-
-    # --- Compute TAU (vectorized, matching ezcond.f lines 176-213) ---
-    mpo = jnp.sum(Mk[:, :icomp_nodiag], axis=1)
-    mpw = jnp.sum(Mk, axis=1)
-    WR = jnp.where(mpo > 0.0, mpw / mpo, 1.0)
-
-    safe_Nk = jnp.maximum(Nk, 1e-30)
-    safe_totsinkfrac = jnp.maximum(totsinkfrac, 1e-30)
-    maddp = mcond * sinkfrac / safe_totsinkfrac / safe_Nk
-    mpw_pp = mpw / safe_Nk
-
-    tau = jnp.where(
-        (Nk > 0.0) & (totsinkfrac > 0.0),
-        1.5 * (jnp.power(mpw_pp + maddp * WR, tdt) - jnp.power(mpw_pp, tdt)),
-        0.0
+        accommodation_coeff=alpha, xk=xk
     )
 
-    # --- Significance check ---
-    tot_m = jnp.sum(Mk[:, :icomp_nodiag])
-    tot_s = jnp.sum(Mk[:, spec])
+    # --- Dump path (CS too small): add all mass to first bin ---
+    def dump_path(_):
+        Nk_d = Nk.at[0].add(mcond / jnp.sqrt(xk[0] * xk[1]))
+        Mk_d = Mk.at[0, spec].add(mcond)
+        return Nk_d, Mk_d
 
-    # --- Path 1: Full tmcond (with MNFIX before, matching ezcond.f line 202) ---
-    def tmcond_path(args):
-        Nk_in, Mk_in, tau_in = args
-        # MNFIX before tmcond (ezcond.f line 202)
-        Nk_fixed, Mk_fixed = mnfix_jax(Nk_in, Mk_in, xk, icomp_nodiag)
-        Nk2, Mk2 = tmcond_jax(tau_in, xk, Mk_fixed, Nk_fixed, spec, icomp_nodiag)
-        return Nk2, Mk2
+    # --- Condensation path (CS significant): full TAU + tmcond/simple/noop ---
+    def cond_path(_):
+        totsinkfrac = jnp.sum(sinkfrac)
 
-    # --- Path 2: Simple mass addition ---
-    def simple_add_path(args):
-        Nk_in, Mk_in, tau_in = args
-        mass_add = jnp.where(
-            (Nk_in > 0.0) & (totsinkfrac > 0.0),
-            mcond * sinkfrac / safe_totsinkfrac,
+        # Compute TAU (vectorized, matching ezcond.f lines 176-213)
+        mpo = jnp.sum(Mk[:, :icomp_nodiag], axis=1)
+        mpw = jnp.sum(Mk, axis=1)
+        safe_mpo = jnp.maximum(mpo, 1e-30)
+        WR = jnp.where(mpo > 0.0, mpw / safe_mpo, 1.0)
+
+        safe_Nk = jnp.maximum(Nk, 1e-30)
+        safe_totsinkfrac = jnp.maximum(totsinkfrac, 1e-30)
+        maddp = mcond * sinkfrac / safe_totsinkfrac / safe_Nk
+        mpw_pp = mpw / safe_Nk
+
+        tau = jnp.where(
+            (Nk > 0.0) & (totsinkfrac > 0.0),
+            1.5 * (jnp.power(mpw_pp + maddp * WR, tdt)
+                   - jnp.power(mpw_pp, tdt)),
             0.0
         )
-        Mk_out = Mk_in.at[:, spec].add(mass_add)
-        # MNFIX after simple add (ezcond.f line 232)
-        Nk_out, Mk_out = mnfix_jax(Nk_in, Mk_out, xk, icomp_nodiag)
-        return Nk_out, Mk_out
 
-    # --- Path 3: No-op ---
-    def noop_path(args):
-        return args[0], args[1]
+        # Significance check
+        tot_m = jnp.sum(Mk[:, :icomp_nodiag])
+        tot_s = jnp.sum(Mk[:, spec])
 
-    # Three-way branch
-    args = (Nk, Mk, tau)
+        # Path 1: Full tmcond (with MNFIX before, matching ezcond.f line 202)
+        def tmcond_path(args):
+            Nk_in, Mk_in, tau_in = args
+            Nk_fixed, Mk_fixed = mnfix_jax(Nk_in, Mk_in, xk, icomp_nodiag)
+            Nk2, Mk2 = tmcond_jax(tau_in, xk, Mk_fixed, Nk_fixed, spec,
+                                   icomp_nodiag)
+            return Nk2, Mk2
 
-    def significant_path(args):
-        return jax.lax.cond(
-            mcond > tot_m * 1.0e-3,
-            tmcond_path,
-            simple_add_path,
-            args
+        # Path 2: Simple mass addition
+        def simple_add_path(args):
+            Nk_in, Mk_in, _ = args
+            mass_add = jnp.where(
+                (Nk_in > 0.0) & (totsinkfrac > 0.0),
+                mcond * sinkfrac / safe_totsinkfrac,
+                0.0
+            )
+            Mk_out = Mk_in.at[:, spec].add(mass_add)
+            Nk_out, Mk_out = mnfix_jax(Nk_in, Mk_out, xk, icomp_nodiag)
+            return Nk_out, Mk_out
+
+        # Path 3: No-op
+        def noop_path(args):
+            return args[0], args[1]
+
+        sub_args = (Nk, Mk, tau)
+
+        def significant_path(args):
+            return jax.lax.cond(
+                mcond > tot_m * 1.0e-3,
+                tmcond_path,
+                simple_add_path,
+                args
+            )
+
+        Nk_cond, Mk_cond = jax.lax.cond(
+            mcond > tot_s * 1.0e-12,
+            significant_path,
+            noop_path,
+            sub_args
         )
 
-    Nk_cond, Mk_cond = jax.lax.cond(
-        mcond > tot_s * 1.0e-12,
-        significant_path,
-        noop_path,
-        args
+        # Mass conservation correction (ezcond.f lines 261-291)
+        tot_i = jnp.sum(Mk[:, spec])
+        tot_f = jnp.sum(Mk_cond[:, spec])
+        gained = tot_f - tot_i
+        ratio = jnp.where(jnp.abs(mcond) > 0, gained / mcond, 1.0)
+        should_correct = (ratio > 0.0) & (ratio < 2.0)
+        safe_ratio = jnp.where(should_correct, ratio, 1.0)
+        Mk_corrected = Mk.at[:, spec].set(
+            Mk[:, spec] + (Mk_cond[:, spec] - Mk[:, spec]) / safe_ratio
+        )
+        Mk_cond = jnp.where(should_correct & (mcond > 0.0),
+                             Mk_corrected, Mk_cond)
+
+        # MNFIX after mass correction (ezcond.f line 279)
+        Nk_cond, Mk_cond = mnfix_jax(Nk_cond, Mk_cond, xk, icomp_nodiag)
+
+        return Nk_cond, Mk_cond
+
+    # Outer branch: skip heavy computation when CS is negligible
+    return jax.lax.cond(
+        CS < 1e-20,
+        dump_path,
+        cond_path,
+        None
     )
-
-    # --- Mass conservation correction (ezcond.f lines 261-291) ---
-    tot_i = jnp.sum(Mk[:, spec])
-    tot_f = jnp.sum(Mk_cond[:, spec])
-    gained = tot_f - tot_i
-    ratio = jnp.where(jnp.abs(mcond) > 0, gained / mcond, 1.0)
-    # Fortran condition: abs(1 - ratio) < 1.0, i.e. 0 < ratio < 2
-    should_correct = (ratio > 0.0) & (ratio < 2.0)
-    safe_ratio = jnp.where(should_correct, ratio, 1.0)
-    Mk_corrected = Mk.at[:, spec].set(
-        Mk[:, spec] + (Mk_cond[:, spec] - Mk[:, spec]) / safe_ratio
-    )
-    Mk_cond = jnp.where(should_correct & (mcond > 0.0), Mk_corrected, Mk_cond)
-
-    # MNFIX after mass correction (ezcond.f line 279)
-    Nk_cond, Mk_cond = mnfix_jax(Nk_cond, Mk_cond, xk, icomp_nodiag)
-
-    # Select: dump vs condensation
-    Nk_out = jnp.where(CS < 1e-20, Nk_dump, Nk_cond)
-    Mk_out = jnp.where(CS < 1e-20, Mk_dump, Mk_cond)
-
-    return Nk_out, Mk_out

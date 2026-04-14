@@ -1,5 +1,9 @@
 """Simple condensation driver for TOMAS-JAX.
 
+.. deprecated::
+    NOT JIT-compilable. For GPU deployment, use ``ezcond_tfl_jax``
+    (``method='tfl_jit'``) or ``ezcond_ppm_jax`` (``method='ppm_jit'``).
+
 Exact port of ezcond.f (Jeff Pierce, May 2007).
 
 Takes a prescribed amount of condensing mass (``mcond`` [kg/grid cell])
@@ -26,7 +30,7 @@ References:
 import numpy as np
 from typing import Tuple
 
-from ..core.config import NBINS, ICOMP, ICOMP_NODIAG, IDIAG
+from ..core.config import ICOMP, ICOMP_NODIAG, IDIAG
 from .condensation import tmcond
 from .condensation_sink import calc_condensation_sink
 from ..core.mnfix_jax import mnfix_jax
@@ -68,7 +72,7 @@ def ezcond(
         Nkf: Updated number concentration, shape (ibins,)
         Mkf: Updated mass concentration, shape (ibins, icomp)
     """
-    ibins = NBINS
+    ibins = Nki.shape[0]
     icomp = ICOMP
     idiag = IDIAG
 
@@ -90,7 +94,7 @@ def ezcond(
     CS_jax, sinkfrac_jax = calc_condensation_sink(
         jnp.array(Nk1), jnp.array(Mk1),
         temp, pres, boxvol,
-        accommodation_coeff=alpha
+        accommodation_coeff=alpha, xk=jnp.array(xk_np)
     )
     CS = float(CS_jax)
     sinkfrac = np.array(sinkfrac_jax)
@@ -132,7 +136,7 @@ def ezcond(
             CS_jax, sinkfrac_jax = calc_condensation_sink(
                 jnp.array(Nk1), jnp.array(Mk1),
                 temp, pres, boxvol,
-                accommodation_coeff=alpha
+                accommodation_coeff=alpha, xk=jnp.array(xk_np)
             )
             sinkfrac = np.array(sinkfrac_jax)
             totsinkfrac = np.sum(sinkfrac)
