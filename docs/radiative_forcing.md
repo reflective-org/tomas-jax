@@ -18,17 +18,33 @@ TOMAS-JAX includes a direct shortwave radiative forcing (RF) module based on the
    ```
    where A is the column area [m²].
 
-4. **Radiative forcing** (Chylek & Wong 1995):
+4. **Radiative forcing** (Chylek & Wong 1995 / Pierce et al. 2010):
    ```
-   RF = -(S₀/4) × T_atm² × (1-α)² × 2β × τ
+   RF = -(S₀/4) × T_a² × (1-A) × (1-R)² × 2β × τ
    ```
-   where S₀/4 is global average insolation (340.25 W/m²), T_atm is atmospheric transmittance (0.85), α is surface albedo (0.30), β is upscatter fraction, τ is scattering optical depth.
+   where:
+   - **S₀** = Solar constant [W/m²]. S₀/4 is global average insolation.
+   - **T_a** = Atmospheric transmittance above the aerosol layer. Fraction of sunlight reaching the aerosol after passing through the atmosphere above it. For stratospheric aerosol, T_a = 1.0 (nothing above to attenuate). For tropospheric aerosol, T_a ≈ 0.85.
+   - **A** = Cloud fraction. Fraction of sky covered by clouds, which block the aerosol's scattering effect. Only the clear-sky fraction (1-A) contributes to RF.
+   - **R** = Clear-sky surface albedo. Over bright surfaces, upscattered light would have been reflected anyway, reducing the net cooling. The (1-R)² term accounts for the double pass through the aerosol layer above a non-black surface.
+   - **β** = Upscatter fraction. Fraction of scattered light directed back to space, computed from the Henyey-Greenstein phase function averaged over solar zenith angles (Wiscombe & Grams 1976 eqn 22).
+   - **τ** = Scattering optical depth of the aerosol layer.
+
+### Pierce et al. (2010) SI parameters (stratospheric aerosol)
+
+| Parameter | Symbol | Value | Rationale |
+|-----------|--------|-------|-----------|
+| Solar constant | S₀ | 1370 W/m² | Standard value |
+| Atmospheric transmittance | T_a | 1.0 | Stratosphere: no attenuation above |
+| Cloud fraction | A | 0.6 | Global average cloud cover |
+| Surface albedo (clear-sky) | R | 0.15 | Global average without clouds |
+| Refractive index | n | 1.4 + 1e-8i | ~65 wt% H₂SO₄/H₂O solution |
 
 ### Key assumptions
 - Purely scattering aerosol (negligible absorption for sulfate at visible wavelengths)
-- Single wavelength (550 nm default, peak solar-weighted scattering)
+- Solar-spectrum-weighted Mie scattering (Planck 5778 K, 300–2500 nm, 30 bands). Single-wavelength (500 nm) overestimates peak RF by ~36%.
 - Thin aerosol limit (RF linear in optical depth)
-- Default: global annual average solar geometry, albedo, and upscatter
+- Global annual average solar geometry, albedo, and upscatter
 
 ## Files
 
@@ -111,15 +127,15 @@ rho = h2so4_solution_density(wt_pct)                      # → 1541 kg/m³
 
 ### Composition at T=220K
 
-| RH (%) | wt% H₂SO₄ | Density (kg/m³) | Peak RF (W/m² per Mt-S) |
-|--------|-----------|-----------------|------------------------|
-| 1      | 71.9      | 1633            | 0.91                   |
-| 2      | 68.9      | 1598            | 0.97                   |
-| 5      | 63.8      | 1541            | 1.09                   |
-| 10     | 58.9      | 1487            | 1.22                   |
-| 20     | 52.2      | 1417            | 1.45                   |
+| RH (%) | wt% H₂SO₄ | Density (kg/m³) | Peak RF, spectral (W/m² per Mt-S) | Peak RF, 500nm (W/m² per Mt-S) |
+|--------|-----------|-----------------|-----------------------------------|-------------------------------|
+| 1      | 71.9      | 1633            | 0.58                              | 0.91                          |
+| 2      | 68.9      | 1598            | 0.63                              | 0.97                          |
+| 5      | 63.8      | 1541            | 0.70                              | 1.09                          |
+| 10     | 58.9      | 1487            | 0.79                              | 1.22                          |
+| 20     | 52.2      | 1417            | 0.94                              | 1.45                          |
 
-Pierce et al. (2010) assumed 75 wt% (peak 0.84), corresponding to RH < 1%. Typical lower stratospheric RH of 2–10% gives higher scattering efficiency because water dilution increases total mass per Mt-S.
+Single-wavelength (500 nm) overestimates peak RF by ~36% compared to full solar-spectrum-weighted Mie calculation. Pierce et al. (2010) used 500 nm with an assumed 75 wt% (peak 0.84). The spectral peak also shifts from ~0.19 μm (500 nm) to ~0.23 μm.
 
 ## Physical parameters
 

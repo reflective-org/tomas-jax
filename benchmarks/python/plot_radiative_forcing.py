@@ -1,13 +1,13 @@
 """Radiative forcing diagnostic plots.
 
-Generates 4 figures:
-    1. Scattering efficiency vs radius (Pierce et al. 2010 Figure 1 reproduction)
-    2. Mie properties (Qsca, Qext, gsca) vs TOMAS bin radius
-    3. Upscatter fraction vs asymmetry parameter
-    4. RF per bin for a sample lognormal distribution
+Generates 3 figures:
+    1. Scattering efficiency vs radius (Pierce et al. 2010 Figure 1),
+       solar-spectrum-weighted Mie, Tabazadeh composition at multiple RH
+    2. Upscatter fraction vs asymmetry parameter (Wiscombe & Grams 1976)
+    3. H2SO4/H2O equilibrium composition vs temperature (Tabazadeh et al. 1997)
 
 Usage:
-    python -m benchmarks.python.plot_radiative_forcing [--outdir DIR]
+    python -m benchmarks.python.plot_radiative_forcing [--outdir DIR] [--temp 220] [--rh 5]
 """
 import numpy as np
 import matplotlib.pyplot as plt
@@ -82,12 +82,13 @@ def make_lognormal_Nk(xk, N_total, gmd, gsd, density=DENSITY_SULFATE):
     return np.maximum(Nk, 0.0)
 
 
-def plot_scattering_efficiency_vs_radius(ax, temp=220.0):
+def plot_scattering_efficiency_vs_radius(fig, ax, temp=220.0, n_wavelengths=30):
     """Figure 1: Pierce et al. 2010 Figure 1 reproduction.
 
-    Uses Pierce's SI parameters: T_a=1.0, A=0.6, R=0.15, S₀=1370,
-    500 nm wavelength. Composition computed from Tabazadeh et al. (1997)
-    at the specified temperature for several RH values.
+    Uses Pierce's SI parameters: T_a=1.0, A=0.6, R=0.15, S₀=1370.
+    Solar-spectrum-weighted Mie scattering (Planck 5778K, 300-2500nm).
+    Composition computed from Tabazadeh et al. (1997) at the specified
+    temperature for several RH values.
     """
     n_radii = 80
     EARTH_AREA = 5.1e14  # m²
@@ -113,7 +114,7 @@ def plot_scattering_efficiency_vs_radius(ax, temp=220.0):
         print(f"  RH={rh}%: wt={wt:.1f}%, rho={rho:.0f} kg/m3")
         radii, rf = scattering_efficiency_vs_radius(
             n_radii=n_radii, r_min=5e-9, r_max=10e-6,
-            wavelength=WAVELENGTH_PIERCE, spectral=False, **pierce_kw,
+            spectral=True, n_wavelengths=n_wavelengths, **pierce_kw,
         )
 
         # Convert to W/m² per Mt-S using the self-consistent wt%
@@ -124,17 +125,35 @@ def plot_scattering_efficiency_vs_radius(ax, temp=220.0):
         peak_val = cool.max()
         peak_r = radii[np.argmax(cool)] * 1e6
         ax.semilogx(radii * 1e6, cool, color=color, linestyle=ls, linewidth=2,
-                    label=f'RH={rh}% ({wt:.0f} wt%, {rho:.0f} kg/m$^3$, '
-                          f'peak={peak_val:.2f})')
+                    label=f'RH={rh}% ({wt:.0f} wt%, $\\rho$={rho:.0f} kg/m$^3$, '
+                          f'peak={peak_val:.2f} at r={peak_r:.2f} $\\mu$m)')
 
     ax.set_xlabel('Particle radius [$\\mu$m]')
     ax.set_ylabel('Scattering cooling efficiency\n[W m$^{-2}$ per Mt-S]')
     ax.set_title(f'RF per unit sulfur burden vs particle size\n'
-                 f'(Pierce et al. 2010 Fig. 1; $T_a$=1, A=0.6, R=0.15, '
-                 f'T={temp:.0f}K, Tabazadeh 1997)')
+                 f'(Solar-spectrum-weighted Mie, T={temp:.0f} K)')
     ax.set_xlim(5e-3, 10)
     ax.legend(fontsize=8, loc='upper right')
     ax.grid(True, alpha=0.3)
+
+    # Assumptions box at bottom
+    assumptions = (
+        f'RF = $-$(S$_0$/4) $\\cdot$ T$_a^2$ $\\cdot$ (1$-$A) $\\cdot$ (1$-$R)$^2$ '
+        f'$\\cdot$ 2$\\beta\\tau$   (Chylek & Wong 1995 / Pierce et al. 2010 SI)\n'
+        f'S$_0$ = {SOLAR_CONSTANT_PIERCE:.0f} W/m$^2$ (solar constant)  |  '
+        f'T$_a$ = {TATM_STRATOSPHERIC} (atmospheric transmittance above aerosol; '
+        f'stratosphere: nothing above)  |  '
+        f'A = {CLOUD_FRACTION_DEFAULT} (cloud fraction)\n'
+        f'R = {ALBEDO_SURFACE_CLEARSKY} (clear-sky surface albedo)  |  '
+        f'n = 1.4 + 1e-8i (refractive index, ~65 wt% H$_2$SO$_4$)  |  '
+        f'Mie spectrum: Planck 5778 K, 300\u20132500 nm, {n_wavelengths} bands\n'
+        f'Composition: Tabazadeh et al. (1997) binary H$_2$SO$_4$/H$_2$O '
+        f'equilibrium at T = {temp:.0f} K  |  '
+        f'Density: CRC Handbook (25$^\\circ$C)'
+    )
+    fig.text(0.5, -0.01, assumptions, ha='center', va='top', fontsize=6.5,
+             wrap=True,
+             bbox=dict(boxstyle='round,pad=0.4', facecolor='lightyellow', alpha=0.8))
 
 
 def plot_mie_properties(ax1, mie):
@@ -263,99 +282,51 @@ def main():
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # Compute equilibrium composition at specified T, RH
     T_strat = args.temp
     RH_strat = args.rh
-    wt_h2so4 = h2so4_equilibrium_wt(T_strat, RH_strat)
-    rho_wet = h2so4_solution_density(wt_h2so4)
-    wt_frac = wt_h2so4 / 100.0
 
-    print(f"Tabazadeh (1997) equilibrium composition:")
-    print(f"  T = {T_strat:.0f} K, RH = {RH_strat:.0f}%")
-    print(f"  H2SO4 weight percent = {wt_h2so4:.1f}%")
-    print(f"  Solution density = {rho_wet:.0f} kg/m3")
+    print(f"Tabazadeh (1997) equilibrium at T={T_strat:.0f}K, RH={RH_strat:.0f}%:")
+    wt = h2so4_equilibrium_wt(T_strat, RH_strat)
+    rho = h2so4_solution_density(wt)
+    print(f"  {wt:.1f} wt% H2SO4, rho={rho:.0f} kg/m3")
 
-    # Precompute Mie for 40-bin grid using computed density
-    print(f"\nPrecomputing Mie properties for 40-bin TOMAS grid...")
-    print(f"  Using computed wet density: {rho_wet:.0f} kg/m3")
-    xk = make_grid(NBINS, XK0, 2.0)
-    mie = precompute_mie_properties(
-        xk, density=rho_wet, global_avg_upscatter=True,
-    )
-    print(f"  Radii: {mie.radii[0]*1e9:.1f} nm to {mie.radii[-1]*1e6:.1f} um")
-    print(f"  Qsca range: {mie.Qsca.min():.2e} to {mie.Qsca.max():.3f}")
-    print(f"  gsca range: {mie.gsca.min():.4f} to {mie.gsca.max():.4f}")
-    print(f"  Upscatter range: {mie.upscatter_avg.min():.4f} to {mie.upscatter_avg.max():.4f}")
-
-    # Figure 1: Scattering efficiency vs radius (Pierce SI parameters)
-    print("\nFigure 1: Scattering efficiency vs radius (Tabazadeh composition)...")
-    fig1, ax1 = plt.subplots(1, 1, figsize=(10, 6))
-    plot_scattering_efficiency_vs_radius(ax1, temp=T_strat)
-    fig1.tight_layout()
+    # Figure 1: Scattering efficiency vs radius (spectral, 50 bands)
+    print("\nFigure 1: Scattering efficiency vs radius (spectral, Tabazadeh)...")
+    fig1, ax1 = plt.subplots(1, 1, figsize=(11, 7))
+    plot_scattering_efficiency_vs_radius(fig1, ax1, temp=T_strat, n_wavelengths=50)
+    fig1.tight_layout(rect=[0, 0.06, 1, 1])
     fig1.savefig(os.path.join(args.outdir, 'fig1_scattering_efficiency_vs_radius.png'),
-                 dpi=150)
+                 dpi=150, bbox_inches='tight')
     print(f"  Saved: {args.outdir}/fig1_scattering_efficiency_vs_radius.png")
 
-    # Figure 2: Mie properties
-    print("\nFigure 2: Mie properties per TOMAS bin...")
+    # Figure 2: Upscatter fraction vs asymmetry parameter
+    print("\nFigure 2: Upscatter fraction vs g...")
     fig2, ax2 = plt.subplots(1, 1, figsize=(8, 5))
-    plot_mie_properties(ax2, mie)
+    plot_upscatter_vs_g(ax2)
     fig2.tight_layout()
-    fig2.savefig(os.path.join(args.outdir, 'fig2_mie_properties.png'), dpi=150)
-    print(f"  Saved: {args.outdir}/fig2_mie_properties.png")
+    fig2.savefig(os.path.join(args.outdir, 'fig2_upscatter_fraction.png'), dpi=150)
+    print(f"  Saved: {args.outdir}/fig2_upscatter_fraction.png")
 
-    # Figure 3: Upscatter fraction
-    print("\nFigure 3: Upscatter fraction vs g...")
+    # Figure 3: Composition vs temperature (Tabazadeh parameterization)
+    print("\nFigure 3: H2SO4/H2O composition vs temperature...")
     fig3, ax3 = plt.subplots(1, 1, figsize=(8, 5))
-    plot_upscatter_vs_g(ax3)
+    plot_composition_vs_temperature(ax3)
     fig3.tight_layout()
-    fig3.savefig(os.path.join(args.outdir, 'fig3_upscatter_fraction.png'), dpi=150)
-    print(f"  Saved: {args.outdir}/fig3_upscatter_fraction.png")
-
-    # Figure 4: RF per bin (using computed composition)
-    print("\nFigure 4: RF per bin for sample distributions...")
-    fig4, ax4 = plt.subplots(1, 1, figsize=(8, 5))
-    plot_rf_per_bin(ax4, mie, xk, wt_frac, rho_wet)
-    fig4.tight_layout()
-    fig4.savefig(os.path.join(args.outdir, 'fig4_rf_per_bin.png'), dpi=150)
-    print(f"  Saved: {args.outdir}/fig4_rf_per_bin.png")
-
-    # Figure 5: Composition vs temperature (Tabazadeh parameterization)
-    print("\nFigure 5: H2SO4/H2O composition vs temperature...")
-    fig5, ax5 = plt.subplots(1, 1, figsize=(8, 5))
-    plot_composition_vs_temperature(ax5)
-    fig5.tight_layout()
-    fig5.savefig(os.path.join(args.outdir, 'fig5_h2so4_composition.png'), dpi=150)
-    print(f"  Saved: {args.outdir}/fig5_h2so4_composition.png")
+    fig3.savefig(os.path.join(args.outdir, 'fig3_h2so4_composition.png'), dpi=150)
+    print(f"  Saved: {args.outdir}/fig3_h2so4_composition.png")
 
     # Print summary
     print("\n" + "="*60)
-    print("SUMMARY (Pierce SI parameters + Tabazadeh composition)")
+    print("SUMMARY")
     print("="*60)
-    print(f"  T_a={TATM_STRATOSPHERIC}, A={CLOUD_FRACTION_DEFAULT}, "
-          f"R={ALBEDO_SURFACE_CLEARSKY}, S0={SOLAR_CONSTANT_PIERCE}")
-    print(f"  T={T_strat:.0f}K, RH={RH_strat:.0f}%: "
-          f"{wt_h2so4:.1f} wt% H2SO4, rho={rho_wet:.0f} kg/m3")
-
-    # Compute RF for the three sample cases at fixed burden
-    column_area = 1.0  # m²
-    burden_wet_kg_m2 = 5e-6 / (wt_frac * 32.0 / 98.0)
-
-    print(f"  Fixed burden: 5 mg-S/m2 ({burden_wet_kg_m2*1e6:.1f} mg-wet/m2)")
-    for gmd, label in [(0.05e-6, 'Small 50nm'), (0.2e-6, 'Optimal 200nm'), (1.0e-6, 'Large 1um')]:
-        m_mean = (4.0 / 3.0) * PI * rho_wet * (gmd / 2.0)**3
-        N_col = burden_wet_kg_m2 / m_mean
-        Nk = make_lognormal_Nk(xk, N_col, gmd, 1.6, density=rho_wet)
-        rf_total, _ = compute_rf(
-            Nk, mie, column_area,
-            solar_constant=SOLAR_CONSTANT_PIERCE,
-            Tatm=TATM_STRATOSPHERIC,
-            albedo=ALBEDO_SURFACE_CLEARSKY,
-            cloud_fraction=CLOUD_FRACTION_DEFAULT,
-        )
-        tau = compute_optical_depth(Nk, mie, column_area)
-        print(f"  {label:20s}: RF = {rf_total:+.4f} W/m2, "
-              f"tau = {tau.sum():.4e}, N_col = {N_col:.2e} /m2")
+    print(f"  Pierce SI: S0={SOLAR_CONSTANT_PIERCE:.0f} W/m2, T_a={TATM_STRATOSPHERIC}, "
+          f"A={CLOUD_FRACTION_DEFAULT}, R={ALBEDO_SURFACE_CLEARSKY}")
+    print(f"  Spectral Mie: Planck 5778K, 300-2500nm, 50 bands (<1% of converged)")
+    print(f"  Composition: Tabazadeh (1997), T={T_strat:.0f}K")
+    for rh in [2, 5, 10, 20]:
+        wt = h2so4_equilibrium_wt(T_strat, rh)
+        rho = h2so4_solution_density(wt)
+        print(f"    RH={rh:2d}%: {wt:.1f} wt% H2SO4, rho={rho:.0f} kg/m3")
 
     plt.close('all')
     print(f"\nAll figures saved to {args.outdir}/")
