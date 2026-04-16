@@ -1,5 +1,8 @@
 # TOMAS-JAX
 
+**This project is under active development, there is no guarantee that it will operate as expected**
+
+
 **High-Performance, Differentiable Aerosol Microphysics in JAX**
 
 A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model, leveraging Google's JAX for JIT compilation, automatic differentiation, and GPU/TPU portability.
@@ -481,6 +484,6 @@ Direct port of TOMAS Fortran (coagulation, condensation, nucleation). Fortran so
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the LGPL-3.0 License. See `LICENSE` for more information.
 
 _Built with [JAX](https://github.com/google/jax) and [Diffrax](https://github.com/patrick-kidger/diffrax)._
