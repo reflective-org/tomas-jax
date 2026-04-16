@@ -4,6 +4,34 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-15 (Tue) — Radiative Forcing with Tabazadeh H₂SO₄/H₂O Equilibrium
+
+**Time**: afternoon PST
+
+### Summary
+Added direct shortwave radiative forcing module (Chylek & Wong 1995 / Pierce et al. 2010) with Bohren-Huffman Mie scattering and Tabazadeh et al. (1997) binary H₂SO₄/H₂O equilibrium composition parameterization.
+
+### Changes
+
+1. **Mie scattering** (`tomas_jax/physics/bhmie.py`)
+   - Bohren-Huffman Mie code (numpy). Computes Qsca, Qext, gsca for any size parameter and refractive index.
+
+2. **Radiative forcing** (`tomas_jax/physics/radiative_forcing.py`)
+   - `precompute_mie_properties()`: Mie + global-avg upscatter (Wiscombe & Grams 1976). Single-wavelength and spectral integration modes.
+   - `compute_rf()`: Chylek & Wong RF with Pierce SI cloud-fraction extension.
+   - `scattering_efficiency_vs_radius()`: Reproduces Pierce et al. (2010) Figure 1.
+   - `h2so4_equilibrium_wt(temp, rh)`: Tabazadeh et al. (1997) Table 1 vapor pressure interpolation.
+   - `h2so4_solution_density(wt)`: CRC Handbook density interpolation.
+
+3. **Benchmark plots** (`benchmarks/python/plot_radiative_forcing.py`) — 5 figures
+4. **Tests** (`tests/test_radiative_forcing.py`) — 8 Tabazadeh composition tests + RF tests
+5. **Documentation** (`docs/radiative_forcing.md`)
+
+### Key Finding
+Pierce assumed 75 wt% H₂SO₄ (peak 0.84 W/m² per Mt-S). Tabazadeh at T=220K, RH=5% gives 63.8 wt% and peak 1.09 — 30% higher due to water dilution.
+
+---
+
 ## 2026-04-10 (Thu) — JAX Performance Optimization
 
 **Time**: evening PST
