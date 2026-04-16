@@ -64,6 +64,8 @@ tomas_jax/
   physics/condensation_sink.py — Condensation sink CS [s^-1] and per-bin fractions
   physics/nh3_equilibrium.py  — NH3/NH4 stoichiometric equilibrium
   physics/water_equilibrium.py — Hygroscopic water uptake (ISORROPIA fits)
+  physics/bhmie.py            — Bohren-Huffman Mie scattering (numpy, precomputation)
+  physics/radiative_forcing.py — Direct SW radiative forcing (Chylek & Wong 1995, Pierce et al. 2010) + Tabazadeh (1997) H₂SO₄/H₂O equilibrium
   physics/nucleation.py       — Nucleation: ricco_dunne (Riccobono+Dunne) + zhao2024 (11-mechanism) schemes (JIT-compilable)
   physics/so2_chemistry.py    — SO2+OH chemistry: Sun et al. (2022) Troe formalism, SZA, diurnal OH (JIT-compilable)
   physics/dilution.py         — Dilution/entrainment: first-order relaxation toward background (JIT-compilable)

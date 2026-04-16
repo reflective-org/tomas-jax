@@ -532,8 +532,6 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
 
     Args:
         step_fn: Callable(Nk, Mk, Gc) -> (Nk, Mk, Gc)
-            OR Callable(Nk, Mk, Gc, step_idx) -> (Nk, Mk, Gc) when
-            step_fn accepts a step index (for diurnal OH in so2_chemistry).
         nsteps: Number of scan steps
         dt: Timestep [s]
         prod_rate: H2SO4 production rate [kg/s]
@@ -545,7 +543,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
         (Nk_f, Mk_f, Gc_f), diagnostics
     """
     if diag_mode == 'rich':
-        def body(carry, step_idx):
+        def body(carry, _):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
             Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
@@ -555,7 +553,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
                                Gc_c[SRTSO4]])
             return (Nk_c, Mk_c, Gc_c), diag
     else:
-        def body(carry, step_idx):
+        def body(carry, _):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
             Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
@@ -563,7 +561,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
             return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
 
     (Nk_f, Mk_f, Gc_f), history = jax.lax.scan(
-        body, (Nk, Mk, Gc), jnp.arange(nsteps), length=nsteps
+        body, (Nk, Mk, Gc), None, length=nsteps
     )
     return (Nk_f, Mk_f, Gc_f), history
 
