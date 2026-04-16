@@ -372,7 +372,6 @@ Each timestep: (1) SO2 + OH chemistry → (2) Nucleation → (3) Coagulation →
 ```
 tomas-jax/
 ├── run_box_model.py                 # Main driver (see CLI options above)
-├── run_sensitivity_analysis.py      # Autodiff sensitivity examples
 │
 ├── tomas_jax/                       # Source package
 │   ├── core/

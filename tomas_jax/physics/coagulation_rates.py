@@ -12,8 +12,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-# Default for standard TOMAS (p=2, mass doubling) — multicoag.f line 98
-ZETA_DEFAULT = 1.0625
+from ..core.config import ICOMP_NODIAG
+
 NEPS = 1.0e-3
 
 
@@ -58,7 +58,7 @@ def calc_xbar_phi_eff(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate xbar, phi, and eff for TFL algorithm.
     
@@ -99,8 +99,8 @@ def calc_coagulation_rates(
     Mk: jnp.ndarray,
     kij: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    icomp_nodiag: int = ICOMP_NODIAG
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate coagulation rates dNdt and dMdt using TFL algorithm.
 
     This implementation is fully vectorized. It replaces the sequential loop
@@ -116,6 +116,10 @@ def calc_coagulation_rates(
     Returns:
         dNdt: Rate of change of number, shape (ibins,)
         dMdt: Rate of change of mass, shape (ibins, icomp)
+        dM_overflow: Mass rate overflowing the top bin, shape (icomp,).
+            This is mass that would enter a hypothetical bin above the grid.
+            Physically expected for finite bin grids; accumulate over time
+            for mass budget closure: M(0) = M(t) + integral(dM_overflow).
     """
     # 1. Preprocess Inputs
     Nk_safe, Mk_safe = _preprocess_concentrations(Nk, Mk, xk)
@@ -213,14 +217,26 @@ def calc_coagulation_rates(
         - zeta3 * (phi_prev[:, None] - eff_prev[:, None]) / (2.0 * xk_mid_prev[:, None]) * sk2mx2_vec
     )
 
-    # 5. Combine and Return
+    # 5. Top-bin overflow: mass that would enter a hypothetical bin above the grid.
+    # This is the dMdt_prev contribution from bin[-1] that shift_right drops.
+    # Uses xk[-1] (upper boundary of last bin) as the "xk_mid" for the overflow bin.
+    dM_overflow_nodiag = (
+        kij_diag[-1] * Nk_safe[-1] * Mk_nodiag[-1]
+        + phi[-1] * xk[-1] * k1m_vec[-1]
+        + 0.5 * zeta * eff[-1] * k1mx_vec[-1]
+        - zeta3 * (phi[-1] - eff[-1]) / (2.0 * xk_mid[-1]) * k1mx2_vec[-1]
+    )  # shape: (icomp_nodiag,)
+    dM_overflow = jnp.zeros(Mk.shape[1])
+    dM_overflow = dM_overflow.at[:icomp_nodiag].set(dM_overflow_nodiag)
+
+    # 6. Combine and Return
     dNdt = dNdt_curr + dNdt_prev
-    
+
     # Combine dMdt for non-diagnostic species
     dMdt_nodiag = dMdt_curr + dMdt_prev
-    
+
     # Create full dMdt array (fill diagnostic species with 0)
     dMdt = jnp.zeros_like(Mk)
     dMdt = dMdt.at[:, :icomp_nodiag].set(dMdt_nodiag)
 
-    return dNdt, dMdt
+    return dNdt, dMdt, dM_overflow

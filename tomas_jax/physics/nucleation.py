@@ -16,14 +16,19 @@ from ..core.config import (
 
 # =========================================================================
 # Riccobono 2014 constants
+# Riccobono et al. (2014), Science 344:717-721, Eq. 1, Table 1
+# Temperature correction: Yu et al. (2017), ACP 17:4997-5005, Eq. 3
 # =========================================================================
 _KM = 3.27e-21       # nucleation rate constant [cm^6 s^-1]
-_DELTA_H = 2.66e-19  # enthalpy change [J]
+_DELTA_H = 2.66e-19  # enthalpy change [J] (Yu 2017 T-correction)
 _KB_NUC = 1.38e-23   # Boltzmann constant [J/K]
 _T0 = 278.0          # reference temperature [K]
 
 # =========================================================================
 # Dunne 2016 constants (complex T-dependence)
+# Dunne et al. (2016), Science 354:1119-1124, Table S1
+# Binary neutral (BN), ternary neutral (TN), actinometric neutral (AN),
+# binary ion (BI), ternary ion (TI), actinometric ion (AI)
 # =========================================================================
 _PBN = 3.95;  _UBN = 9.70;   _VBN = 12.6;  _WBN = -0.00707
 _PTN = 2.89;  _UTN = 182.0;  _VTN = 1.20;  _WTN = -4.19
@@ -35,6 +40,8 @@ _PAI = 3.07;  _AI  = 0.00485
 
 # =========================================================================
 # Nucleation cluster properties
+# Kulmala et al. (2013): r ~ 0.85 nm for sulfuric acid clusters
+# Density 1350 kg/m3: intermediate between H2SO4 (1830) and organic (1000)
 # =========================================================================
 _RNUC_NM = 0.85          # critical cluster radius [nm]
 _RNUC_M = _RNUC_NM * 1e-9  # [m]

@@ -98,7 +98,7 @@ def run(data_dir, verbose=True):
         # Compute condensation sink and mcond
         CS_jax, _ = calc_condensation_sink(
             jnp.array(Nk_init), jnp.array(Mk_init),
-            temp, pres, boxvol, accommodation_coeff=alpha
+            temp, pres, boxvol, alpha=alpha
         )
         CS_val = float(CS_jax)
         dt = 60.0

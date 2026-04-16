@@ -78,7 +78,7 @@ def _run_both_methods(case_key, xk):
 
     CS_jax, sf_jax = calc_condensation_sink(
         jnp.array(Nk_init), jnp.array(Mk_init),
-        temp, pres, boxvol, accommodation_coeff=alpha
+        temp, pres, boxvol, alpha=alpha
     )
     mcond = Gc[SRTSO4] * (1.0 - np.exp(-float(CS_jax) * 60.0))
     sinkfrac = np.array(sf_jax)

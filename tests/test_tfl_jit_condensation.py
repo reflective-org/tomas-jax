@@ -27,13 +27,7 @@ BOXVOL = 1.0e6
 DENS = 1770.0
 PI_F = 3.141592654
 
-@pytest.fixture
-def xk():
-    x = np.zeros(NBINS + 1)
-    x[0] = XK0
-    for k in range(NBINS):
-        x[k + 1] = 2.0 * x[k]
-    return jnp.array(x)
+# xk fixture provided by conftest.py
 
 
 @pytest.fixture

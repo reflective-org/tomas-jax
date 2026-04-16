@@ -863,13 +863,13 @@ def ppm_condensation_step(
     Algorithm:
     1. Freeze WR at step entry (match Fortran)
     2. Compute substep count from CFL
-    3. For each substep:
-       a. Compute edge velocities
-       b. Reconstruct number density (PPM)
-       c. Compute number flux and advect Nk
-       d. Transport ALL species with upwind flux (including cspecies)
-       e. Apply positivity limiter
-    4. Condensed mass is added AFTER transport by ezcond_ppm driver
+    3. Precompute loop-invariant quantities (edge velocities, moment integrals)
+    4. For each substep:
+       a. Reconstruct number density (PPM)
+       b. Compute number flux and advect Nk
+       c. Transport ALL species with upwind flux (including cspecies)
+       d. Apply positivity limiter
+    5. Condensed mass is added AFTER transport by ezcond_ppm driver
 
     Args:
         Nk: Number per bin [#], shape (nbins,)
@@ -899,30 +899,35 @@ def ppm_condensation_step(
     dt_sub = dt / n_sub
     TAU_sub = TAU / n_sub
 
-    # 3. Substep loop using lax.fori_loop
+    # 3. Precompute loop-invariant quantities (constant across all substeps)
+    u_edges = compute_edge_velocity(xk, TAU_sub, WR, dt_sub)
+    I0_a, I1_a, I2_a = _compute_moment_integrals(delta_xi)
+
+    # 4. Substep loop using lax.fori_loop
     def substep_body(i, carry):
         Nk_curr, Mk_curr = carry
 
-        # 3a. Compute edge velocities
-        u_edges = compute_edge_velocity(xk, TAU_sub, WR, dt_sub)
-
-        # 3b. Reconstruct number density
+        # 4a. Reconstruct number density
         n_bar = Nk_curr / delta_xi
         n_L, n_R, n_6 = ppm_reconstruct(n_bar)
 
-        # 3c. Compute number flux and advect
+        # 4b. Compute number flux and advect
         F_N = ppm_flux(n_L, n_R, n_6, u_edges, dt_sub, delta_xi)
         Nk_next = advect_totals(Nk_curr, F_N, dt_sub)
 
-        # 3d. Compute analytical dry mass flux (mass-weighted integral)
+        # 4c. Compute analytical dry mass flux (mass-weighted integral)
         F_M_dry = ppm_mass_flux(n_L, n_R, n_6, xk, u_edges, dt_sub, delta_xi)
 
-        # 3e. Transport ALL species — vectorized, no loops
-        M_dry_analytical = dry_mass_from_ppm_number(n_L, n_R, n_6, xk, delta_xi)
+        # 4d. Transport ALL species — vectorized, no loops
+        # Inline dry_mass_from_ppm_number with precomputed moment integrals
+        dn = n_R - n_L
+        b = dn + n_6
+        m_L = xk[:-1]
+        M_dry_analytical = delta_xi * m_L * (n_L * I0_a + b * I1_a - n_6 * I2_a)
         F_M_all = species_flux(F_M_dry, Mk_curr, M_dry_analytical, u_edges)
         Mk_next = advect_totals(Mk_curr, F_M_all, dt_sub)
 
-        # 3f. Positivity clamp
+        # 4e. Positivity clamp
         Nk_next = jnp.maximum(Nk_next, 0.0)
         Mk_next = jnp.maximum(Mk_next, 0.0)
 
@@ -971,10 +976,10 @@ def ppm_advect_number_only(
     dt_sub = dt / n_sub
     TAU_sub = TAU / n_sub
 
-    def substep_body(i, Nk_curr):
-        # Compute edge velocities
-        u_edges = compute_edge_velocity(xk, TAU_sub, WR, dt_sub)
+    # Precompute loop-invariant edge velocities
+    u_edges = compute_edge_velocity(xk, TAU_sub, WR, dt_sub)
 
+    def substep_body(i, Nk_curr):
         # Reconstruct number density
         n_bar = Nk_curr / DELTA_XI
         n_L, n_R, n_6 = ppm_reconstruct(n_bar)

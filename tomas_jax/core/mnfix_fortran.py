@@ -18,12 +18,14 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
+from .config import ICOMP_NODIAG
+
 
 def mnfix_fortran(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Exact port of FORTRAN mnfix.f subroutine.
 

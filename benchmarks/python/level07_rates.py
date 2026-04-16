@@ -46,7 +46,7 @@ def run(data_dir, verbose=True):
 
     Dpk, Dk, ck = calc_particle_properties(Nk_jax, Mk_jax, temp, pres)
     kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
-    dNdt_jax, dMdt_jax = calc_coagulation_rates(
+    dNdt_jax, dMdt_jax, _overflow = calc_coagulation_rates(
         Nk_jax, Mk_jax, kij, xk_jax, ICOMP_NODIAG
     )
 

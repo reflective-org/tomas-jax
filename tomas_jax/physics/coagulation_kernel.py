@@ -50,8 +50,7 @@ def calc_coagulation_kernel(
     c_pair = jnp.sqrt(jnp.square(ck_i) + jnp.square(ck_j))
     
     # Knudsen number
-    # Note: Dpk should strictly be > 0. If Dpk=0, this will result in NaN.
-    # We assume upstream properties calculation prevents Dpk=0.
+    # Dpk > 0 guaranteed by properties.py (mp clamped to 1e-25 for empty bins).
     Kn = (4.0 * (Dk_i + Dk_j)) / (c_pair * (Dpk_i + Dpk_j))
 
     # Beta correction factor (Fuchs form)
