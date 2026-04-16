@@ -18,4 +18,8 @@ Condensation:
 Equilibrium:
     nh3_equilibrium     - NH3/NH4 stoichiometric partitioning
     water_equilibrium   - Hygroscopic water uptake (ISORROPIA fits)
+
+Radiative:
+    bhmie               - Bohren-Huffman Mie scattering (Bohren & Huffman 1983)
+    radiative_forcing   - Direct SW radiative forcing (Chylek & Wong 1995, Pierce et al. 2010)
 """

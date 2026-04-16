@@ -22,12 +22,14 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
+from .config import ICOMP_NODIAG
+
 
 def mnfix_jax(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Correct mass/number drift using Fortran-faithful partial transfer.
 

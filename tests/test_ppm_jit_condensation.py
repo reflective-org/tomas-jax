@@ -38,12 +38,9 @@ PI_F = 3.141592654
 
 
 def make_xk():
-    """Mass-doubling bin boundaries."""
-    xk = np.zeros(NBINS + 1)
-    xk[0] = XK0
-    for k in range(NBINS):
-        xk[k + 1] = 2.0 * xk[k]
-    return jnp.array(xk)
+    """Mass-doubling bin boundaries — delegates to config.xk_boundaries()."""
+    from tomas_jax.core.config import xk_boundaries
+    return xk_boundaries()
 
 
 def make_lognormal(N_total=1e4, GMD_um=0.1, GSD=1.8, xk=None):

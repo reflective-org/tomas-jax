@@ -4,6 +4,166 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-15 (Tue) — Radiative Forcing with Tabazadeh H₂SO₄/H₂O Equilibrium
+
+**Time**: afternoon PST
+
+### Summary
+Added direct shortwave radiative forcing module (Chylek & Wong 1995 / Pierce et al. 2010) with Bohren-Huffman Mie scattering and Tabazadeh et al. (1997) binary H₂SO₄/H₂O equilibrium composition parameterization.
+
+### Changes
+
+1. **Mie scattering** (`tomas_jax/physics/bhmie.py`)
+   - Bohren-Huffman Mie code (numpy). Computes Qsca, Qext, gsca for any size parameter and refractive index.
+
+2. **Radiative forcing** (`tomas_jax/physics/radiative_forcing.py`)
+   - `precompute_mie_properties()`: Mie + global-avg upscatter (Wiscombe & Grams 1976). Single-wavelength and spectral integration modes.
+   - `compute_rf()`: Chylek & Wong RF with Pierce SI cloud-fraction extension.
+   - `scattering_efficiency_vs_radius()`: Reproduces Pierce et al. (2010) Figure 1.
+   - `h2so4_equilibrium_wt(temp, rh)`: Tabazadeh et al. (1997) Table 1 vapor pressure interpolation.
+   - `h2so4_solution_density(wt)`: CRC Handbook density interpolation.
+
+3. **Benchmark plots** (`benchmarks/python/plot_radiative_forcing.py`) — 5 figures
+4. **Tests** (`tests/test_radiative_forcing.py`) — 8 Tabazadeh composition tests + RF tests
+5. **Documentation** (`docs/radiative_forcing.md`)
+
+### Key Finding
+Pierce assumed 75 wt% H₂SO₄ (peak 0.84 W/m² per Mt-S). Tabazadeh at T=220K, RH=5% gives 63.8 wt% and peak 1.09 — 30% higher due to water dilution.
+
+---
+
+## 2026-04-10 (Thu) — JAX Performance Optimization
+
+**Time**: evening PST
+
+### Summary
+Comprehensive JAX/JIT performance audit and optimization. Identified and fixed redundant computation in hot loops, unnecessary memory allocations, and unused scan arrays.
+
+### Changes
+
+1. **PPM substep loop-invariant hoisting** (`tomas_jax/physics/condensation_ppm.py`)
+   - Moved `compute_edge_velocity()` and `_compute_moment_integrals()` out of `fori_loop` in both `ppm_condensation_step` and `ppm_advect_number_only`
+   - All inputs are constant across CFL substeps — explicit hoisting guarantees no redundant computation regardless of XLA LICM behavior
+
+2. **Removed `.copy()` on immutable JAX arrays** (`tomas_jax/physics/condensation_tfl_jax.py`)
+   - `ANKD.copy()` / `AMKD.copy()` replaced with direct references — JAX arrays are immutable
+
+3. **Eliminated unused scan carry allocation** (`tomas_jax/solvers/condensation.py`)
+   - `jnp.arange(nsteps)` passed to `jax.lax.scan` but never read by body → replaced with `None`
+
+### Deferred (not worth the churn)
+- `static_argnums` → `static_argnames`: cleaner but requires updating all call sites
+- `compute_zeta(xk)` caching: just a few scalar FLOPs, XLA LICM handles this
+- kwargs validation restructure: current trace-time behavior is correct
+
+### Verification
+All 550 tests pass (0 failures). PPM, TFL JIT, and smoke tests verified.
+
+---
+
+## 2026-04-10 (Thu) — Radiative Forcing Module (Phase 9)
+
+**Time**: afternoon PST
+
+### Summary
+Added direct shortwave radiative forcing calculation based on Chylek & Wong (1995), following Pierce et al. (2010).
+
+### Files created
+- `tomas_jax/physics/bhmie.py` — Bohren-Huffman Mie scattering (numpy, cleaned from reference)
+- `tomas_jax/physics/radiative_forcing.py` — RF module: Mie precomputation per TOMAS bin, upscatter fraction (Wiscombe & Grams 1976), optical depth, Chylek & Wong RF equation
+- `tests/test_radiative_forcing.py` — 29 tests (all passing), covers Mie, upscatter, RF, MSE, Pierce Fig 1 validation
+- `docs/radiative_forcing.md` — Full documentation with usage examples
+
+### Key features
+- `precompute_mie_properties(xk)`: Qsca, Qext, gsca, global-avg upscatter for each bin
+- `compute_rf(Nk, mie, column_area)`: RF [W/m²] from Chylek & Wong 1995
+- `compute_rf_efficiency(Nk, Mk, mie)`: RF per unit burden [W/m² per g/m²]
+- `compute_mass_scattering_efficiency(Nk, Mk, mie)`: MSE [m²/g]
+- `scattering_efficiency_vs_radius()`: Reproduces Pierce et al. 2010 Figure 1 curve
+- `compute_rf_latitude_resolved()`: Full lat/month calculation as in getRF_monthly.py
+
+### References
+- Chylek & Wong (1995), GRL 22, 929-931
+- Pierce et al. (2010), GRL 37, L18805
+- Wiscombe & Grams (1976), J. Atmos. Sci. 33, 2440-2451
+- Bohren & Huffman (1983), Absorption and Scattering of Light by Small Particles
+
+### Next steps
+- Multi-wavelength integration across solar spectrum
+- Gravitational settling efficiency (Pierce Fig 1 right axis)
+
+---
+
+## 2026-04-10 (Thu) — Code Review Round 2: Robustness, Tests, Documentation
+
+**Time**: morning PST
+
+### Summary
+Second round of code review hardening. Focus on numerical robustness, test quality, test coverage, and physics documentation.
+
+### Changes
+1. **Euler solver robustness** — replaced hardcoded `1e-15`/`1e-25` thresholds with `TINY_N`/`TINY_M` from config. Added `return_info` parameter to detect when `max_substeps` truncates integration.
+2. **Tightened PPM flux test** — `rtol=0.1` (10%) → `rtol=1e-10` for test where analytical answer is exact.
+3. **Shared test fixtures** — created `tests/conftest.py` with `xk` fixture and `make_lognormal` helper. Removed duplicate grid construction from 3 test files.
+4. **Deleted stale `pyproj.toml`** (typo'd filename, outdated metadata). Removed dead `ZETA_DEFAULT` constant. Fixed misleading Dpk=0 comment in coagulation kernel.
+5. **Literature references** — added citations for Riccobono 2014, Dunne 2016, Tang 1997, Sutherland viscosity, and TOMAS MFP formula.
+6. **Smoke tests** — 8 lightweight tests (~5s) exercising coagulation, condensation, and full pipeline. Always run, no Fortran data needed.
+7. **Physics foundation tests** — 22 unit tests for `density.py`, `properties.py`, `gas_properties.py` (previously zero coverage). Tests against reference values and physical limits.
+
+### Files Modified/Created
+- `tomas_jax/solvers/euler.py` (thresholds, return_info)
+- `tomas_jax/physics/coagulation_rates.py` (removed ZETA_DEFAULT)
+- `tomas_jax/physics/coagulation_kernel.py` (comment fix)
+- `tomas_jax/physics/nucleation.py` (citations)
+- `tomas_jax/physics/density.py` (citation)
+- `tomas_jax/physics/properties.py` (citation)
+- `tomas_jax/physics/gas_properties.py` (MFP explanation)
+- `tests/conftest.py` (new — shared fixtures)
+- `tests/test_smoke.py` (new — 8 smoke tests)
+- `tests/test_physics_foundations.py` (new — 22 unit tests)
+- `tests/test_ppm_condensation.py` (tightened tolerance)
+- `tests/test_nucleation.py`, `test_tfl_jit_condensation.py`, `test_ppm_jit_condensation.py` (use shared fixtures)
+- Deleted: `pyproj.toml`
+
+---
+
+## 2026-04-09 (Wed) — Code Review Fixes
+
+**Time**: evening PST
+
+### Summary
+Addressed issues found during comprehensive dev branch code review. Focus on API safety, solver robustness, naming consistency, and test infrastructure.
+
+### Changes
+1. **kwargs validation in `make_step()`** — warns on unknown kwargs (catches typos that silently default to 0.0). Validates against set of 17 known parameter names.
+2. **Process order validation** — warns when process order deviates from canonical physical ordering (so2_chemistry → nucleation → coagulation → condensation → dilution).
+3. **diffrax solver status checking** — checks `solution.result` after each Tsit5 substep; reverts to previous state on failure instead of silently using partial results. Optional `return_status=True` flag for callers.
+4. **`icomp_nodiag` constant cleanup** — replaced all hardcoded `=42` defaults with `ICOMP_NODIAG` from config across 6 files.
+5. **Renamed `accommodation_coeff` → `alpha`** — standardized parameter name across `condensation_sink.py`, `gas_properties.py`, and 10 call sites to match TomasState convention.
+6. **Stale README reference** — removed deleted `run_sensitivity_analysis.py` from project structure.
+7. **`coag_rk4_step` deprecation** — now emits `DeprecationWarning` instead of being a silent alias.
+8. **Top-bin overflow tracking for coagulation mass budget** — `calc_coagulation_rates` now returns a third value `dM_overflow` (mass rate that would enter a hypothetical bin above the grid, i.e., the terms `shift_right` truncates). Both `coag_euler_step` and `diffrax_step` accumulate overflow via `return_overflow=True`. Root cause of coag mass conservation test failures: top-bin self-coagulation produces particles exceeding the grid boundary — this mass is physically lost. Now tracked explicitly so `M(0) = M(24h) + overflow` closes to <1e-8 relative.
+9. **Rewrote `test_coag_mass_conservation`** — no longer loads stale NPZ data; runs solver inline with overflow tracking and verifies mass budget closure across all 50 scenarios.
+10. **`--force` flag for benchmark runner** — `run_24h_scenarios.py` now supports `--force` to overwrite existing NPZ files.
+
+### Files Modified
+- `tomas_jax/solvers/condensation.py` (kwargs validation, process order, ICOMP_NODIAG)
+- `tomas_jax/solvers/diffrax.py` (solver status, ICOMP_NODIAG, coag_rk4_step deprecation, overflow tracking)
+- `tomas_jax/solvers/euler.py` (ICOMP_NODIAG, overflow unpacking)
+- `tomas_jax/solvers/coagulation_jax.py` (overflow unpacking)
+- `tomas_jax/physics/coagulation_rates.py` (ICOMP_NODIAG, dM_overflow return)
+- `tomas_jax/physics/condensation_sink.py` (alpha rename)
+- `tomas_jax/physics/gas_properties.py` (alpha rename)
+- `tomas_jax/physics/ezcond.py`, `ezcond_ppm.py`, `ezcond_ppm_jax.py`, `condensation_tfl_jax.py` (alpha rename)
+- `tomas_jax/core/mnfix_jax.py`, `mnfix_fortran.py` (ICOMP_NODIAG)
+- `tomas_jax/utils/diagnostics.py` (overflow unpacking)
+- `tests/test_24h_scenarios.py` (rewrote coag mass conservation test)
+- `benchmarks/python/run_24h_scenarios.py` (--force flag)
+- `benchmarks/python/level07_rates.py` (overflow unpacking)
+- `README.md` (stale reference)
+
+---
+
 ## 2026-03-24 (Mon) — JAX/GPU-Readiness Audit
 
 **Time**: ~evening PST

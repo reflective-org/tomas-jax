@@ -59,7 +59,7 @@ def run(data_dir, verbose=True):
         CS_jax, sinkfrac_jax = calc_condensation_sink(
             jnp.array(Nk), jnp.array(Mk),
             temp, pres, 1.0e6,
-            accommodation_coeff=1.0
+            alpha=1.0
         )
 
         # Compare gas properties (tight: only constant diffs)

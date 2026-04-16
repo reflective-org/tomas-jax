@@ -41,7 +41,7 @@ def calc_condensation_sink(
     boxvol: Union[float, jnp.ndarray],
     molecular_weight: float = MW_H2SO4,
     diffusion_volume: float = SV_H2SO4,
-    accommodation_coeff: float = 1.0,
+    alpha: float = 1.0,
     xk: jnp.ndarray = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Calculate condensation sink from aerosol size distribution.
@@ -60,7 +60,7 @@ def calc_condensation_sink(
         boxvol: Grid cell volume [cm^3]
         molecular_weight: MW of condensing species [g/mol]
         diffusion_volume: Diffusion volume parameter
-        accommodation_coeff: alpha (default 1.0)
+        alpha: Accommodation coefficient (default 1.0)
         xk: Bin boundaries [kg], shape (ibins+1,). If None, uses default 36-bin grid.
 
     Returns:
@@ -98,7 +98,7 @@ def calc_condensation_sink(
     Kn = 2.0 * mfp / jnp.maximum(Dpk, 1e-30)
 
     # beta = (1+Kn)/(1+2*Kn*(1+Kn)/alpha) (getCondSink.f line 112)
-    beta = calc_fuchs_sutugin_correction(Kn, accommodation_coeff)
+    beta = calc_fuchs_sutugin_correction(Kn, alpha)
 
     # Guard: bins with Dpk=0 produce Kn=inf -> beta=NaN.
     safe_beta = jnp.where(Dpk > 0.0, beta, 0.0)
