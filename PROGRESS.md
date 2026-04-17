@@ -4,6 +4,49 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-16 (Wed) — Phase A Hardening: Unit Tests for Foundation Modules
+
+**Time**: evening PST
+
+### Summary
+Added 90 unit tests across 4 previously untested foundation modules: `nh3_equilibrium.py`, `water_equilibrium.py`, `condensation_sink.py`, and `mnfix_jax.py`. All 677 tests pass (up from 579). Updated `docs/porting_status.md` with test counts.
+
+### New Test Files
+
+1. **`tests/test_nh3_equilibrium.py`** — 20 tests
+   - Ammonia-limited case (all NH3 → particles, distributed proportional to SO4)
+   - Ammonia-excess case (2:1 NH4:SO4 stoichiometry, excess stays gas)
+   - Total nitrogen conservation across 5 NH3/SO4 ratios
+   - Edge cases: zero NH3, zero SO4, single bin, species isolation
+   - JIT compilation and eager/JIT equivalence
+
+2. **`tests/test_water_equilibrium.py`** — 30 tests
+   - Sulfate WR: known references (50%→1.29, 80%→1.96, 95%→5.05), monotonicity, clipping
+   - Piecewise polynomial continuity at 5 breakpoints (41%, 61%, 81%, 91%, 96%)
+   - Sea salt WR: low RH baseline, higher hygroscopicity than sulfate
+   - calc_equilibrium_water: SO4/organic contributions, proportionality, species isolation
+   - JIT compilation
+
+3. **`tests/test_condensation_sink.py`** — 18 tests
+   - CS physical range, formula verification, scaling with Nk and particle size
+   - sinkfrac normalization, non-negativity, single-bin dominance
+   - NEPS threshold (1e10), sparse bin default density handling
+   - NaN guard for Dpk=0, accommodation coefficient effect
+   - JIT compilation
+
+4. **`tests/test_mnfix.py`** — 22 tests
+   - Phase 1: empty bins get NEPS=1e-5, SO4 at geometric mean
+   - Phase 2: extreme avg mass trimming (above grid, below grid)
+   - Phase 3: partial transfer (upward, downward, partial not total, in-range unchanged)
+   - Conservation: number, mass, multi-species, composition fractions
+   - Multi-bin jumps (10+ bins), positivity, no-NaN stress test
+   - JIT compilation
+
+### Updated Documentation
+- `docs/porting_status.md`: Updated test counts in tables, marked 4 modules as tested, reduced untested count from 8 to 4
+
+---
+
 ## 2026-04-15 (Tue) — Radiative Forcing with Tabazadeh H₂SO₄/H₂O Equilibrium
 
 **Time**: afternoon PST
