@@ -23,6 +23,7 @@ from tomas_jax.physics.radiative_forcing import (
     compute_mass_scattering_efficiency,
     compute_rf_efficiency,
     upscatter_fraction,
+    _upscatter_fraction_gl,
     scattering_efficiency_vs_radius,
     h2so4_equilibrium_wt,
     h2so4_solution_density,
@@ -588,3 +589,51 @@ class TestJITRuntime:
             np.testing.assert_allclose(mie.Qext[k], qext_ref, rtol=1e-10)
             np.testing.assert_allclose(mie.Qsca[k], qsca_ref, rtol=1e-10)
             np.testing.assert_allclose(mie.gsca[k], gsca_ref, rtol=1e-10)
+
+
+# =========================================================================
+# Gauss-Legendre upscatter tests (Phase 5)
+# =========================================================================
+class TestGaussLegendreUpscatter:
+    """Tests for GL quadrature replacement of scipy.quad upscatter."""
+
+    @pytest.mark.parametrize("g", [0.0, 0.3, 0.6, 0.9])
+    @pytest.mark.parametrize("sza_deg", [10.0, 30.0, 60.0, 80.0])
+    def test_gl_matches_scipy(self, g, sza_deg):
+        """GL quadrature should match scipy.quad to ~1e-4."""
+        sza_rad = np.radians(sza_deg)
+        beta_scipy = upscatter_fraction(g, sza_rad)
+        beta_gl = float(_upscatter_fraction_gl(jnp.float64(g), jnp.float64(sza_rad)))
+        np.testing.assert_allclose(beta_gl, beta_scipy, atol=1e-4)
+
+    def test_gl_bounds(self):
+        """GL upscatter should be in [0, 1]."""
+        for g in [0.0, 0.3, 0.6, 0.9]:
+            for sza in [0.1, 0.5, 1.0, 1.5]:
+                beta = float(_upscatter_fraction_gl(jnp.float64(g), jnp.float64(sza)))
+                assert 0.0 <= beta <= 1.0, f"beta={beta} for g={g}, sza={sza}"
+
+    def test_gl_jit_compiles(self):
+        """GL upscatter should JIT compile."""
+        beta = jax.jit(_upscatter_fraction_gl)(jnp.float64(0.7), jnp.float64(0.5))
+        assert jnp.isfinite(beta)
+
+    def test_gl_vmap_over_g(self):
+        """GL upscatter should be vmappable over g values."""
+        g_arr = jnp.array([0.0, 0.3, 0.5, 0.7, 0.9])
+        sza = jnp.float64(0.5)
+        beta_arr = jax.vmap(_upscatter_fraction_gl, (0, None))(g_arr, sza)
+        assert beta_arr.shape == (5,)
+        assert jnp.all(jnp.isfinite(beta_arr))
+
+    def test_gl_grad_finite(self):
+        """Gradient of upscatter w.r.t. g should be finite."""
+        def beta_of_g(g):
+            return _upscatter_fraction_gl(g, jnp.float64(0.5))
+        grad_val = jax.grad(beta_of_g)(jnp.float64(0.5))
+        assert jnp.isfinite(grad_val)
+
+    def test_gl_isotropic(self):
+        """For g=0 (isotropic), GL should give ~0.5."""
+        beta = float(_upscatter_fraction_gl(jnp.float64(0.0), jnp.float64(0.5)))
+        assert 0.4 < beta < 0.6

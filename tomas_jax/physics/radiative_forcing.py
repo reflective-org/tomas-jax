@@ -336,6 +336,83 @@ def precompute_mie_properties(
 
 
 # =========================================================================
+# Gauss-Legendre quadrature (replaces scipy.quad for JIT compatibility)
+# =========================================================================
+_N_GL = 32
+_gl_nodes_np, _gl_weights_np = np.polynomial.legendre.leggauss(_N_GL)
+_GL_NODES = jnp.array(_gl_nodes_np)
+_GL_WEIGHTS = jnp.array(_gl_weights_np)
+
+
+@jax.jit
+def _upscatter_fraction_gl(g, sza_rad):
+    """Upscatter fraction via Gauss-Legendre quadrature (JIT-compilable).
+
+    Replaces scipy.quad with 32-point GL quadrature for Wiscombe & Grams
+    (1976) equation 22. Accuracy ~1e-6 vs scipy (sufficient for this
+    approximation).
+
+    Args:
+        g: Asymmetry parameter (scalar, traced).
+        sza_rad: Solar zenith angle [radians] (scalar, traced).
+
+    Returns:
+        beta: Upscatter fraction (scalar).
+    """
+    theta = jnp.clip(sza_rad, 1e-6, jnp.pi / 2.0 - 1e-6)
+
+    # Integral 1: [pi/2-theta, pi/2+theta]
+    a1 = jnp.pi / 2.0 - theta
+    b1 = jnp.pi / 2.0 + theta
+    half1 = (b1 - a1) / 2.0
+    mid1 = (a1 + b1) / 2.0
+    thpr1 = half1 * _GL_NODES + mid1
+
+    arg1 = jnp.clip(1.0 / (jnp.tan(theta) * jnp.tan(thpr1)), -1.0, 1.0)
+    hg1 = (1.0 - g**2) / (1.0 + g**2 - 2.0 * g * jnp.cos(thpr1))**1.5
+    f1 = jnp.arccos(arg1) * hg1 * jnp.sin(thpr1)
+    int1 = half1 * jnp.sum(_GL_WEIGHTS * f1)
+
+    # Integral 2: [pi/2+theta, pi]
+    a2 = jnp.pi / 2.0 + theta
+    b2 = jnp.pi
+    half2 = (b2 - a2) / 2.0
+    mid2 = (a2 + b2) / 2.0
+    thpr2 = half2 * _GL_NODES + mid2
+
+    hg2 = (1.0 - g**2) / (1.0 + g**2 - 2.0 * g * jnp.cos(thpr2))**1.5
+    f2 = hg2 * jnp.sin(thpr2)
+    int2 = half2 * jnp.sum(_GL_WEIGHTS * f2)
+
+    return (1.0 / (2.0 * jnp.pi)) * int1 + 0.5 * int2
+
+
+@jax.jit
+def _avg_solar_power_gl(lat_rad, sda, So):
+    """24-hour average solar power via GL quadrature (JIT-compilable).
+
+    Replaces scipy.quad integration of _solar_power over [0, 24] hours.
+
+    Args:
+        lat_rad: Latitude [radians] (scalar, traced).
+        sda: Solar declination angle [radians] (scalar, traced).
+        So: Solar constant [W/m²] (scalar).
+
+    Returns:
+        avg_power: 24-hour average solar irradiance [W/m²].
+    """
+    half = 12.0
+    mid = 12.0
+    hours = half * _GL_NODES + mid
+    ang = jnp.pi / 2.0 - jnp.arcsin(
+        jnp.sin(lat_rad) * jnp.sin(sda)
+        - jnp.cos(lat_rad) * jnp.cos(sda) * jnp.cos(2.0 * jnp.pi * hours / 24.0)
+    )
+    power = jnp.maximum(-So * jnp.cos(ang), 0.0)
+    return half * jnp.sum(_GL_WEIGHTS * power) / 24.0
+
+
+# =========================================================================
 # Upscatter fraction (Wiscombe & Grams 1976)
 # =========================================================================
 def _henyey_greenstein(g, cos_theta):
@@ -428,7 +505,8 @@ def _compute_global_avg_upscatter(gsca_array):
     """Compute global annual average upscatter fraction for each bin.
 
     Averages over 18 latitude bands and 12 months, weighted by
-    cos(latitude) × average solar power.
+    cos(latitude) × average solar power. Uses Gauss-Legendre quadrature
+    and vectorized JAX operations for speed.
 
     Args:
         gsca_array: Asymmetry parameter per bin, shape (nbins,).
@@ -436,59 +514,49 @@ def _compute_global_avg_upscatter(gsca_array):
     Returns:
         upscatter_avg: Global annual average upscatter fraction, shape (nbins,).
     """
-    nbins = len(gsca_array)
+    gsca_jnp = jnp.asarray(gsca_array)
 
     # Latitude grid (18 bands, 10° spacing)
-    lats_deg = np.arange(-85, 90, 10.0)  # [-85, -75, ..., 75, 85]
-    lats_rad = np.radians(lats_deg)
-    nlats = len(lats_deg)
+    lats_rad = jnp.radians(jnp.arange(-85.0, 90.0, 10.0))
+    nlats = lats_rad.shape[0]
 
     # Monthly solar declination angles
-    daymonth = np.array([31., 28., 31., 30., 31., 30., 31., 31., 30., 31., 30., 31.])
-    sda = np.zeros(12)
-    tot_days = 0.0
-    for m in range(12):
-        avg_day = tot_days + daymonth[m] / 2.0
-        sda[m] = 0.409 * np.cos(2.0 * np.pi * (avg_day - 173.0) / 365.0)
-        tot_days += daymonth[m]
+    daymonth = jnp.array([31., 28., 31., 30., 31., 30., 31., 31., 30., 31., 30., 31.])
+    cum_days = jnp.concatenate([jnp.array([0.0]), jnp.cumsum(daymonth[:-1])])
+    avg_days = cum_days + daymonth / 2.0
+    sda = 0.409 * jnp.cos(2.0 * jnp.pi * (avg_days - 173.0) / 365.0)
 
-    # Compute 24h average solar power for each month and latitude
-    avg_pow = np.zeros((12, nlats))
-    for la in range(nlats):
-        for m in range(12):
-            power, _ = quad(_solar_power, 0.0, 24.0,
-                            args=(lats_rad[la], sda[m], SOLAR_CONSTANT))
-            avg_pow[m, la] = power / 24.0
+    # 24h average solar power for all (lat, month) pairs via GL quadrature
+    lat_grid, sda_grid = jnp.meshgrid(lats_rad, sda, indexing='ij')  # (nlats, 12)
+    avg_pow = jax.vmap(
+        lambda la, sd: _avg_solar_power_gl(la, sd, SOLAR_CONSTANT)
+    )(lat_grid.ravel(), sda_grid.ravel()).reshape(nlats, 12)
 
-    # Compute upscatter fraction weighted by solar power and cos(lat)
-    upscatter_avg = np.zeros(nbins)
-    cos_lat = np.cos(lats_rad)
+    # Solar zenith angle approximation for each (lat, month)
+    sza_grid = jnp.maximum(jnp.abs(lat_grid - sda_grid), 1e-3)
 
-    for k in range(nbins):
-        g = gsca_array[k]
-        weighted_sum = 0.0
-        weight_total = 0.0
+    # Validity mask: SZA < pi/2 and meaningful solar power
+    valid = (sza_grid < jnp.pi / 2.0) & (avg_pow > 1e-6)
 
-        for la in range(nlats):
-            for m in range(12):
-                if avg_pow[m, la] < 1e-6:
-                    continue
-                # Approximate solar zenith angle for this lat/month
-                # Use the subsolar latitude (declination) to estimate typical SZA
-                sza = abs(lats_rad[la] - sda[m])
-                sza = max(sza, 1e-3)
-                if sza >= np.pi / 2.0:
-                    continue
+    # Weights: cos(lat) × avg_pow × valid
+    cos_lat = jnp.cos(lats_rad)
+    weights = cos_lat[:, jnp.newaxis] * avg_pow * valid
+    weight_total = jnp.sum(weights)
 
-                beta = upscatter_fraction(g, sza)
-                w = cos_lat[la] * avg_pow[m, la]
-                weighted_sum += beta * w
-                weight_total += w
+    # Upscatter for all (g, sza) combinations via 2D vmap
+    sza_flat = sza_grid.ravel()  # (nlats*12,)
+    weights_flat = weights.ravel()
 
-        if weight_total > 0:
-            upscatter_avg[k] = weighted_sum / weight_total
+    # vmap: outer over g values (nbins), inner over sza values (nlats*12)
+    beta_all = jax.vmap(
+        jax.vmap(_upscatter_fraction_gl, (None, 0)), (0, None)
+    )(gsca_jnp, sza_flat)  # (nbins, nlats*12)
 
-    return upscatter_avg
+    # Weighted average per bin
+    upscatter_avg = jnp.sum(beta_all * weights_flat[jnp.newaxis, :], axis=1)
+    upscatter_avg = upscatter_avg / jnp.maximum(weight_total, 1e-30)
+
+    return np.asarray(upscatter_avg)
 
 
 # =========================================================================
@@ -773,37 +841,48 @@ def scattering_efficiency_vs_radius(
             Negative values indicate cooling.
     """
     radii = np.logspace(np.log10(r_min), np.log10(r_max), n_radii)
-    rf_per_burden = np.zeros(n_radii)
 
     avg_solar = solar_constant / 4.0
     prefactor = avg_solar * Tatm**2 * (1.0 - cloud_fraction) * (1.0 - albedo)**2 * 2.0
 
     if not spectral:
-        # Single-wavelength mode
-        for i, r in enumerate(radii):
-            x = 2.0 * PI * r / wavelength
-            _, _, _, qsca, _, gsca = bhmie(x, refindex, 2)
-            beta = _compute_global_avg_upscatter(np.array([gsca]))[0]
-            m_p = (4.0 / 3.0) * PI * density * r**3
-            sigma_sca = PI * r**2 * qsca
-            rf_per_burden[i] = -prefactor * beta * sigma_sca / m_p
+        # Single-wavelength mode — vectorized via vmap
+        radii_jax = jnp.array(radii)
+        x_arr = 2.0 * PI * radii_jax / wavelength
+        Qext_arr, Qsca_arr, gsca_arr = jax.vmap(
+            bhmie_qsca_jax, (0, None)
+        )(x_arr, refindex)
+
+        # Batch upscatter computation for all radii at once
+        beta_arr = _compute_global_avg_upscatter(np.asarray(gsca_arr))
+
+        m_p = (4.0 / 3.0) * PI * density * radii**3
+        sigma_sca = PI * radii**2 * np.asarray(Qsca_arr)
+        rf_per_burden = -prefactor * beta_arr * sigma_sca / m_p
     else:
-        # Spectral integration mode
+        # Spectral integration mode — vectorized via 2D vmap
         wavelengths, weights = _solar_spectral_weights(n_wl=n_wavelengths)
         g_table, beta_table = _build_upscatter_lookup(n_points=50)
 
-        for i, r in enumerate(radii):
-            m_p = (4.0 / 3.0) * PI * density * r**3
-            # Integrate over wavelengths: Σ w(λ) × β(g(λ)) × σ_sca(λ)
-            weighted_beta_sigma = 0.0
-            for wl, w in zip(wavelengths, weights):
-                x = 2.0 * PI * r / wl
-                _, _, _, qsca, _, gsca = bhmie(x, refindex, 2)
-                beta = _interpolate_upscatter(gsca, g_table, beta_table)
-                sigma_sca = PI * r**2 * qsca
-                weighted_beta_sigma += w * beta * sigma_sca
+        radii_jax = jnp.array(radii)
+        # 2D size parameters: (n_wl, n_radii)
+        size_params = 2.0 * PI * radii_jax[jnp.newaxis, :] / wavelengths[:, jnp.newaxis]
 
-            rf_per_burden[i] = -prefactor * weighted_beta_sigma / m_p
+        vmap_2d = jax.vmap(jax.vmap(bhmie_qsca_jax, (0, None)), (0, None))
+        _, Qsca_all, gsca_all = vmap_2d(size_params, refindex)
+        # shapes: (n_wl, n_radii)
+
+        beta_all = _interpolate_upscatter(
+            gsca_all, jnp.asarray(g_table), jnp.asarray(beta_table)
+        )
+
+        # Weighted spectral integration
+        w = weights[:, jnp.newaxis]  # (n_wl, 1)
+        sigma_sca_all = PI * radii_jax[jnp.newaxis, :]**2 * Qsca_all
+        weighted_beta_sigma = jnp.sum(w * beta_all * sigma_sca_all, axis=0)
+
+        m_p = (4.0 / 3.0) * PI * density * radii**3
+        rf_per_burden = np.asarray(-prefactor * weighted_beta_sigma / m_p)
 
     return radii, rf_per_burden
 

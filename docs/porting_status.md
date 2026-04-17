@@ -39,7 +39,7 @@
 | `dilution.py` | First-order relaxation toward background | Yes | 10 |
 | `nucleation.py` (zhao2024) | Zhao et al. 2024 11-mechanism NPF | Yes | 58 |
 | `bhmie.py` | Bohren-Huffman Mie scattering | Yes (`bhmie_jax`, `bhmie_qsca_jax`) | 63 |
-| `radiative_forcing.py` | Direct SW RF (Chylek & Wong 1995) | Yes (runtime path) | 63 |
+| `radiative_forcing.py` | Direct SW RF (Chylek & Wong 1995) | Yes (runtime + precomputation) | 84 |
 | `diffrax.py` | Tsit5 adaptive ODE solver | Yes | — |
 | `condensation.py` (solver) | `make_step()` composable orchestrator + scan loops | Yes | 8 |
 | `state.py` | TomasState NamedTuple | Yes | — |
@@ -78,7 +78,7 @@
 
 ### 2.3 Validation
 
-- **367 tests** across 16 test files (703 pass, 350 skip needing Fortran data)
+- **388 tests** across 16 test files (724 pass, 350 skip needing Fortran data)
 - **50-scenario Latin Hypercube** 24h benchmarks (Fortran vs TFL vs PPM, 5 modes)
 - **Nucleation**: 20 parameterization-level cases match Fortran to <1e-12
 - **SO2 chemistry**: Validated against Sun et al. 2022 published figures (7 plots)
@@ -171,7 +171,7 @@ Prototype exists with 50 tests but has fundamental issues — not merged to v0.2
 | GPU benchmarking | HIGH | 2-3 days | `docs/gpu_deployment.md` written but no actual GPU timing |
 | `vmap` ensemble batching | HIGH | 2 days | Run 50+ scenarios in parallel on GPU |
 | Reverse-mode autodiff | HIGH | 1 day | Enable gradient-based parameter fitting |
-| ~~`bhmie.py` to JAX port~~ | ~~LOW~~ | ~~3-5 days~~ | **DONE** — `bhmie_jax`, `bhmie_qsca_jax`, runtime RF JIT'd, vmap precomputation |
+| ~~`bhmie.py` to JAX port~~ | ~~LOW~~ | ~~3-5 days~~ | **DONE** — `bhmie_jax`, `bhmie_qsca_jax`, runtime RF JIT'd, vmap precomputation, GL upscatter (84 tests) |
 | `static_argnums` to `static_argnames` | LOW | 1 day | Cleaner but low risk of bugs |
 | Coagulation kernel caching | LOW | 1 day | `kij` recomputed per substep when `recompute_kernel=True` |
 
