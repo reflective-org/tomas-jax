@@ -34,7 +34,10 @@ import numpy as np
 from scipy.integrate import quad
 from typing import NamedTuple
 
-from .bhmie import bhmie
+import jax
+import jax.numpy as jnp
+
+from .bhmie import bhmie, bhmie_qsca_jax
 from ..core.config import PI, SRTSO4, SRTH2O
 
 
@@ -158,6 +161,7 @@ def h2so4_equilibrium_wt(temp, rh_percent):
     return float(wt_result)
 
 
+@jax.jit
 def h2so4_solution_density(wt_percent):
     """Density of H₂SO₄/H₂O solution at given composition.
 
@@ -171,10 +175,9 @@ def h2so4_solution_density(wt_percent):
     Returns:
         density: Solution density [kg/m³].
     """
-    wt = float(wt_percent)
-    return float(np.interp(
-        wt, _H2SO4_DENSITY_TABLE[:, 0], _H2SO4_DENSITY_TABLE[:, 1]
-    ))
+    return jnp.interp(
+        wt_percent, _H2SO4_DENSITY_TABLE[:, 0], _H2SO4_DENSITY_TABLE[:, 1]
+    )
 
 
 # Planck spectrum constants
@@ -271,18 +274,15 @@ def precompute_mie_properties(
     radii = (3.0 * m_geo / (4.0 * PI * density))**(1.0 / 3.0)
 
     if not spectral:
-        # Single-wavelength mode (original behavior)
-        size_param = 2.0 * PI * radii / wavelength
+        # Single-wavelength mode — vectorized via vmap
+        size_param = jnp.array(2.0 * PI * radii / wavelength)
 
-        Qsca = np.zeros(nbins)
-        Qext = np.zeros(nbins)
-        gsca = np.zeros(nbins)
-
-        for k in range(nbins):
-            _, _, qext_k, qsca_k, _, gsca_k = bhmie(size_param[k], refindex, 2)
-            Qsca[k] = qsca_k
-            Qext[k] = qext_k
-            gsca[k] = gsca_k
+        # Batched Mie: vmap over all bins at once
+        vmap_mie = jax.vmap(bhmie_qsca_jax, in_axes=(0, None))
+        Qext, Qsca, gsca = vmap_mie(size_param, refindex)
+        Qext = np.asarray(Qext)
+        Qsca = np.asarray(Qsca)
+        gsca = np.asarray(gsca)
 
         if global_avg_upscatter:
             upscatter_avg = _compute_global_avg_upscatter(gsca)
@@ -294,40 +294,44 @@ def precompute_mie_properties(
             upscatter_avg=upscatter_avg, wavelength=wavelength, density=density,
         )
 
-    # --- Spectral integration mode ---
+    # --- Spectral integration mode — vectorized via 2D vmap ---
     wavelengths, weights = _solar_spectral_weights(n_wl=n_wavelengths)
 
     # Build upscatter lookup table (one-time cost)
     g_table, beta_table = _build_upscatter_lookup(n_points=50)
 
-    # Accumulate spectrally-weighted quantities per bin
-    Qsca_eff = np.zeros(nbins)
-    Qext_eff = np.zeros(nbins)
-    gsca_eff = np.zeros(nbins)
-    # The coupled product: Σ w(λ) × β(g(λ)) × Qsca(λ)
-    beta_Qsca_product = np.zeros(nbins)
+    # 2D size parameter array: (nwav, nbins)
+    radii_jax = jnp.array(radii)
+    size_params = 2.0 * PI * radii_jax[jnp.newaxis, :] / wavelengths[:, jnp.newaxis]
 
-    for iw, (wl, w) in enumerate(zip(wavelengths, weights)):
-        size_param = 2.0 * PI * radii / wl
-        for k in range(nbins):
-            _, _, qext_k, qsca_k, _, gsca_k = bhmie(size_param[k], refindex, 2)
-            beta_k = _interpolate_upscatter(gsca_k, g_table, beta_table)
+    # Batched Mie: vmap over bins (inner), then wavelengths (outer)
+    vmap_2d = jax.vmap(jax.vmap(bhmie_qsca_jax, (0, None)), (0, None))
+    Qext_all, Qsca_all, gsca_all = vmap_2d(size_params, refindex)
+    # shapes: (nwav, nbins)
 
-            Qsca_eff[k] += w * qsca_k
-            Qext_eff[k] += w * qext_k
-            gsca_eff[k] += w * qsca_k * gsca_k  # Qsca-weighted g
-            beta_Qsca_product[k] += w * beta_k * qsca_k
+    # Upscatter interpolation for all (wl, bin) pairs
+    beta_all = _interpolate_upscatter(
+        gsca_all, jnp.asarray(g_table), jnp.asarray(beta_table)
+    )
+
+    # Weighted accumulation
+    w = weights[:, jnp.newaxis]  # (nwav, 1) for broadcasting
+    Qsca_eff = jnp.sum(w * Qsca_all, axis=0)
+    Qext_eff = jnp.sum(w * Qext_all, axis=0)
+    gsca_eff_raw = jnp.sum(w * Qsca_all * gsca_all, axis=0)
+    beta_Qsca_product = jnp.sum(w * beta_all * Qsca_all, axis=0)
 
     # Normalize gsca by Qsca weight
-    gsca_eff = np.where(Qsca_eff > 0, gsca_eff / Qsca_eff, 0.0)
+    gsca_eff = jnp.where(Qsca_eff > 0, gsca_eff_raw / Qsca_eff, 0.0)
 
     # Effective upscatter: defined so that upscatter_eff × Qsca_eff = beta_Qsca_product
     # This makes compute_rf() give the correct spectrally-integrated result
-    upscatter_eff = np.where(Qsca_eff > 0, beta_Qsca_product / Qsca_eff, 0.0)
+    upscatter_eff = jnp.where(Qsca_eff > 0, beta_Qsca_product / Qsca_eff, 0.0)
 
     return MieProperties(
-        radii=radii, Qsca=Qsca_eff, Qext=Qext_eff, gsca=gsca_eff,
-        upscatter_avg=upscatter_eff, wavelength=0.0, density=density,
+        radii=radii, Qsca=np.asarray(Qsca_eff), Qext=np.asarray(Qext_eff),
+        gsca=np.asarray(gsca_eff),
+        upscatter_avg=np.asarray(upscatter_eff), wavelength=0.0, density=density,
     )
 
 
@@ -502,7 +506,7 @@ def _planck(wavelength_m, T=_T_SUN):
     """
     lam = wavelength_m
     return (2.0 * _H_PLANCK * _C_LIGHT**2 / lam**5) / (
-        np.exp(_H_PLANCK * _C_LIGHT / (lam * _K_BOLTZ * T)) - 1.0
+        jnp.exp(_H_PLANCK * _C_LIGHT / (lam * _K_BOLTZ * T)) - 1.0
     )
 
 
@@ -522,12 +526,12 @@ def _solar_spectral_weights(n_wl=30, wl_min=300e-9, wl_max=2500e-9):
         wavelengths: Wavelength centers [m], shape (n_wl,).
         weights: Normalized spectral weights (sum to 1), shape (n_wl,).
     """
-    wavelengths = np.linspace(wl_min, wl_max, n_wl)
+    wavelengths = jnp.linspace(wl_min, wl_max, n_wl)
     dlamb = wavelengths[1] - wavelengths[0]
 
     B = _planck(wavelengths, _T_SUN)
     raw_weights = B * dlamb
-    weights = raw_weights / np.sum(raw_weights)
+    weights = raw_weights / jnp.sum(raw_weights)
 
     return wavelengths, weights
 
@@ -550,6 +554,7 @@ def _build_upscatter_lookup(n_points=50):
     return g_table, beta_table
 
 
+@jax.jit
 def _interpolate_upscatter(gsca_values, g_table, beta_table):
     """Interpolate upscatter fraction from lookup table.
 
@@ -561,12 +566,13 @@ def _interpolate_upscatter(gsca_values, g_table, beta_table):
     Returns:
         Interpolated upscatter fractions, same shape as gsca_values.
     """
-    return np.interp(gsca_values, g_table, beta_table)
+    return jnp.interp(gsca_values, g_table, beta_table)
 
 
 # =========================================================================
 # Optical depth
 # =========================================================================
+@jax.jit
 def compute_optical_depth(Nk, mie, column_area):
     """Compute aerosol scattering optical depth per bin.
 
@@ -583,12 +589,8 @@ def compute_optical_depth(Nk, mie, column_area):
     Returns:
         tau: Scattering optical depth per bin, shape (nbins,).
     """
-    Nk_np = np.asarray(Nk, dtype=np.float64)
-    # Column number density [#/m²]
-    N_col = Nk_np / column_area
-    # Scattering cross section per particle [m²]
+    N_col = Nk / column_area
     sigma_sca = PI * mie.radii**2 * mie.Qsca
-    # Optical depth per bin
     tau = N_col * sigma_sca
     return tau
 
@@ -596,6 +598,7 @@ def compute_optical_depth(Nk, mie, column_area):
 # =========================================================================
 # Radiative forcing (Chylek & Wong 1995)
 # =========================================================================
+@jax.jit
 def compute_rf(
     Nk,
     mie,
@@ -640,13 +643,14 @@ def compute_rf(
     rf_per_bin = (-avg_solar * Tatm**2 * (1.0 - cloud_fraction)
                   * (1.0 - albedo)**2 * 2.0 * mie.upscatter_avg * tau)
 
-    rf_total = np.sum(rf_per_bin)
+    rf_total = jnp.sum(rf_per_bin)
     return rf_total, rf_per_bin
 
 
 # =========================================================================
 # Diagnostic quantities
 # =========================================================================
+@jax.jit
 def compute_mass_scattering_efficiency(Nk, Mk, mie):
     """Compute mass scattering efficiency [m²/g].
 
@@ -662,29 +666,26 @@ def compute_mass_scattering_efficiency(Nk, Mk, mie):
         mse: Mass scattering efficiency [m²/g] (scalar).
         mse_per_bin: Per-bin contribution [m²/g], shape (nbins,).
     """
-    Nk_np = np.asarray(Nk, dtype=np.float64)
-    Mk_np = np.asarray(Mk, dtype=np.float64)
-
     # Total scattering cross section per bin [m²/cell]
     sigma_sca = PI * mie.radii**2 * mie.Qsca
-    total_sca = Nk_np * sigma_sca  # [m²/cell]
+    total_sca = Nk * sigma_sca  # [m²/cell]
 
     # Dry mass per bin (exclude water, species 0 through SRTH2O-1)
-    M_dry = np.sum(Mk_np[:, :SRTH2O], axis=1)  # [kg/cell]
-    M_dry_total = np.sum(M_dry)
+    M_dry = jnp.sum(Mk[:, :SRTH2O], axis=1)  # [kg/cell]
+    M_dry_total = jnp.sum(M_dry)
 
     # MSE [m²/g] = total_sca_area [m²] / mass [g]
-    if M_dry_total > 0:
-        mse = np.sum(total_sca) / (M_dry_total * 1e3)  # kg→g
-    else:
-        mse = 0.0
+    mse = jnp.where(M_dry_total > 0,
+                     jnp.sum(total_sca) / (M_dry_total * 1e3),
+                     0.0)
 
-    M_dry_g = np.maximum(M_dry * 1e3, 1e-30)
+    M_dry_g = jnp.maximum(M_dry * 1e3, 1e-30)
     mse_per_bin = total_sca / M_dry_g
 
     return mse, mse_per_bin
 
 
+@jax.jit
 def compute_rf_efficiency(Nk, Mk, mie, Tatm=TATM_DEFAULT, albedo=ALBEDO_GLOBAL_AVG):
     """Compute RF per unit aerosol burden [W/m² per g/m²].
 
@@ -709,16 +710,14 @@ def compute_rf_efficiency(Nk, Mk, mie, Tatm=TATM_DEFAULT, albedo=ALBEDO_GLOBAL_A
     mse, _ = compute_mass_scattering_efficiency(Nk, Mk, mie)
 
     # Weight MSE by upscatter fraction (bin-weighted)
-    Nk_np = np.asarray(Nk, dtype=np.float64)
     sigma_sca = PI * mie.radii**2 * mie.Qsca
-    total_sca = Nk_np * sigma_sca
-    sca_total = np.sum(total_sca)
+    total_sca = Nk * sigma_sca
+    sca_total = jnp.sum(total_sca)
 
-    if sca_total > 0:
-        # Scattering-weighted average upscatter fraction
-        beta_avg = np.sum(mie.upscatter_avg * total_sca) / sca_total
-    else:
-        beta_avg = 0.0
+    # Scattering-weighted average upscatter fraction
+    beta_avg = jnp.where(sca_total > 0,
+                          jnp.sum(mie.upscatter_avg * total_sca) / sca_total,
+                          0.0)
 
     avg_solar = SOLAR_CONSTANT / 4.0
     rf_eff = -avg_solar * Tatm**2 * (1.0 - albedo)**2 * 2.0 * beta_avg * mse

@@ -6,12 +6,16 @@ Validates:
     3. Chylek & Wong RF equation: sign, scaling, magnitude
     4. Mass scattering efficiency
     5. Scattering efficiency vs radius (Pierce et al. 2010 Fig 1 consistency)
+    6. bhmie_jax matches numpy reference, JIT, vmap, grad
+    7. Runtime RF functions under JIT, grad, vmap
 """
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from tomas_jax.core.config import PI, make_grid, XK0, NBINS, ICOMP
-from tomas_jax.physics.bhmie import bhmie
+from tomas_jax.physics.bhmie import bhmie, bhmie_jax, bhmie_qsca_jax
 from tomas_jax.physics.radiative_forcing import (
     precompute_mie_properties,
     compute_optical_depth,
@@ -393,3 +397,194 @@ class TestTabazadehComposition:
         for wt in [10, 30, 50, 70, 90]:
             rho = h2so4_solution_density(wt)
             assert 990 < rho < 1850
+
+
+# =========================================================================
+# bhmie_jax tests (JAX Mie scattering)
+# =========================================================================
+class TestBhmieJax:
+    """Tests for JAX-ported Mie scattering functions."""
+
+    @pytest.mark.parametrize("x", [0.01, 0.1, 1.0, 5.0, 20.0, 100.0])
+    def test_qsca_jax_matches_numpy(self, x):
+        """bhmie_qsca_jax should match numpy bhmie to high precision."""
+        refrel = complex(1.4, 1e-8)
+        _, _, qext_np, qsca_np, _, gsca_np = bhmie(x, refrel, 2)
+        qext_jax, qsca_jax, gsca_jax = bhmie_qsca_jax(jnp.float64(x), refrel)
+
+        np.testing.assert_allclose(float(qext_jax), qext_np, rtol=1e-10)
+        np.testing.assert_allclose(float(qsca_jax), qsca_np, rtol=1e-10)
+        np.testing.assert_allclose(float(gsca_jax), gsca_np, rtol=1e-10)
+
+    @pytest.mark.parametrize("x", [0.01, 1.0, 5.0, 20.0, 50.0])
+    def test_full_bhmie_jax_matches_numpy(self, x):
+        """Full bhmie_jax (with S1/S2) matches numpy reference."""
+        refrel = complex(1.4, 1e-8)
+        nang = 5
+        S1_np, S2_np, qext_np, qsca_np, _, gsca_np = bhmie(x, refrel, nang)
+        S1_jax, S2_jax, qext_jax, qsca_jax, _, gsca_jax = bhmie_jax(
+            jnp.float64(x), refrel, nang
+        )
+        np.testing.assert_allclose(float(qext_jax), qext_np, rtol=1e-10)
+        np.testing.assert_allclose(float(qsca_jax), qsca_np, rtol=1e-10)
+        np.testing.assert_allclose(float(gsca_jax), gsca_np, rtol=1e-10)
+        np.testing.assert_allclose(np.array(S1_jax), np.array(S1_np), rtol=1e-10)
+        np.testing.assert_allclose(np.array(S2_jax), np.array(S2_np), rtol=1e-10)
+
+    def test_jit_compiles(self):
+        """bhmie_qsca_jax should JIT compile without errors."""
+        qext, qsca, gsca = jax.jit(bhmie_qsca_jax)(
+            jnp.float64(5.0), complex(1.4, 1e-8)
+        )
+        assert jnp.isfinite(qext)
+        assert jnp.isfinite(qsca)
+        assert jnp.isfinite(gsca)
+
+    def test_vmap_over_size_params(self):
+        """vmap should vectorize over an array of size parameters."""
+        x_arr = jnp.array([0.1, 1.0, 5.0, 20.0, 50.0])
+        refrel = complex(1.4, 1e-8)
+        vmap_mie = jax.vmap(bhmie_qsca_jax, in_axes=(0, None))
+        Qext, Qsca, gsca = vmap_mie(x_arr, refrel)
+        assert Qext.shape == (5,)
+        assert jnp.all(jnp.isfinite(Qext))
+        assert jnp.all(jnp.isfinite(Qsca))
+        assert jnp.all(jnp.isfinite(gsca))
+
+    def test_2d_vmap(self):
+        """2D vmap for spectral integration (wavelengths x bins)."""
+        x_2d = jnp.array([[0.5, 1.0, 5.0, 20.0],
+                           [0.3, 0.8, 4.0, 15.0],
+                           [0.7, 1.5, 7.0, 30.0]])
+        refrel = complex(1.4, 1e-8)
+        vmap_2d = jax.vmap(jax.vmap(bhmie_qsca_jax, (0, None)), (0, None))
+        Qext, Qsca, gsca = vmap_2d(x_2d, refrel)
+        assert Qext.shape == (3, 4)
+        assert jnp.all(jnp.isfinite(Qext))
+
+    @pytest.mark.parametrize("x_val", [1.0, 5.0, 20.0])
+    def test_grad_qsca_finite(self, x_val):
+        """Gradient of Qsca w.r.t. x should be finite."""
+        def qsca_of_x(x):
+            _, qsca, _ = bhmie_qsca_jax(x, complex(1.4, 1e-8))
+            return qsca
+
+        grad_val = jax.grad(qsca_of_x)(jnp.float64(x_val))
+        assert jnp.isfinite(grad_val), f"Gradient not finite at x={x_val}"
+
+
+# =========================================================================
+# JIT runtime RF tests
+# =========================================================================
+class TestJITRuntime:
+    """Tests for JIT-compiled runtime RF functions."""
+
+    @pytest.fixture
+    def synthetic_mie(self):
+        """Synthetic MieProperties for fast JIT/grad/vmap tests."""
+        nbins = 10
+        radii = np.logspace(-8, -5, nbins)
+        return MieProperties(
+            radii=radii,
+            Qsca=np.ones(nbins) * 2.0,
+            Qext=np.ones(nbins) * 2.5,
+            gsca=np.ones(nbins) * 0.7,
+            upscatter_avg=np.ones(nbins) * 0.2,
+            wavelength=550e-9,
+            density=1770.0,
+        )
+
+    def test_compute_optical_depth_jit(self, synthetic_mie):
+        """compute_optical_depth produces finite results with JAX inputs."""
+        Nk = jnp.ones(10) * 1e6
+        tau = compute_optical_depth(Nk, synthetic_mie, 1e10)
+        assert jnp.all(jnp.isfinite(tau))
+        assert tau.shape == (10,)
+
+    def test_compute_rf_jit(self, synthetic_mie):
+        """compute_rf produces finite, negative RF with JAX inputs."""
+        Nk = jnp.ones(10) * 1e8
+        rf_total, rf_per_bin = compute_rf(Nk, synthetic_mie, 1e10)
+        assert jnp.isfinite(rf_total)
+        assert float(rf_total) < 0.0  # cooling
+        assert jnp.all(jnp.isfinite(rf_per_bin))
+
+    def test_compute_mse_jit(self, synthetic_mie):
+        """compute_mass_scattering_efficiency works under JIT."""
+        Nk = jnp.ones(10) * 1e6
+        Mk = jnp.ones((10, ICOMP)) * 1e-15
+        mse, mse_pb = compute_mass_scattering_efficiency(Nk, Mk, synthetic_mie)
+        assert jnp.isfinite(mse)
+        assert float(mse) > 0.0
+
+    def test_compute_rf_efficiency_jit(self, synthetic_mie):
+        """compute_rf_efficiency works under JIT."""
+        Nk = jnp.ones(10) * 1e6
+        Mk = jnp.ones((10, ICOMP)) * 1e-15
+        rfe = compute_rf_efficiency(Nk, Mk, synthetic_mie)
+        assert jnp.isfinite(rfe)
+        assert float(rfe) < 0.0  # cooling
+
+    def test_h2so4_density_jit(self):
+        """h2so4_solution_density works under JIT with JAX input."""
+        rho = h2so4_solution_density(jnp.float64(60.0))
+        assert jnp.isfinite(rho)
+        assert 1400 < float(rho) < 1600
+
+    def test_grad_rf_wrt_nk(self, synthetic_mie):
+        """Gradient of total RF w.r.t. Nk should be finite and negative."""
+        Nk = jnp.ones(10) * 1e6
+
+        def rf_total(nk):
+            rf, _ = compute_rf(nk, synthetic_mie, 1e10)
+            return rf
+
+        grad_nk = jax.grad(rf_total)(Nk)
+        assert jnp.all(jnp.isfinite(grad_nk))
+        # More particles → more cooling (negative) → gradient should be <= 0
+        assert jnp.all(grad_nk <= 0.0)
+
+    def test_grad_rf_wrt_column_area(self, synthetic_mie):
+        """Gradient of RF w.r.t. column_area should be finite."""
+        Nk = jnp.ones(10) * 1e6
+
+        def rf_total(area):
+            rf, _ = compute_rf(Nk, synthetic_mie, area)
+            return rf
+
+        grad_area = jax.grad(rf_total)(jnp.float64(1e10))
+        assert jnp.isfinite(grad_area)
+        # Larger area → lower column density → less cooling → positive gradient
+        assert float(grad_area) > 0.0
+
+    def test_vmap_compute_rf(self, synthetic_mie):
+        """vmap over multiple Nk distributions."""
+        Nk_batch = jnp.ones((5, 10)) * jnp.array(
+            [1e4, 1e5, 1e6, 1e7, 1e8]
+        )[:, None]
+
+        def rf_for_nk(nk):
+            rf, _ = compute_rf(nk, synthetic_mie, 1e10)
+            return rf
+
+        rf_batch = jax.vmap(rf_for_nk)(Nk_batch)
+        assert rf_batch.shape == (5,)
+        assert jnp.all(jnp.isfinite(rf_batch))
+        assert jnp.all(rf_batch <= 0.0)  # all cooling
+        # More particles → stronger cooling
+        assert jnp.all(jnp.diff(rf_batch) <= 0.0)
+
+    def test_precompute_mie_vmap_matches_loop(self):
+        """vmap-based precomputation matches original loop results."""
+        xk = make_grid(10, XK0, 2.0)
+        mie = precompute_mie_properties(xk, global_avg_upscatter=False)
+        # Verify against individual bhmie calls
+        radii = mie.radii
+        size_param = 2.0 * PI * radii / WAVELENGTH_DEFAULT
+        for k in range(10):
+            _, _, qext_ref, qsca_ref, _, gsca_ref = bhmie(
+                float(size_param[k]), REFINDEX_SULFATE, 2
+            )
+            np.testing.assert_allclose(mie.Qext[k], qext_ref, rtol=1e-10)
+            np.testing.assert_allclose(mie.Qsca[k], qsca_ref, rtol=1e-10)
+            np.testing.assert_allclose(mie.gsca[k], gsca_ref, rtol=1e-10)
