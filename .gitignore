@@ -38,3 +38,6 @@ tomas_fortran/output/
 
 # PDF files
 *.pdf
+
+# Reference papers and code (local only, not for GitHub)
+references/
