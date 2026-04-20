@@ -41,3 +41,6 @@ tomas_fortran/output/
 
 # Reference papers and code (local only, not for GitHub)
 references/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
