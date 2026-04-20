@@ -4,11 +4,15 @@ Educational Jupyter notebooks for the TOMAS-JAX aerosol microphysics model.
 
 ## Contents
 
-- `radiative_forcing_tutorial.ipynb` — Interactive tutorial on stratospheric
-  aerosol direct shortwave radiative forcing (Pierce et al. 2010). Teaches the
-  Chylek & Wong (1995) equation, Mie scattering, upscatter fraction, and
-  H2SO4/H2O composition. Ends with an interactive widget that recomputes the
-  scattering-efficiency-vs-radius curve as the user moves sliders.
+- `radiative_forcing_tutorial.ipynb` — Interactive educational tutorial on
+  stratospheric aerosol direct shortwave radiative forcing, following the
+  simple-model formulation of Pierce et al. (2010). Covers Mie scattering,
+  upscatter fraction (Wiscombe & Grams 1976), H2SO4/H2O equilibrium
+  composition (Tabazadeh et al. 1997), single-wavelength vs full-spectrum
+  Mie, and reproduces Pierce (2010) Figure 1. Ends with an interactive
+  playground where researchers can dial in temperature, humidity,
+  refractive index, and atmospheric parameters and see the cooling
+  efficiency curve update live.
 
 ## Launching
 
