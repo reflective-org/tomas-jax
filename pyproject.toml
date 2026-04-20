@@ -25,6 +25,10 @@ web = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
 ]
+notebook = [
+    "jupyterlab>=4.0",
+    "ipywidgets>=8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
