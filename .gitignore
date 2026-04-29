@@ -39,5 +39,8 @@ tomas_fortran/output/
 # PDF files
 *.pdf
 
+# Jupyter notebooks
+.ipynb_checkpoints/
+
 # Reference papers and code (local only, not for GitHub)
 references/
