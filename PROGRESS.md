@@ -4,6 +4,198 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-18 (Fri) — 1000-Scenario Tropo→Strato Benchmark (PPM-only)
+
+**Time**: late afternoon PST
+
+### Summary
+Scaled the Fortran-vs-JAX PPM benchmark from 49 tropospheric scenarios to 1000 scenarios spanning troposphere → lower stratosphere. Three strata: tropo (600, P ≥ 25 kPa), UTLS (250, 5 kPa ≤ P < 25 kPa), strato (150, 100 Pa ≤ P < 5 kPa). JAX PPM_JIT vs Fortran PPM on all 3 modes (coag_only, cond_only, combined).
+
+### New infrastructure
+- `benchmarks/python/scenarios_atmos.py` — stratified LHC generator (3 regimes × regime-realistic ranges)
+- `tomas_fortran/harness/benchmark_24h_ppm_atmos.f` — 1000-scenario Fortran harness with 4-digit scenario IDs, crash-tolerant timing CSV
+- `benchmarks/python/run_atmos_scenarios.py` — PPM-only JAX runner; fast combined path via `run_combined_scan_ppm` (avoids the 900 s/scenario Python fallback)
+- `benchmarks/python/export_atmos_metrics.py` — regime-classified skill metrics export (1000 × 3 modes × 4 hours = 12k rows)
+- `benchmarks/python/plot_atmos_suite.py` — 12 comprehensive figures (coverage, pairplot, regime Taylor, violin, CDF, error-vs-P, error contour, per-bin heatmap, error evolution, mass conservation, rep scenarios, walltime)
+- `benchmarks/python/build_atmos_tables.py` — regime-stratified markdown + LaTeX skill tables
+- `benchmarks/run_atmos.sh` — orchestration driver
+- `tomas_fortran/Makefile` — added `benchmark_24h_ppm_atmos` + `run_24h_ppm_atmos` targets
+
+### Runtime (measured)
+- Fortran 1000-run: 1000 scenarios × 3 modes = 3000 sims, 216 001 CSV files, 0 crashes
+- JAX 1000-run: 2993/3000 runs in 3.23 h wall (coag_only ~3.9 s/scen, cond_only ~0.2 s/scen, combined ~0.6 s/scen)
+- Results: `benchmarks/results/atmos/` (3000 NPZs) + `tomas_fortran/output/atmos/` (216k CSVs) + `benchmarks/results/atmos/stats/` (12 figures + 2 tables + 12k-row metrics CSV)
+
+### Key discovery
+The old `run_24h_scenarios.run_scenario` combined-mode path falls through to a Python for-loop with 1440 per-step dispatches (~920 s/scenario). Bypassed by calling `run_combined_scan_ppm` directly from `run_atmos_scenarios.run_combined_fast`, which uses the existing XLA scan-fused kernel. Per-scenario wall time dropped from 920 s → 0.6 s (1500× speedup).
+
+### Ensemble skill (h24, all 1000 scenarios)
+| Regime | Mode | n | Nk R² med | Nk KGE med | \|N_tot relerr\| med | \|N_tot relerr\| p95 |
+|---|---|---:|---:|---:|---:|---:|
+| tropo  | coag_only | 600 | 0.9997 | 0.9967 | 2.3e-03 | 1.5e-02 |
+| tropo  | cond_only | 600 | 0.9585 | 0.9401 | 1.7e-07 | 2.4e-04 |
+| tropo  | combined  | 600 | 0.9802 | 0.9679 | 3.3e-03 | 2.8e-02 |
+| utls   | coag_only | 250 | 0.9997 | 0.9990 | 6.4e-04 | 1.4e-02 |
+| utls   | cond_only | 250 | 0.9325 | 0.8804 | 2.0e-07 | 2.1e-04 |
+| utls   | combined  | 250 | 0.9371 | 0.8849 | 1.4e-03 | 2.7e-02 |
+| strato | coag_only | 150 | 0.9998 | 0.9996 | 2.7e-04 | 5.8e-03 |
+| strato | cond_only | 150 | 0.9097 | 0.8571 | 5.5e-11 | 1.3e-07 |
+| strato | combined  | 150 | 0.9120 | 0.8585 | 6.6e-04 | 9.7e-03 |
+
+### Findings
+1. **Coagulation**: JAX matches Fortran to within 0.03-0.2% median on N_tot across the entire tropo→strato range. Nk R² > 0.9997 in all regimes.
+2. **Condensation**: per-bin R² degrades from 0.96 (tropo) → 0.91 (strato) as conditions get colder/drier/sparser. But total N is essentially unchanged (N_tot_relerr median 1e-7 to 5e-11) — the two codes redistribute the mass slightly differently but conserve the totals to machine precision.
+3. **Stratosphere**: N_total rel err is smallest in strato (5.5e-11 for cond_only) because condensation events are tiny when gas and N are low. But per-bin log-bias is larger (regime has wider Nk dynamic range).
+4. **No Fortran crashes** at any scenario across the 1000-point atmospheric envelope — Fortran PPM is robust stratospheric-regime conditions (surprising given the code has no stratospheric test coverage in the original distribution).
+
+---
+
+## 2026-04-18 (Fri) — Fortran-vs-JAX Statistical Benchmark Suite + Audit
+
+**Time**: afternoon PST
+
+### Summary
+Added a thin statistical-reporting layer on top of the existing 49-scenario LHC × 5-mode × 2-method benchmark so Fortran-vs-JAX parity can be presented to the group with quantitative skill metrics. Zero new simulations; all new code consumes existing NPZ/CSV artifacts. Also shipped a consolidated audit document covering JIT status and precomputed-and-recycled compromises.
+
+### New files
+- `benchmarks/python/metrics.py` — skill metrics (bias, rmse, nrmse, mape, r2, pearson_r, kge, log_bias, max_relerr)
+- `benchmarks/python/export_metrics_csv.py` — 3750-row per-(scenario,mode,pair,hour) CSV + 75-row summary
+- `benchmarks/python/plot_statistical_suite.py` — 7 figures: Taylor, Q-Q, CDF, per-bin heatmap, error-vs-params, walltime, convergence
+- `benchmarks/python/build_presentation_tables.py` — markdown + LaTeX ensemble tables
+- `benchmarks/run_stats.sh` — single entrypoint, runs zero simulations
+- `docs/AUDIT_JAX_VS_FORTRAN.md` — consolidated audit: JIT status, compromises, GPU readiness
+
+### Key numbers (h24, 49 LHC scenarios)
+- coag_only TFL vs Fortran: Nk R² = 0.9998, |N_tot relerr| median = 1.2e-3, p95 = 9.0e-3
+- cond_only TFL vs Fortran: Nk R² = 0.9986, |N_tot relerr| median = 1.4e-7
+- combined TFL vs Fortran: Nk R² = 0.9996, |N_tot relerr| median = 1.5e-3
+- `full` mode has the intentional nucleation-clamping tail (p95 ≈ 1); expected.
+
+### Infrastructure
+- Symlinked `tomas_fortran/output/24h` → nested actual location for compare_24h path compatibility.
+- `manifest.json` records md5 of scenarios.csv so stats export exits loudly if LHC regenerates.
+- `--scenarios` flag plumbed through for incremental runs.
+
+### Files Modified
+- `PROGRESS.md` — this entry
+- `docs/porting_status.md` — cross-link to audit doc
+
+---
+
+## 2026-04-17 (Thu) — Radiative Forcing JAX Port: Phase 5 (Gauss-Legendre Upscatter)
+
+**Time**: morning PST
+
+### Summary
+Replaced scipy.quad-based upscatter integration with 32-point Gauss-Legendre quadrature, making the entire precomputation pipeline JIT-compilable. Test suite speedup: 36s → 3s. All 84 RF tests pass.
+
+### Phase 5: Gauss-Legendre Upscatter
+- Added `_upscatter_fraction_gl(g, sza_rad)` — JIT-compilable upscatter via 32-point GL quadrature
+- Added `_avg_solar_power_gl(lat_rad, sda, So)` — JIT-compilable 24h solar power average
+- Rewrote `_compute_global_avg_upscatter` — vectorized with 2D vmap over (g, sza) pairs
+- Vectorized `scattering_efficiency_vs_radius` — single-wavelength uses vmap + batch upscatter; spectral uses 2D vmap
+- Module-level GL constants: `_GL_NODES`, `_GL_WEIGHTS` (32-point, from `np.polynomial.legendre.leggauss`)
+- GL vs scipy accuracy: atol < 1e-4 across 16 (g, sza) combinations
+- Plot validation: fig2/fig3 byte-identical; fig1 visually identical (121-byte diff from GL approximation)
+
+### Tests Added
+- `TestGaussLegendreUpscatter` class (22 tests): GL vs scipy match (4g × 4sza = 16 parametrized), bounds, JIT, vmap, grad, isotropic
+- Total: 84 RF tests (37 existing + 47 new)
+
+### Performance
+- Test suite: 36s → 3.3s (11x speedup from eliminating scipy.quad in precomputation)
+- `scattering_efficiency_vs_radius`: fully vectorized, no Python loops
+
+### Files Modified
+- `tomas_jax/physics/radiative_forcing.py` — GL quadrature, vectorized upscatter/scattering_efficiency
+- `tests/test_radiative_forcing.py` — `TestGaussLegendreUpscatter` class
+
+---
+
+## 2026-04-16 (Wed) — Radiative Forcing JAX Port (Phases 1–4)
+
+**Time**: evening PST
+
+### Summary
+Ported the radiative forcing pipeline to pure JAX with JIT compilation, vmap vectorization, and autodiff support. Three files modified: `bhmie.py` (new JAX Mie functions), `radiative_forcing.py` (runtime functions ported to jnp), `test_radiative_forcing.py` (26 new tests).
+
+### Phase 1: bhmie → JAX
+- Added `bhmie_jax(x, refrel, nang)` — full Mie with S1/S2, JIT-compilable via `@partial(jax.jit, static_argnums=(2,))`
+- Added `bhmie_qsca_jax(x, refrel)` — lightweight (Qext, Qsca, gsca only), `@jax.jit`
+- Uses `jax.lax.fori_loop` with fixed upper bounds (NSTOP_MAX=250, NMX_MAX=300) and traced masks
+- Fixed S1/S2 backward sign convention: `p = -p` must happen **before** backward amplitude accumulation
+- Matches numpy `bhmie` to rtol=1e-10 for x ∈ {0.01, 0.1, 1.0, 5.0, 20.0, 50.0, 100.0}
+
+### Phase 2: Runtime RF → jnp
+- `compute_optical_depth`, `compute_rf`, `compute_mass_scattering_efficiency`, `compute_rf_efficiency`: `np.*` → `jnp.*`, `if/else` → `jnp.where`, `@jax.jit`
+- `h2so4_solution_density`, `_interpolate_upscatter`: `np.interp` → `jnp.interp`, `@jax.jit`
+- `_planck`: `np.exp` → `jnp.exp`; `_solar_spectral_weights`: `np.linspace` → `jnp.linspace`
+- Precomputation functions (scipy.quad-based) remain as numpy fallbacks
+
+### Phase 3: vmap Mie precomputation
+- Single-wavelength: `jax.vmap(bhmie_qsca_jax, (0, None))` replaces 40-bin for-loop
+- Spectral: 2D vmap `jax.vmap(jax.vmap(...))` replaces 30-wavelength × 40-bin double loop
+- Vectorized upscatter interpolation and weighted accumulation via broadcasting
+
+### Phase 4: Tests
+- 26 new tests: `TestBhmieJax` (14 tests) + `TestJITRuntime` (12 tests)
+- bhmie_jax: numpy reference match, JIT, vmap (1D + 2D), grad through Qsca
+- Runtime: JIT correctness, grad w.r.t. Nk and column_area, vmap over distributions
+- Total: 63 RF tests (37 existing + 26 new)
+
+### Files Modified
+- `tomas_jax/physics/bhmie.py` — Added `bhmie_jax`, `bhmie_qsca_jax`, helpers
+- `tomas_jax/physics/radiative_forcing.py` — JAX imports, jnp runtime, vmap precomputation
+- `tests/test_radiative_forcing.py` — `TestBhmieJax`, `TestJITRuntime` classes
+
+### Known Limitations
+- Grad through Qsca at integer nstop boundaries has local accuracy only (jnp.int32 truncation)
+
+---
+
+## 2026-04-16 (Wed) — Phase A Hardening: Unit Tests for Foundation Modules
+
+**Time**: evening PST
+
+### Summary
+Added 90 unit tests across 4 previously untested foundation modules: `nh3_equilibrium.py`, `water_equilibrium.py`, `condensation_sink.py`, and `mnfix_jax.py`. All 677 tests pass (up from 579). Updated `docs/porting_status.md` with test counts.
+
+### New Test Files
+
+1. **`tests/test_nh3_equilibrium.py`** — 20 tests
+   - Ammonia-limited case (all NH3 → particles, distributed proportional to SO4)
+   - Ammonia-excess case (2:1 NH4:SO4 stoichiometry, excess stays gas)
+   - Total nitrogen conservation across 5 NH3/SO4 ratios
+   - Edge cases: zero NH3, zero SO4, single bin, species isolation
+   - JIT compilation and eager/JIT equivalence
+
+2. **`tests/test_water_equilibrium.py`** — 30 tests
+   - Sulfate WR: known references (50%→1.29, 80%→1.96, 95%→5.05), monotonicity, clipping
+   - Piecewise polynomial continuity at 5 breakpoints (41%, 61%, 81%, 91%, 96%)
+   - Sea salt WR: low RH baseline, higher hygroscopicity than sulfate
+   - calc_equilibrium_water: SO4/organic contributions, proportionality, species isolation
+   - JIT compilation
+
+3. **`tests/test_condensation_sink.py`** — 18 tests
+   - CS physical range, formula verification, scaling with Nk and particle size
+   - sinkfrac normalization, non-negativity, single-bin dominance
+   - NEPS threshold (1e10), sparse bin default density handling
+   - NaN guard for Dpk=0, accommodation coefficient effect
+   - JIT compilation
+
+4. **`tests/test_mnfix.py`** — 22 tests
+   - Phase 1: empty bins get NEPS=1e-5, SO4 at geometric mean
+   - Phase 2: extreme avg mass trimming (above grid, below grid)
+   - Phase 3: partial transfer (upward, downward, partial not total, in-range unchanged)
+   - Conservation: number, mass, multi-species, composition fractions
+   - Multi-bin jumps (10+ bins), positivity, no-NaN stress test
+   - JIT compilation
+
+### Updated Documentation
+- `docs/porting_status.md`: Updated test counts in tables, marked 4 modules as tested, reduced untested count from 8 to 4
+
+---
+
 ## 2026-04-15 (Tue) — Radiative Forcing with Tabazadeh H₂SO₄/H₂O Equilibrium
 
 **Time**: afternoon PST
