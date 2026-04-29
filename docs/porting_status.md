@@ -78,6 +78,9 @@
 
 ### 2.3 Validation
 
+See `docs/AUDIT_JAX_VS_FORTRAN.md` for the consolidated audit (JIT status, compromises, GPU readiness) and `benchmarks/results/24h/stats/` for ensemble skill plots + tables.
+
+
 - **388 tests** across 16 test files (724 pass, 350 skip needing Fortran data)
 - **50-scenario Latin Hypercube** 24h benchmarks (Fortran vs TFL vs PPM, 5 modes)
 - **Nucleation**: 20 parameterization-level cases match Fortran to <1e-12
