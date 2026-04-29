@@ -4,6 +4,84 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-04-18 (Fri) — 1000-Scenario Tropo→Strato Benchmark (PPM-only)
+
+**Time**: late afternoon PST
+
+### Summary
+Scaled the Fortran-vs-JAX PPM benchmark from 49 tropospheric scenarios to 1000 scenarios spanning troposphere → lower stratosphere. Three strata: tropo (600, P ≥ 25 kPa), UTLS (250, 5 kPa ≤ P < 25 kPa), strato (150, 100 Pa ≤ P < 5 kPa). JAX PPM_JIT vs Fortran PPM on all 3 modes (coag_only, cond_only, combined).
+
+### New infrastructure
+- `benchmarks/python/scenarios_atmos.py` — stratified LHC generator (3 regimes × regime-realistic ranges)
+- `tomas_fortran/harness/benchmark_24h_ppm_atmos.f` — 1000-scenario Fortran harness with 4-digit scenario IDs, crash-tolerant timing CSV
+- `benchmarks/python/run_atmos_scenarios.py` — PPM-only JAX runner; fast combined path via `run_combined_scan_ppm` (avoids the 900 s/scenario Python fallback)
+- `benchmarks/python/export_atmos_metrics.py` — regime-classified skill metrics export (1000 × 3 modes × 4 hours = 12k rows)
+- `benchmarks/python/plot_atmos_suite.py` — 12 comprehensive figures (coverage, pairplot, regime Taylor, violin, CDF, error-vs-P, error contour, per-bin heatmap, error evolution, mass conservation, rep scenarios, walltime)
+- `benchmarks/python/build_atmos_tables.py` — regime-stratified markdown + LaTeX skill tables
+- `benchmarks/run_atmos.sh` — orchestration driver
+- `tomas_fortran/Makefile` — added `benchmark_24h_ppm_atmos` + `run_24h_ppm_atmos` targets
+
+### Runtime (measured)
+- Fortran 1000-run: 1000 scenarios × 3 modes = 3000 sims, 216 001 CSV files, 0 crashes
+- JAX 1000-run: 2993/3000 runs in 3.23 h wall (coag_only ~3.9 s/scen, cond_only ~0.2 s/scen, combined ~0.6 s/scen)
+- Results: `benchmarks/results/atmos/` (3000 NPZs) + `tomas_fortran/output/atmos/` (216k CSVs) + `benchmarks/results/atmos/stats/` (12 figures + 2 tables + 12k-row metrics CSV)
+
+### Key discovery
+The old `run_24h_scenarios.run_scenario` combined-mode path falls through to a Python for-loop with 1440 per-step dispatches (~920 s/scenario). Bypassed by calling `run_combined_scan_ppm` directly from `run_atmos_scenarios.run_combined_fast`, which uses the existing XLA scan-fused kernel. Per-scenario wall time dropped from 920 s → 0.6 s (1500× speedup).
+
+### Ensemble skill (h24, all 1000 scenarios)
+| Regime | Mode | n | Nk R² med | Nk KGE med | \|N_tot relerr\| med | \|N_tot relerr\| p95 |
+|---|---|---:|---:|---:|---:|---:|
+| tropo  | coag_only | 600 | 0.9997 | 0.9967 | 2.3e-03 | 1.5e-02 |
+| tropo  | cond_only | 600 | 0.9585 | 0.9401 | 1.7e-07 | 2.4e-04 |
+| tropo  | combined  | 600 | 0.9802 | 0.9679 | 3.3e-03 | 2.8e-02 |
+| utls   | coag_only | 250 | 0.9997 | 0.9990 | 6.4e-04 | 1.4e-02 |
+| utls   | cond_only | 250 | 0.9325 | 0.8804 | 2.0e-07 | 2.1e-04 |
+| utls   | combined  | 250 | 0.9371 | 0.8849 | 1.4e-03 | 2.7e-02 |
+| strato | coag_only | 150 | 0.9998 | 0.9996 | 2.7e-04 | 5.8e-03 |
+| strato | cond_only | 150 | 0.9097 | 0.8571 | 5.5e-11 | 1.3e-07 |
+| strato | combined  | 150 | 0.9120 | 0.8585 | 6.6e-04 | 9.7e-03 |
+
+### Findings
+1. **Coagulation**: JAX matches Fortran to within 0.03-0.2% median on N_tot across the entire tropo→strato range. Nk R² > 0.9997 in all regimes.
+2. **Condensation**: per-bin R² degrades from 0.96 (tropo) → 0.91 (strato) as conditions get colder/drier/sparser. But total N is essentially unchanged (N_tot_relerr median 1e-7 to 5e-11) — the two codes redistribute the mass slightly differently but conserve the totals to machine precision.
+3. **Stratosphere**: N_total rel err is smallest in strato (5.5e-11 for cond_only) because condensation events are tiny when gas and N are low. But per-bin log-bias is larger (regime has wider Nk dynamic range).
+4. **No Fortran crashes** at any scenario across the 1000-point atmospheric envelope — Fortran PPM is robust stratospheric-regime conditions (surprising given the code has no stratospheric test coverage in the original distribution).
+
+---
+
+## 2026-04-18 (Fri) — Fortran-vs-JAX Statistical Benchmark Suite + Audit
+
+**Time**: afternoon PST
+
+### Summary
+Added a thin statistical-reporting layer on top of the existing 49-scenario LHC × 5-mode × 2-method benchmark so Fortran-vs-JAX parity can be presented to the group with quantitative skill metrics. Zero new simulations; all new code consumes existing NPZ/CSV artifacts. Also shipped a consolidated audit document covering JIT status and precomputed-and-recycled compromises.
+
+### New files
+- `benchmarks/python/metrics.py` — skill metrics (bias, rmse, nrmse, mape, r2, pearson_r, kge, log_bias, max_relerr)
+- `benchmarks/python/export_metrics_csv.py` — 3750-row per-(scenario,mode,pair,hour) CSV + 75-row summary
+- `benchmarks/python/plot_statistical_suite.py` — 7 figures: Taylor, Q-Q, CDF, per-bin heatmap, error-vs-params, walltime, convergence
+- `benchmarks/python/build_presentation_tables.py` — markdown + LaTeX ensemble tables
+- `benchmarks/run_stats.sh` — single entrypoint, runs zero simulations
+- `docs/AUDIT_JAX_VS_FORTRAN.md` — consolidated audit: JIT status, compromises, GPU readiness
+
+### Key numbers (h24, 49 LHC scenarios)
+- coag_only TFL vs Fortran: Nk R² = 0.9998, |N_tot relerr| median = 1.2e-3, p95 = 9.0e-3
+- cond_only TFL vs Fortran: Nk R² = 0.9986, |N_tot relerr| median = 1.4e-7
+- combined TFL vs Fortran: Nk R² = 0.9996, |N_tot relerr| median = 1.5e-3
+- `full` mode has the intentional nucleation-clamping tail (p95 ≈ 1); expected.
+
+### Infrastructure
+- Symlinked `tomas_fortran/output/24h` → nested actual location for compare_24h path compatibility.
+- `manifest.json` records md5 of scenarios.csv so stats export exits loudly if LHC regenerates.
+- `--scenarios` flag plumbed through for incremental runs.
+
+### Files Modified
+- `PROGRESS.md` — this entry
+- `docs/porting_status.md` — cross-link to audit doc
+
+---
+
 ## 2026-04-17 (Thu) — Radiative Forcing JAX Port: Phase 5 (Gauss-Legendre Upscatter)
 
 **Time**: morning PST

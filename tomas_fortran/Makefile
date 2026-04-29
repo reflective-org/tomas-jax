@@ -56,6 +56,7 @@ NUC_OBJS = ricco_nucl.o dunne_inorg_nucl.o
 TARGET = benchmark.exe
 TARGET_24H = benchmark_24h.exe
 TARGET_24H_PPM = benchmark_24h_ppm.exe
+TARGET_24H_PPM_ATMOS = benchmark_24h_ppm_atmos.exe
 TARGET_NUC = benchmark_nucleation.exe
 TARGET_CONSTGC = benchmark_constgc.exe
 
@@ -67,6 +68,9 @@ benchmark_24h: setup_24h $(TARGET_24H)
 
 # Build 24-hour PPM benchmark
 benchmark_24h_ppm: setup_24h $(TARGET_24H_PPM)
+
+# Build 1000-scenario atmospheric PPM benchmark
+benchmark_24h_ppm_atmos: setup_atmos $(TARGET_24H_PPM_ATMOS)
 
 # Build nucleation benchmark (standalone, no sizecode.COM)
 benchmark_nucleation: setup $(TARGET_NUC)
@@ -84,6 +88,9 @@ setup:
 setup_24h:
 	mkdir -p output/24h
 
+setup_atmos:
+	mkdir -p output/atmos
+
 setup_constgc:
 	mkdir -p output/constgc
 
@@ -95,6 +102,9 @@ $(TARGET_24H): benchmark_24h.o $(TOMAS_OBJS) $(NUC_OBJS) nucleation_driver.o
 	$(FC) $(FFLAGS) -o $@ $^
 
 $(TARGET_24H_PPM): benchmark_24h_ppm.o $(PPM_OBJS) $(SHARED_OBJS)
+	$(FC) $(FFLAGS) -o $@ $^
+
+$(TARGET_24H_PPM_ATMOS): benchmark_24h_ppm_atmos.o $(PPM_OBJS) $(SHARED_OBJS)
 	$(FC) $(FFLAGS) -o $@ $^
 
 $(TARGET_NUC): benchmark_nucleation.o $(NUC_OBJS)
@@ -111,6 +121,9 @@ benchmark_24h.o: $(HARNESS)/benchmark_24h.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
 benchmark_24h_ppm.o: $(HARNESS)/benchmark_24h_ppm.f $(INC)/sizecode.COM
+	$(FC) $(FFLAGS) -c $<
+
+benchmark_24h_ppm_atmos.o: $(HARNESS)/benchmark_24h_ppm_atmos.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
 benchmark_nucleation.o: $(HARNESS)/benchmark_nucleation.f
@@ -189,13 +202,19 @@ run_24h: $(TARGET_24H)
 run_24h_ppm: $(TARGET_24H_PPM)
 	./$(TARGET_24H_PPM)
 
+run_24h_ppm_atmos: $(TARGET_24H_PPM_ATMOS)
+	cp ../benchmarks/fortran/scenarios_atmos.csv ./scenarios_atmos.csv
+	./$(TARGET_24H_PPM_ATMOS)
+
 # Clean
 clean:
-	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_NUC) $(TARGET_CONSTGC)
+	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_24H_PPM_ATMOS) $(TARGET_NUC) $(TARGET_CONSTGC)
 	rm -rf output
 
 run_constgc: $(TARGET_CONSTGC)
 	./$(TARGET_CONSTGC)
 
-.PHONY: all setup setup_24h setup_constgc run run_24h run_24h_ppm run_constgc clean \
-        benchmark_24h benchmark_24h_ppm benchmark_both benchmark_nucleation benchmark_constgc
+.PHONY: all setup setup_24h setup_atmos setup_constgc run run_24h run_24h_ppm \
+        run_24h_ppm_atmos run_constgc clean \
+        benchmark_24h benchmark_24h_ppm benchmark_24h_ppm_atmos benchmark_both \
+        benchmark_nucleation benchmark_constgc
