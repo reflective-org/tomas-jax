@@ -9,7 +9,6 @@ from tomas_jax.core.config import (
     SRTSO4, SRTORGLAST, SRTH2O,
     AVOGADRO, XK0, PI,
 )
-from tomas_jax.core.config import xk_boundaries
 from tomas_jax.physics.nucleation import (
     ricco_nucleation_rate,
     dunne_nucleation_rate,
@@ -26,11 +25,6 @@ from tomas_jax.physics.nucleation import (
     _ORG_SA_K,
     ZHAO2024_ALL_ENABLED, ZHAO2024_DUNNE_ONLY,
 )
-
-
-@pytest.fixture
-def xk():
-    return xk_boundaries()
 
 
 @pytest.fixture

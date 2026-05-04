@@ -63,7 +63,7 @@ def ezcond_ppm_jax(
     # Condensation sink (needed for outer branch decision)
     CS, sinkfrac = calc_condensation_sink(
         Nk, Mk, temp, pres, boxvol,
-        accommodation_coeff=alpha, xk=xk
+        alpha=alpha, xk=xk
     )
 
     # --- Dump path (CS too small): add all mass to first bin ---

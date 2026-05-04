@@ -45,6 +45,14 @@ skip_no_fortran = pytest.mark.skipif(
 SCENARIO_IDS = list(range(1, 51))
 
 
+def _load_with_jit_fallback(sid, mode, method):
+    """Load JIT data first, fall back to legacy numpy data."""
+    data = load_jax_results(sid, mode, method + '_jit')
+    if data is None:
+        data = load_jax_results(sid, mode, method)
+    return data
+
+
 # =========================================================================
 # Session-scoped fixture: compute all comparisons once
 # =========================================================================
@@ -245,7 +253,7 @@ def test_cond_mass_conservation_tfl(sid):
     """
     from benchmarks.python.scenarios import get_scenarios
 
-    data = load_jax_results(sid, 'cond_only', 'tfl')
+    data = _load_with_jit_fallback(sid, 'cond_only', 'tfl')
     if data is None:
         pytest.skip("No TFL data")
 
@@ -282,7 +290,7 @@ def test_cond_mass_conservation_ppm(sid):
     """PPM cond-only: dry aerosol mass + gas should be conserved within 1%."""
     from benchmarks.python.scenarios import get_scenarios
 
-    data = load_jax_results(sid, 'cond_only', 'ppm')
+    data = _load_with_jit_fallback(sid, 'cond_only', 'ppm')
     if data is None:
         pytest.skip("No PPM data")
 
@@ -309,29 +317,72 @@ def test_cond_mass_conservation_ppm(sid):
 
 
 # =========================================================================
-# Coagulation mass conservation (JAX only)
+# Coagulation mass conservation (runs solver inline with overflow tracking)
 # =========================================================================
 
 @pytest.mark.slow
 @pytest.mark.coag_only
-@skip_no_data
 @pytest.mark.parametrize("sid", SCENARIO_IDS)
 def test_coag_mass_conservation(sid):
-    """Coag-only: dry aerosol mass should be conserved to ~1e-6.
+    """Coag-only: M_dry(0) == M_dry(24) + top-bin overflow to machine precision.
 
-    Coagulation redistributes mass across bins but does not create or
-    destroy it. No gas-phase source, so M_dry(24) == M_dry(1).
+    Coagulation redistributes mass across bins. On a finite bin grid, mass
+    that coagulates past the top bin boundary is physically lost (grid
+    truncation). We track this overflow explicitly and verify the full
+    mass budget closes to ~1e-10 relative.
     """
-    data = load_jax_results(sid, 'coag_only', 'tfl')
-    if data is None:
-        pytest.skip("No coag_only data")
+    import jax
+    import jax.numpy as jnp
+    from tomas_jax.core.config import ICOMP_NODIAG
+    from tomas_jax.solvers.diffrax import coag_euler_step
+    from benchmarks.python.scenarios import get_scenarios
+    from benchmarks.python.run_24h_scenarios import (
+        init_lognormal_scenario, NBINS, XK0_LEGACY, BOXVOL,
+    )
 
-    M_dry_1 = np.sum(data['Mk'][0, :, :SRTH2O])
-    M_dry_24 = np.sum(data['Mk'][23, :, :SRTH2O])
+    scenarios = get_scenarios()
+    scen = scenarios[sid - 1]
 
-    if M_dry_1 > 1e-30:
-        rel_err = abs(M_dry_24 - M_dry_1) / M_dry_1
-        assert rel_err < 1e-6, (
-            f"Coag mass conservation error: {rel_err:.4e} > 1e-6 "
-            f"(M_dry_24={M_dry_24:.4e}, M_dry_1={M_dry_1:.4e})"
-        )
+    # Build legacy 36-bin grid
+    xk_np = np.zeros(NBINS + 1)
+    xk_np[0] = XK0_LEGACY
+    for k in range(NBINS):
+        xk_np[k + 1] = 2.0 * xk_np[k]
+    xk = jnp.array(xk_np)
+
+    Nk_np, Mk_np = init_lognormal_scenario(
+        scen['N_total'], scen['GMD_um'], scen['GSD'], xk_np)
+    Nk = jnp.array(Nk_np)
+    Mk = jnp.array(Mk_np)
+
+    M_dry_0 = float(jnp.sum(Mk[:, :SRTH2O]))
+    if M_dry_0 < 1e-30:
+        pytest.skip("Negligible initial mass")
+
+    # Run 24h with 1-minute timesteps, tracking overflow
+    DT = 60.0
+    NSTEPS = 1440
+    overflow_total = jnp.zeros(Mk.shape[1])
+
+    solver = jax.jit(coag_euler_step,
+                      static_argnames=['icomp_nodiag', 'n_substeps', 'return_overflow'])
+    for step in range(NSTEPS):
+        Nk, Mk, overflow = solver(
+            Nk, Mk, xk, scen['temp'], scen['pres'], BOXVOL,
+            dt=DT, icomp_nodiag=ICOMP_NODIAG, n_substeps=3,
+            return_overflow=True)
+        overflow_total = overflow_total + overflow
+
+    M_dry_24 = float(jnp.sum(Mk[:, :SRTH2O]))
+    M_overflow_dry = float(jnp.sum(overflow_total[:SRTH2O]))
+
+    # Mass budget: M(0) = M(24) + overflow
+    mass_loss = M_dry_0 - M_dry_24
+    residual = abs(mass_loss - M_overflow_dry)
+    rel_residual = residual / M_dry_0
+
+    assert rel_residual < 1e-8, (
+        f"Mass budget not closed: residual={rel_residual:.4e} > 1e-8. "
+        f"M_dry(0)={M_dry_0:.4e}, M_dry(24)={M_dry_24:.4e}, "
+        f"overflow={M_overflow_dry:.4e}, loss-overflow={residual:.4e}"
+    )

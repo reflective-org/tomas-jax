@@ -68,7 +68,7 @@ def coagulation_step_jax(
     kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
 
     # 3. Rates
-    dNdt, dMdt = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
+    dNdt, dMdt, _overflow = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
 
     # 4. Forward Euler
     Nk_new = Nk + dNdt * dt

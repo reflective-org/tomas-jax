@@ -346,7 +346,7 @@ class TestPPMFlux:
         F = ppm_flux(q_L, q_R, q_6, u_edges, dt_sub)
 
         expected = u_val * q_val
-        np.testing.assert_allclose(F[1:-1], expected, rtol=0.1)
+        np.testing.assert_allclose(F[1:-1], expected, rtol=1e-10)
 
     def test_flux_direction(self):
         """Positive velocity should give positive flux from left cell."""

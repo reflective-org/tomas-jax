@@ -75,7 +75,7 @@ def plot_level11(data_dir, output_dir, xk):
         CS_j, sf_j = calc_condensation_sink(
             jnp.array(Nk), jnp.array(Mk),
             case['temp'], case['pres'], 1.0e6,
-            accommodation_coeff=1.0
+            alpha=1.0
         )
         sf_j = np.array(sf_j)
 

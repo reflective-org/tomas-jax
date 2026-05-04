@@ -91,7 +91,7 @@ def ezcond_ppm(
     CS_jax, sinkfrac_jax = calc_condensation_sink(
         jnp.array(Nk1), jnp.array(Mk1),
         temp, pres, boxvol,
-        accommodation_coeff=alpha, xk=jnp.array(xk_np)
+        alpha=alpha, xk=jnp.array(xk_np)
     )
     CS = float(CS_jax)
     sinkfrac = np.array(sinkfrac_jax)

@@ -77,6 +77,31 @@ from ..physics.water_equilibrium import calc_equilibrium_water
 from ..core.mnfix_jax import mnfix_jax
 from ..solvers.diffrax import coag_euler_step
 
+# Valid kwargs for make_step() step function — used for typo detection
+_VALID_MAKE_STEP_KWARGS = {
+    # so2_chemistry
+    'oh_conc',
+    # nucleation (common)
+    'org_conc', 'nh3_conc', 'fion', 'fn_scale',
+    # nucleation (ricco_dunne)
+    'enable_organic', 'enable_inorganic',
+    # nucleation (zhao2024)
+    'hno3', 'ulvoc', 'dma', 'hio3', 'enable_masks',
+    # coagulation
+    'icomp_nodiag',
+    # dilution
+    'kdil', 'Nk_bg', 'Mk_bg', 'Gc_bg',
+}
+
+# Canonical physical process ordering
+_CANONICAL_PROCESS_ORDER = [
+    'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution',
+]
+
+
+# =========================================================================
+# Layer 0: Non-JIT dispatcher (sequential numpy paths)
+# =========================================================================
 
 # =========================================================================
 # Layer 0: Non-JIT dispatcher (sequential numpy paths)
@@ -327,7 +352,7 @@ condensation_step_tfl_jit = jax.jit(condensation_step_tfl_jax)
 # =========================================================================
 
 def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                        ezcond_fn, icomp_nodiag=42, n_coag_substeps=3):
+                        ezcond_fn, icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3):
     """Coagulation + condensation in one step, parameterized by ezcond_fn."""
     # 1. Coagulation (forward Euler + MNFIX)
     Nk, Mk = coag_euler_step(
@@ -346,7 +371,7 @@ def _combined_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     ezcond_fn, org_conc, nh3_conc, fion,
                     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
-                    icomp_nodiag=42, n_coag_substeps=10,
+                    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=10,
                     max_nucleation_frac=0.5, max_nuc_substeps=20):
     """Nucleation + coagulation + condensation in one step.
 
@@ -399,7 +424,7 @@ def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
 
 def combined_step_ppm_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    icomp_nodiag=42, n_coag_substeps=3,
+    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Combined coagulation + PPM condensation step (JIT-compilable)."""
     return _combined_step_core(
@@ -411,7 +436,7 @@ def combined_step_ppm_jax(
 
 def combined_step_tfl_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-    icomp_nodiag=42, n_coag_substeps=3,
+    icomp_nodiag=ICOMP_NODIAG, n_coag_substeps=3,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Combined coagulation + TFL condensation step (JIT-compilable)."""
     return _combined_step_core(
@@ -481,7 +506,7 @@ def full_step_jax(
     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
     org_conc, nh3_conc, fion,
     enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0,
-    use_tfl=1.0, icomp_nodiag=42,
+    use_tfl=1.0, icomp_nodiag=ICOMP_NODIAG,
     max_nucleation_frac=0.5, max_nuc_substeps=20,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Full step: nucleation + coagulation + condensation (JIT-compilable).
@@ -511,8 +536,6 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
 
     Args:
         step_fn: Callable(Nk, Mk, Gc) -> (Nk, Mk, Gc)
-            OR Callable(Nk, Mk, Gc, step_idx) -> (Nk, Mk, Gc) when
-            step_fn accepts a step index (for diurnal OH in so2_chemistry).
         nsteps: Number of scan steps
         dt: Timestep [s]
         prod_rate: H2SO4 production rate [kg/s]
@@ -524,7 +547,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
         (Nk_f, Mk_f, Gc_f), diagnostics
     """
     if diag_mode == 'rich':
-        def body(carry, step_idx):
+        def body(carry, _):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
             Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
@@ -534,7 +557,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
                                Gc_c[SRTSO4]])
             return (Nk_c, Mk_c, Gc_c), diag
     else:
-        def body(carry, step_idx):
+        def body(carry, _):
             Nk_c, Mk_c, Gc_c = carry
             Gc_c = Gc_c.at[SRTSO4].add(prod_rate * dt)
             Gc_c = Gc_c.at[SRTSO2].add(so2_prod_rate * dt)
@@ -542,7 +565,7 @@ def _run_scan(Nk, Mk, Gc, step_fn, nsteps, dt, prod_rate, diag_mode='rich',
             return (Nk_c, Mk_c, Gc_c), jnp.sum(Nk_c)
 
     (Nk_f, Mk_f, Gc_f), history = jax.lax.scan(
-        body, (Nk, Mk, Gc), jnp.arange(nsteps), length=nsteps
+        body, (Nk, Mk, Gc), None, length=nsteps
     )
     return (Nk_f, Mk_f, Gc_f), history
 
@@ -776,6 +799,17 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
 
+    # Warn if process order deviates from canonical physical ordering
+    canonical_indices = [_CANONICAL_PROCESS_ORDER.index(p) for p in processes]
+    if canonical_indices != sorted(canonical_indices):
+        canonical_subset = [p for p in _CANONICAL_PROCESS_ORDER if p in processes]
+        warnings.warn(
+            f"Non-standard process order: {list(processes)}. "
+            f"Canonical physical order is: {canonical_subset}. "
+            f"Non-standard ordering may produce physically incorrect results.",
+            UserWarning, stacklevel=2,
+        )
+
     valid_schemes = {'ricco_dunne', 'zhao2024'}
     if nucl_scheme not in valid_schemes:
         raise ValueError(f"Unknown nucl_scheme '{nucl_scheme}'. Valid: {sorted(valid_schemes)}")
@@ -783,6 +817,14 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
     use_zhao = nucl_scheme == 'zhao2024'
 
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
+        unknown = set(kwargs) - _VALID_MAKE_STEP_KWARGS
+        if unknown:
+            warnings.warn(
+                f"Unknown kwargs passed to make_step step function: {unknown}. "
+                f"These will be silently ignored. "
+                f"Valid kwargs: {sorted(_VALID_MAKE_STEP_KWARGS)}",
+                UserWarning, stacklevel=2,
+            )
         for process in processes:
             if process == 'so2_chemistry':
                 oh_conc = kwargs.get('oh_conc', 0.0)

@@ -80,7 +80,7 @@ def run(data_dir, verbose=True):
 
         CS_jax, sf_jax = calc_condensation_sink(
             jnp.array(Nk_init), jnp.array(Mk_init),
-            temp, pres, boxvol, accommodation_coeff=alpha
+            temp, pres, boxvol, alpha=alpha
         )
         CS_val = float(CS_jax)
         sinkfrac = np.array(sf_jax)

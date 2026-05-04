@@ -24,6 +24,7 @@ from ..physics.coagulation_kernel import calc_coagulation_kernel
 from ..physics.coagulation_rates import calc_coagulation_rates
 from ..core.mnfix_jax import mnfix_jax
 from ..core.mnfix_fortran import mnfix_fortran
+from ..core.config import ICOMP_NODIAG, TINY_N, TINY_M
 
 
 def _compute_adaptive_dt(
@@ -32,7 +33,7 @@ def _compute_adaptive_dt(
     dNdt: jnp.ndarray,
     dMdt: jnp.ndarray,
     dt_remaining: float,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> jnp.ndarray:
     """Compute adaptive timestep matching FORTRAN multicoag.f logic.
 
@@ -55,7 +56,7 @@ def _compute_adaptive_dt(
     # Number-based limit: dt < 0.25 * N / |dN/dt|
     # Mask out empty bins (Fortran skips bins with Nk < Neps)
     abs_dNdt = jnp.maximum(jnp.abs(dNdt), 1e-30)
-    dtlimit = jnp.where(Nk > 1e-15, 0.25 * jnp.abs(Nk) / abs_dNdt, jnp.inf)
+    dtlimit = jnp.where(Nk > TINY_N, 0.25 * jnp.abs(Nk) / abs_dNdt, jnp.inf)
     dt_N = jnp.min(dtlimit)
 
     # Mass-based limit: dt < 10.0 * M / |dM/dt|
@@ -63,7 +64,7 @@ def _compute_adaptive_dt(
     Mk_prog = Mk[:, :icomp_nodiag]
     dMdt_prog = dMdt[:, :icomp_nodiag]
     abs_dMdt = jnp.maximum(jnp.abs(dMdt_prog), 1e-30)
-    itlimit = jnp.where(Mk_prog > 1e-25, 10.0 * jnp.abs(Mk_prog) / abs_dMdt, jnp.inf)
+    itlimit = jnp.where(Mk_prog > TINY_M, 10.0 * jnp.abs(Mk_prog) / abs_dMdt, jnp.inf)
     dt_M = jnp.min(itlimit)
 
     # Take minimum of all constraints
@@ -84,10 +85,11 @@ def euler_step(
     pres: float,
     boxvol: float,
     dt: float,
-    icomp_nodiag: int = 42,
+    icomp_nodiag: int = ICOMP_NODIAG,
     use_fortran_mnfix: bool = False,
     recompute_kernel: bool = False,
-    max_substeps: int = 10000
+    max_substeps: int = 10000,
+    return_info: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Forward Euler integration of coagulation over timestep dt.
 
@@ -111,10 +113,13 @@ def euler_step(
         use_fortran_mnfix: If True, use FORTRAN-equivalent mnfix
         recompute_kernel: If True, recompute kernel each sub-step (slower but more accurate)
         max_substeps: Maximum number of sub-steps
+        return_info: If True, returns (Nk, Mk, n_substeps_used) so callers
+            can detect when max_substeps was hit (integration truncated).
 
     Returns:
         Nk_final: Updated number concentration
         Mk_final: Updated mass concentration
+        n_substeps: (only if return_info=True) Number of substeps used
     """
     # Select MNFIX function
     mnfix_fn = mnfix_fortran if use_fortran_mnfix else mnfix_jax
@@ -143,7 +148,7 @@ def euler_step(
         )
 
         # Compute rates
-        dNdt, dMdt = calc_coagulation_rates(Nk_s, Mk_s, kij_use, xk, icomp_nodiag)
+        dNdt, dMdt, _overflow = calc_coagulation_rates(Nk_s, Mk_s, kij_use, xk, icomp_nodiag)
 
         # Adaptive timestep
         dt_remaining = dt - t_elapsed
@@ -165,8 +170,11 @@ def euler_step(
         return Nk_new, Mk_new, kij_use, t_elapsed + dt_sub, n_steps + 1
 
     init_state = (Nk, Mk, kij, jnp.float64(0.0), jnp.int32(0))
-    Nk_final, Mk_final, _, _, _ = jax.lax.while_loop(cond_fn, body_fn, init_state)
+    Nk_final, Mk_final, _, _, n_substeps = jax.lax.while_loop(
+        cond_fn, body_fn, init_state)
 
+    if return_info:
+        return Nk_final, Mk_final, n_substeps
     return Nk_final, Mk_final
 
 
@@ -176,7 +184,7 @@ def euler_single_step(
     kij: jnp.ndarray,
     xk: jnp.ndarray,
     dt_sub: float,
-    icomp_nodiag: int = 42
+    icomp_nodiag: int = ICOMP_NODIAG
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Single Forward Euler step without MNFIX (for benchmarking level 9).
 
@@ -191,7 +199,7 @@ def euler_single_step(
     Returns:
         Nk_new, Mk_new after one Euler step
     """
-    dNdt, dMdt = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
+    dNdt, dMdt, _overflow = calc_coagulation_rates(Nk, Mk, kij, xk, icomp_nodiag)
 
     Nk_new = Nk + dt_sub * dNdt
     Mk_new = Mk + dt_sub * dMdt
