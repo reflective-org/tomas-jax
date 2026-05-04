@@ -164,6 +164,12 @@ When modifying condensation code, verify:
 - **Always run the full benchmark end-to-end** before declaring success. Partial test runs (e.g., single grid resolution, single altitude) do not validate the full parameter space.
 - **Plot functions must error when data is missing**, not silently produce empty axes. Use explicit checks and raise informative errors (e.g., `raise FileNotFoundError(f"Missing NPZ: {fname}. Run simulations first.")`).
 
+## Benchmark & Testing Rules
+
+- **Never skip or hide failures.** If a model run crashes, the benchmark must fail loudly — never produce empty/placeholder figures or silently skip scenarios. A crash means there is a bug that must be diagnosed and fixed before proceeding.
+- **Always run the full benchmark end-to-end** before declaring success. Partial test runs (e.g., single grid resolution, single altitude) do not validate the full parameter space.
+- **Plot functions must error when data is missing**, not silently produce empty axes. Use explicit checks and raise informative errors (e.g., `raise FileNotFoundError(f"Missing NPZ: {fname}. Run simulations first.")`).
+
 ## Documentation Requirements
 
 **Always document changes in the repository.** This is mandatory, not optional.

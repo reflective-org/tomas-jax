@@ -103,6 +103,10 @@ _CANONICAL_PROCESS_ORDER = [
 # Layer 0: Non-JIT dispatcher (sequential numpy paths)
 # =========================================================================
 
+# =========================================================================
+# Layer 0: Non-JIT dispatcher (sequential numpy paths)
+# =========================================================================
+
 def condensation_step(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
