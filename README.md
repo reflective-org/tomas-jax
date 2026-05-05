@@ -450,8 +450,8 @@ tomas-jax/
 ## Running Tests
 
 ```bash
-# All core tests (132 tests, ~60s)
-python -m pytest tests/ --ignore=tests/test_24h_scenarios.py -v
+# Full test suite (388 tests, ~2 min) 
+python -m pytest tests/ -v
 
 # Nucleation tests only
 python -m pytest tests/test_nucleation.py -v
