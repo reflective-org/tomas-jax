@@ -1,5 +1,9 @@
 # TOMAS-JAX
 
+> [!WARNING]
+> This project is under active development, there is no guarantee that it will operate as expected.
+
+
 **High-Performance, Differentiable Aerosol Microphysics in JAX**
 
 A modern re-implementation of the TOMAS (TwO-Moment Aerosol Sectional) aerosol microphysics model, leveraging Google's JAX for JIT compilation, automatic differentiation, and GPU/TPU portability.
@@ -445,8 +449,8 @@ tomas-jax/
 ## Running Tests
 
 ```bash
-# All core tests (132 tests, ~60s)
-python -m pytest tests/ --ignore=tests/test_24h_scenarios.py -v
+# Full test suite (388 tests, ~2 min) 
+python -m pytest tests/ -v
 
 # Nucleation tests only
 python -m pytest tests/test_nucleation.py -v
@@ -480,6 +484,6 @@ Direct port of TOMAS Fortran (coagulation, condensation, nucleation). Fortran so
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the LGPL-3.0 License. The full LGPL-3.0 text is in [`LICENSE`](LICENSE); LGPL-3.0 incorporates GPLv3 by reference, and the full GPLv3 text is in [`LICENSE.GPL`](LICENSE.GPL) so both licenses are available in the repository.
 
 _Built with [JAX](https://github.com/google/jax) and [Diffrax](https://github.com/patrick-kidger/diffrax)._
