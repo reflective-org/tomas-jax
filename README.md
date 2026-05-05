@@ -1,7 +1,7 @@
 # TOMAS-JAX
 
-[!WARNING]
-This project is under active development, there is no guarantee that it will operate as expected.
+> [!WARNING]
+> This project is under active development, there is no guarantee that it will operate as expected.
 
 
 **High-Performance, Differentiable Aerosol Microphysics in JAX**
