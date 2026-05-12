@@ -407,6 +407,71 @@ def _compute_ionc(fion, temp, Mair):
     return jnp.sqrt(fion / alpha_ion)
 
 
+def zhao2024_nucleation_rate(
+    Gc, temp, pres, boxvol,
+    org_conc, nh3_conc, fion,
+    hno3=0.0, ulvoc=0.0, dma=0.0, hio3=0.0,
+    enable_masks=ZHAO2024_ALL_ENABLED, fn_scale=1.0,
+):
+    """Zhao 2024 11-mechanism total nucleation rate [cm^-3 s^-1] without state mutation.
+
+    Sums per-mechanism rates with enable_masks and applies fn_scale to the total.
+    Mechanism order in the returned per-mechanism array matches enable_masks:
+      (bn, tn, bi, ti, syn, porg_n, porg_i, org_sa, amine, iod_n, iod_i)
+
+    Args:
+        Gc: Gas concentrations [kg/grid cell], shape (N_GAS_SPECIES,)
+        temp, pres, boxvol: Environment scalars
+        org_conc: Organic vapor [molec/cm3] (kept for API symmetry; unused by Zhao)
+        nh3_conc: NH3 concentration [molec/cm3] (mechs tn, ti, syn)
+        fion: Ion-pair production rate [pairs/cm3/s] (mechs bi, ti, porg_i, iod_i)
+        hno3: HNO3 [molec/cm3] (mech syn)
+        ulvoc: ULVOC [molec/cm3] (mechs porg_n, porg_i, org_sa)
+        dma: Dimethylamine [molec/cm3] (mech amine)
+        hio3: HIO3 iodic acid [molec/cm3] (mechs iod_n, iod_i)
+        enable_masks: Tuple of 11 floats (0.0/1.0) per mechanism
+        fn_scale: Multiplicative scaling factor on the total
+
+    Returns:
+        (fn_total, fn_per_mechanism): scalar [cm^-3 s^-1] and shape-(11,) array
+        where the per-mechanism values already include enable_masks but NOT fn_scale.
+        fn_total is sum(fn_per_mechanism) * fn_scale.
+    """
+    m_bn, m_tn, m_bi, m_ti, m_syn, m_porg_n, m_porg_i, m_org_sa, m_amine, m_iod_n, m_iod_i = enable_masks
+
+    # Convert gas-phase H2SO4: kg/grid_cell -> molec/cm3
+    h2so4 = Gc[SRTSO4] / boxvol * 1000.0 / 98.0 * AVOGADRO
+
+    # Air number density [molec/cm3]
+    Mair = 2.69e19 * 273.15 / temp * pres / 101325.0
+
+    # Ion concentration (shared by mechs bi, ti, porg_i, iod_i)
+    ionc = _compute_ionc(fion, temp, Mair)
+
+    _, Jbn, Jtn, Jbi, Jti = dunne_nucleation_rate(temp, fion, h2so4, nh3_conc, Mair)
+    J_syn = zhao2024_synergistic_hno3_rate(temp, h2so4, hno3, nh3_conc)
+    J_porg_n, J_porg_i = kirkby2016_pure_organic_rate(temp, ulvoc, ionc)
+    J_org_sa = zhao2024_organic_h2so4_rate(temp, h2so4, ulvoc)
+    J_amine = zhao2024_amine_h2so4_rate(temp, h2so4, dma)
+    J_iod_n, J_iod_i = zhao2024_iodine_oxoacid_rate(temp, hio3, ionc)
+
+    fn_per_mech = jnp.array([
+        Jbn * m_bn,
+        Jtn * m_tn,
+        Jbi * m_bi,
+        Jti * m_ti,
+        J_syn * m_syn,
+        J_porg_n * m_porg_n,
+        J_porg_i * m_porg_i,
+        J_org_sa * m_org_sa,
+        J_amine * m_amine,
+        J_iod_n * m_iod_n,
+        J_iod_i * m_iod_i,
+    ])
+    fn_total = jnp.sum(fn_per_mech) * fn_scale
+    return fn_total, fn_per_mech
+
+
 def zhao2024_nucleation_step(
     Nk, Mk, Gc, xk, temp, pres, boxvol, dt,
     org_conc, nh3_conc, fion,
@@ -422,60 +487,26 @@ def zhao2024_nucleation_step(
     Mechanism 9:    Amine-H2SO4 (Hanson/Kürten/Cai, Zhao 2024)
     Mechanisms 10-11: Iodine oxoacids neutral/ion (He 2021, Zhao 2024)
 
+    Delegates rate computation to ``zhao2024_nucleation_rate`` and applies
+    the same gas-clamping logic as ``nucleation_step``.
+
     Args:
         Nk, Mk, Gc, xk: Aerosol state arrays (same as nucleation_step)
         temp, pres, boxvol, dt: Environment and timestep
-        org_conc: Organic vapor [molec/cm3] (NOT used by Zhao 2024; kept for API)
-        nh3_conc: NH3 concentration [molec/cm3] (mechs 2, 4, 5)
-        fion: Ion-pair production rate [pairs/cm3/s] (mechs 3, 4, 7, 11)
-        hno3: HNO3 concentration [molec/cm3] (mech 5)
-        ulvoc: ULVOC concentration [molec/cm3] (mechs 6, 7, 8)
-        dma: Dimethylamine concentration [molec/cm3] (mech 9)
-        hio3: HIO3 iodic acid concentration [molec/cm3] (mechs 10, 11)
+        org_conc, nh3_conc, fion, hno3, ulvoc, dma, hio3: Gas concentrations.
+            See ``zhao2024_nucleation_rate`` for units and per-mechanism use.
         enable_masks: Tuple of 11 floats (0.0/1.0) to enable/disable each mechanism
         fn_scale: Multiplicative scaling factor for total nucleation rate
 
     Returns:
         (Nk_new, Mk_new, Gc_new)
     """
-    m_bn, m_tn, m_bi, m_ti, m_syn, m_porg_n, m_porg_i, m_org_sa, m_amine, m_iod_n, m_iod_i = enable_masks
-
-    # Convert gas-phase H2SO4: kg/grid_cell -> molec/cm3
-    h2so4 = Gc[SRTSO4] / boxvol * 1000.0 / 98.0 * AVOGADRO
-
-    # Air number density [molec/cm3]
-    Mair = 2.69e19 * 273.15 / temp * pres / 101325.0
-
-    # Ion concentration (shared by mechs 3, 4, 7, 10, 11)
-    ionc = _compute_ionc(fion, temp, Mair)
-
-    # --- Mechanisms 1-4: Dunne 2016 ---
-    _, Jbn, Jtn, Jbi, Jti = dunne_nucleation_rate(
-        temp, fion, h2so4, nh3_conc, Mair
+    fn, _ = zhao2024_nucleation_rate(
+        Gc, temp, pres, boxvol,
+        org_conc, nh3_conc, fion,
+        hno3=hno3, ulvoc=ulvoc, dma=dma, hio3=hio3,
+        enable_masks=enable_masks, fn_scale=fn_scale,
     )
-
-    # --- Mechanism 5: H2SO4-HNO3-NH3 synergistic ---
-    J_syn = zhao2024_synergistic_hno3_rate(temp, h2so4, hno3, nh3_conc)
-
-    # --- Mechanisms 6-7: Pure-organic ---
-    J_porg_n, J_porg_i = kirkby2016_pure_organic_rate(temp, ulvoc, ionc)
-
-    # --- Mechanism 8: Organic-H2SO4 ---
-    J_org_sa = zhao2024_organic_h2so4_rate(temp, h2so4, ulvoc)
-
-    # --- Mechanism 9: Amine-H2SO4 ---
-    J_amine = zhao2024_amine_h2so4_rate(temp, h2so4, dma)
-
-    # --- Mechanisms 10-11: Iodine oxoacids ---
-    J_iod_n, J_iod_i = zhao2024_iodine_oxoacid_rate(temp, hio3, ionc)
-
-    # Sum with enable masks
-    fn = (Jbn * m_bn + Jtn * m_tn + Jbi * m_bi + Jti * m_ti
-          + J_syn * m_syn
-          + J_porg_n * m_porg_n + J_porg_i * m_porg_i
-          + J_org_sa * m_org_sa
-          + J_amine * m_amine
-          + J_iod_n * m_iod_n + J_iod_i * m_iod_i) * fn_scale
 
     # Number of new particles
     dN = fn * boxvol * dt
@@ -510,13 +541,14 @@ def zhao2024_nucleation_step(
     return Nk_new, Mk_new, Gc_new
 
 
-def estimate_nucleation_rate(
+def ricco_dunne_nucleation_rate(
                               Gc, temp, pres, boxvol,
                               org_conc, nh3_conc, fion,
                               enable_organic=1.0, enable_inorganic=1.0, fn_scale=1.0):
-    """Estimate total nucleation rate [cm^-3 s^-1] without mutating state.
+    """Riccobono 2014 + Dunne 2016 total nucleation rate [cm^-3 s^-1].
 
-    Used by adaptive sub-stepping to decide how many substeps are needed.
+    Pure rate calculation, no state mutation. Used by adaptive sub-stepping
+    and by the API diagnostic snapshots.
     """
     h2so4 = Gc[SRTSO4] / boxvol * 1000.0 / 98.0 * AVOGADRO
     Mair = 2.69e19 * 273.15 / temp * pres / 101325.0
@@ -525,6 +557,10 @@ def estimate_nucleation_rate(
     fn_inorg, _, _, _, _ = dunne_nucleation_rate(temp, fion, h2so4, nh3_conc, Mair)
 
     return (fn_org * enable_organic + fn_inorg * enable_inorganic) * fn_scale
+
+
+# Backward-compatible alias. Prefer ``ricco_dunne_nucleation_rate`` in new code.
+estimate_nucleation_rate = ricco_dunne_nucleation_rate
 
 
 def compute_nucleation_substeps(fn, boxvol, dt, N_total,

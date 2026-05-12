@@ -13,12 +13,15 @@ from tomas_jax.physics.nucleation import (
     ricco_nucleation_rate,
     dunne_nucleation_rate,
     nucleation_step,
+    ricco_dunne_nucleation_rate,
+    estimate_nucleation_rate,
     zhao2024_synergistic_hno3_rate,
     kirkby2016_pure_organic_rate,
     zhao2024_organic_h2so4_rate,
     zhao2024_amine_h2so4_rate,
     zhao2024_iodine_oxoacid_rate,
     zhao2024_nucleation_step,
+    zhao2024_nucleation_rate,
     _compute_ionc,
     _MNUC, _KM, _DELTA_H, _KB_NUC, _T0,
     _K16_T_REF, _K16_T_SCALE,
@@ -694,3 +697,112 @@ class TestComputeIonc:
         ionc = _compute_ionc(jnp.float64(3.0), jnp.float64(278.0), jnp.float64(2.5e19))
         val = float(ionc)
         assert 500.0 < val < 2000.0
+
+
+# =========================================================================
+# Rate-only helpers (used by API diagnostics and adaptive sub-stepping)
+# =========================================================================
+
+class TestRiccoDunneNucleationRate:
+    def test_alias_matches_canonical(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        args = (Gc, jnp.float64(278.0), jnp.float64(101325.0),
+                jnp.float64(boxvol), 1e7, 1e8, 3.0)
+        np.testing.assert_allclose(
+            float(ricco_dunne_nucleation_rate(*args)),
+            float(estimate_nucleation_rate(*args)),
+            rtol=0.0, atol=0.0,
+        )
+
+    def test_matches_component_sum(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        temp, pres, org, nh3, fion = 278.0, 101325.0, 1e7, 1e8, 3.0
+        h2so4 = float(Gc[SRTSO4]) / boxvol * 1000.0 / 98.0 * AVOGADRO
+        Mair = 2.69e19 * 273.15 / temp * pres / 101325.0
+        expected = (
+            float(ricco_nucleation_rate(jnp.float64(temp), h2so4, org))
+            + float(dunne_nucleation_rate(
+                jnp.float64(temp), jnp.float64(fion),
+                h2so4, jnp.float64(nh3), Mair)[0])
+        )
+        got = float(ricco_dunne_nucleation_rate(
+            Gc, jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+            org, nh3, fion,
+        ))
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+    def test_jit_compiles(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        rate_jit = jax.jit(ricco_dunne_nucleation_rate)
+        out = rate_jit(Gc, jnp.float64(278.0), jnp.float64(101325.0),
+                       jnp.float64(boxvol), 1e7, 1e8, 3.0)
+        assert float(out) > 0.0
+
+
+class TestZhao2024NucleationRate:
+    def test_returns_total_and_per_mechanism(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        total, per_mech = zhao2024_nucleation_rate(
+            Gc, jnp.float64(278.0), jnp.float64(101325.0),
+            jnp.float64(boxvol),
+            org_conc=1e7, nh3_conc=1e8, fion=3.0,
+            ulvoc=1e7, dma=1e8, hio3=1e7,
+        )
+        assert per_mech.shape == (11,)
+        assert float(total) > 0.0
+        # fn_scale defaults to 1.0, so total == sum(per_mech)
+        np.testing.assert_allclose(
+            float(total), float(jnp.sum(per_mech)), rtol=1e-12,
+        )
+
+    def test_fn_scale_applies_to_total_only(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        kw = dict(org_conc=1e7, nh3_conc=1e8, fion=3.0,
+                  ulvoc=1e7, dma=1e8, hio3=1e7)
+        args = (Gc, jnp.float64(278.0), jnp.float64(101325.0),
+                jnp.float64(boxvol))
+        total_1x, per_1x = zhao2024_nucleation_rate(*args, fn_scale=1.0, **kw)
+        total_2x, per_2x = zhao2024_nucleation_rate(*args, fn_scale=2.0, **kw)
+        np.testing.assert_allclose(float(total_2x) / float(total_1x), 2.0, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(per_2x), np.asarray(per_1x), rtol=1e-12)
+
+    def test_dunne_only_mask_zeroes_extras(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        _, per_mech = zhao2024_nucleation_rate(
+            Gc, jnp.float64(278.0), jnp.float64(101325.0),
+            jnp.float64(boxvol),
+            org_conc=1e7, nh3_conc=1e8, fion=3.0,
+            ulvoc=1e7, dma=1e8, hio3=1e7,
+            enable_masks=ZHAO2024_DUNNE_ONLY,
+        )
+        # Mechanisms 5..11 (indices 4..10) must be zero with DUNNE_ONLY mask.
+        np.testing.assert_array_equal(np.asarray(per_mech[4:]), np.zeros(7))
+
+    def test_step_matches_rate_helper(self, base_state):
+        """Refactor regression: step's dN equals direct rate * boxvol * dt."""
+        Nk, Mk, Gc, xk, boxvol = base_state
+        kw = dict(org_conc=1e7, nh3_conc=1e8, fion=3.0,
+                  ulvoc=1e7, dma=1e8, hio3=1e7)
+        args = (jnp.float64(278.0), jnp.float64(101325.0),
+                jnp.float64(boxvol))
+        dt = 60.0
+
+        total, _ = zhao2024_nucleation_rate(Gc, *args, **kw)
+        Nk_new, _, _ = zhao2024_nucleation_step(
+            Nk, Mk, Gc, xk, *args, jnp.float64(dt), **kw,
+        )
+        dN_step = float(Nk_new[0] - Nk[0])
+        dN_expected = float(total) * boxvol * dt
+        np.testing.assert_allclose(dN_step, dN_expected, rtol=1e-6)
+
+    def test_jit_compiles(self, base_state):
+        Nk, Mk, Gc, xk, boxvol = base_state
+        rate_jit = jax.jit(zhao2024_nucleation_rate, static_argnames=['enable_masks'])
+        total, per_mech = rate_jit(
+            Gc, jnp.float64(278.0), jnp.float64(101325.0), jnp.float64(boxvol),
+            org_conc=1e7, nh3_conc=1e8, fion=3.0,
+            ulvoc=1e7, dma=1e8, hio3=1e7,
+            enable_masks=ZHAO2024_ALL_ENABLED,
+        )
+        assert float(total) > 0.0
+        assert per_mech.shape == (11,)
