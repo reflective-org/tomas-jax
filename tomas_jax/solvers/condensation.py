@@ -65,7 +65,7 @@ from ..physics.so2_chemistry import (
 )
 from ..physics.dilution import dilution_step
 from ..physics.nucleation import (
-    nucleation_step, estimate_nucleation_rate, compute_nucleation_substeps,
+    nucleation_step, ricco_dunne_nucleation_rate, compute_nucleation_substeps,
     zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED,
 )
 from ..physics.condensation_sink import calc_condensation_sink
@@ -380,7 +380,7 @@ def _full_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
     (up to max_nuc_substeps) with MNFIX between substeps.
     """
     # 1. Adaptive nucleation sub-stepping
-    fn = estimate_nucleation_rate(
+    fn = ricco_dunne_nucleation_rate(
         Gc, temp, pres, boxvol,
         org_conc, nh3_conc, fion,
         enable_organic, enable_inorganic, fn_scale,
@@ -464,7 +464,7 @@ def condensation_step_with_nucleation_jax(
     ezcond_fn = ezcond_tfl_jax if float(use_tfl) > 0.5 else ezcond_ppm_jax
 
     # 1. Adaptive nucleation sub-stepping
-    fn = estimate_nucleation_rate(
+    fn = ricco_dunne_nucleation_rate(
         Gc, temp, pres, boxvol,
         org_conc, nh3_conc, fion,
         enable_organic, enable_inorganic, fn_scale,
@@ -671,7 +671,7 @@ def run_nucleation_condensation_scan(
 
     def step_fn(Nk_c, Mk_c, Gc_c):
         # Adaptive nucleation sub-stepping
-        fn = estimate_nucleation_rate(
+        fn = ricco_dunne_nucleation_rate(
             Gc_c, temp, pres, boxvol,
             org_conc, nh3_conc, fion,
             enable_organic, enable_inorganic, fn_scale,
@@ -833,7 +833,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
             elif process == 'nucleation':
                 # Adaptive nucleation sub-stepping
                 # Rate estimate always uses Ricco+Dunne (fast, conservative)
-                fn = estimate_nucleation_rate(
+                fn = ricco_dunne_nucleation_rate(
                     Gc, temp, pres, boxvol,
                     kwargs.get('org_conc', 0.0), kwargs.get('nh3_conc', 0.0),
                     kwargs.get('fion', 0.0),

@@ -4,6 +4,43 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-05-07 (Wed) — Nucleation rate helpers refactored
+
+**Time**: evening PST
+**Branch**: `feature/zhao2024-rate-fixes`
+
+### Summary
+Factored the rate computation out of `zhao2024_nucleation_step` into a
+new `zhao2024_nucleation_rate(...) -> (total_J, per_mech_(11,))` helper
+and renamed `estimate_nucleation_rate` to `ricco_dunne_nucleation_rate`
+for symmetry. Both helpers are JIT-safe and compute the actual
+instantaneous rate without state mutation. The "estimate" terminology
+was misleading — the function never approximated; it just didn't apply
+gas-clamping. Driven by tomas-api needing a way to report the correct
+rate per scheme in its diagnostic snapshots and per-step history.
+
+### Changes
+- `tomas_jax/physics/nucleation.py`:
+  - New `zhao2024_nucleation_rate`. Returns total J and per-mechanism
+    array in enable_masks order (bn, tn, bi, ti, syn, porg_n, porg_i,
+    org_sa, amine, iod_n, iod_i).
+  - `zhao2024_nucleation_step` now delegates rate computation to the
+    helper before applying gas-clamping and bin-0 deposition.
+  - `ricco_dunne_nucleation_rate` (renamed). `estimate_nucleation_rate`
+    kept as a deprecated alias for backward compat.
+- `tomas_jax/solvers/condensation.py`: internal callers (4 call sites
+  in `_full_step_core`, `full_step_jax`, `_run_scan` body, `make_step`)
+  switched to `ricco_dunne_nucleation_rate`.
+- `tests/test_nucleation.py`: added `TestRiccoDunneNucleationRate` and
+  `TestZhao2024NucleationRate` (8 tests) including a refactor regression
+  asserting `dN_step == total_J * boxvol * dt`.
+
+### Known limitations
+- The new helper isn't yet re-exported from `tomas_jax/__init__.py`;
+  callers still import from `tomas_jax.physics.nucleation`.
+
+---
+
 ## 2026-04-18 (Fri) — 1000-Scenario Tropo→Strato Benchmark (PPM-only)
 
 **Time**: late afternoon PST
