@@ -4,6 +4,87 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-06-12 (Fri) — Performance optimization: MNFIX + TFL remap vectorization
+
+**Time**: afternoon PST
+**Branch**: `perf/jax-optimizations`
+
+### Summary
+Optimized the three hottest JAX code paths without changing numerical
+results beyond roundoff (validated bound: max relative difference
+2.7e-7 on significant entries over a full 24h/1440-step run; most
+outputs agree to ~1e-15, and ~half are bitwise identical). End-to-end
+speedups on the 24h single-scenario benchmark (S01, CPU):
+
+| Test                  | Before | After  | Speedup |
+|-----------------------|--------|--------|---------|
+| Tsit5 coag-only       | 3.97s  | 3.50s  | 1.1x    |
+| Euler coag-only       | 0.36s  | 0.15s  | 2.5x    |
+| PPM cond-only         | 0.22s  | 0.08s  | 2.8x    |
+| TFL cond-only         | 0.50s  | 0.15s  | 3.3x    |
+| Euler+TFL combined    | 0.86s  | 0.31s  | 2.8x    |
+| Full (nucl+coag+cond) | 1.88s  | 0.70s  | 2.7x    |
+
+### Changes
+- `tomas_jax/core/mnfix_jax.py` (3.1x faster in isolation, 92→29 us/call):
+  - Phases 1–2 (empty-bin fix, extreme out-of-range trim) vectorized
+    across bins — each bin only touches its own row, so the sequential
+    `fori_loop` was pure overhead. Bitwise-identical in isolation.
+  - Phase 3 (partial transfer) keeps the Fortran-faithful sequential
+    bin sweep (cross-bin dependency), but the loop body now selects the
+    up/down shift parameters first and applies a single scatter pair,
+    instead of materializing both full candidate state arrays plus
+    nested full-array `where` selects. `log_p` hoisted out of the loop.
+- `tomas_jax/physics/condensation_tfl_jax.py` (2.5x faster, 110→43 us/call):
+  - `tmcond_jax` bin remapping vectorized over (source, destination)
+    pairs. Each source bin's contribution is independent of the
+    accumulator, so the 40-iteration sequential loop is replaced by
+    masked sums and a (dest,src)@(src,icomp) matmul. Case selection
+    (skip / identity / below-grid / remap) handled via per-source masks
+    with the same priority as the sequential original.
+- `tomas_jax/solvers/diffrax.py`:
+  - `diffrax_step` no longer pays one extra full `calc_coagulation_rates`
+    evaluation per substep chunk when `return_overflow=False` (the
+    evaluation only fed the overflow accumulator). Trace-time branch;
+    Nk/Mk trajectory verified bitwise-identical with/without overflow.
+- `benchmarks/python/capture_golden.py` (new): golden-output regression
+  harness. Runs 3 LHC benchmark scenarios through 9 code paths
+  (mnfix stress states, Euler coag, Tsit5 coag, TFL/PPM cond scans,
+  combined scans, full scan, make_step all-processes, zhao2024) and
+  saves 102 arrays to NPZ. `--compare` reports raw and
+  significant-entry (>1e-9 of array max) max relative differences.
+  `GOLDEN_NSTEPS` env var controls scan length (240 default, 1440=24h).
+
+### Validation
+- 382/382 fast tests pass (suite wall time dropped 71s → 44s).
+- Golden 24h comparison vs pre-optimization baseline (origin/dev):
+  51/102 arrays bitwise identical; worst significant-entry rel diff
+  2.7e-7 (s1_full_tfl_M); large raw rel diffs (~1e-3) occur only in
+  NEPS-scale empty-bin placeholder values ~17 orders of magnitude below
+  the distribution peak. Conserved totals (N_tot, M_dry, Gc) agree to
+  ~3e-15 at every step of the 240-step histories.
+- MNFIX equivalence: 600 randomized stress states (incl. multi-bin
+  drift, empty bins, negative inputs, 36/40-bin grids) — phase 1–2
+  vectorization bitwise-identical; full refactor agrees to ~1e-13 worst
+  case (XLA fusion/FMA-level differences in phase 3, not algorithmic).
+- tmcond equivalence: 300 randomized states — worst rel diff 3.5e-16.
+
+### Known issues / notes
+- Exact bitwise reproducibility vs the old code is not preserved for
+  paths that exercise MNFIX phase-3 shifts or the TFL remap (compiler
+  re-fusion changes rounding at the 1e-15 level per step). Accepted
+  per tolerance guidance (1e-12 general / 1e-6 worst-case).
+- The Tsit5 path remains dominated by the adaptive ODE solver itself;
+  further speedup there would require changing solver tolerances or
+  substep policy, which changes results.
+
+### Next steps
+- Consider regenerating the 50-scenario 24h NPZ benchmark data so the
+  slow pytest suite (`-m slow`, Fortran 3-way comparison) can run
+  against the optimized code.
+
+---
+
 ## 2026-05-07 (Wed) — Nucleation rate helpers refactored
 
 **Time**: evening PST

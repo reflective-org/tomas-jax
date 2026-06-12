@@ -61,51 +61,39 @@ def mnfix_jax(
     # =========================================================================
     # Phase 1: Fix empty/near-empty bins (mnfix.f lines 56-72)
     # If Nk < Neps: zero out dry mass, set Nk=Neps, Mk_so4 = Neps*sqrt(xk*xk+1)
+    # Each bin only touches its own row — fully vectorized (identical to the
+    # original sequential loop).
     # =========================================================================
-    def fix_empty_bin(k, state):
-        Nk_s, Mk_s = state
-        is_empty = Nk_s[k] < NEPS
-
-        # For empty bins: zero all dry mass, set SO4 to tiny value
-        xk_geo = jnp.sqrt(xk[k] * xk[k + 1])
-        Mk_empty = jnp.zeros(icomp)
-        Mk_empty = Mk_empty.at[0].set(NEPS * xk_geo)  # SO4 = Neps * geometric mean
-
-        Nk_s = jnp.where(is_empty, Nk_s.at[k].set(NEPS), Nk_s)
-        Mk_s = jnp.where(is_empty, Mk_s.at[k].set(Mk_empty), Mk_s)
-        return Nk_s, Mk_s
-
-    Nk, Mk = jax.lax.fori_loop(0, nbins, fix_empty_bin, (Nk, Mk))
+    is_empty = Nk < NEPS
+    xk_geo = jnp.sqrt(xk[:-1] * xk[1:])
+    Nk = jnp.where(is_empty, NEPS, Nk)
+    Mk = jnp.where(is_empty[:, None], 0.0, Mk)
+    Mk = Mk.at[:, 0].set(jnp.where(is_empty, NEPS * xk_geo, Mk[:, 0]))
 
     # =========================================================================
     # Phase 2: Fix extreme out-of-range (mnfix.f lines 75-94)
     # avg > xk[ibins+1]: trim mass
     # avg < xk[0]: trim number
+    # Per-bin independent — vectorized across bins.
     # =========================================================================
-    def fix_extreme(k, state):
-        Nk_s, Mk_s = state
+    drymass = jnp.sum(Mk[:, :icomp_nodiag], axis=1)
+    avg = drymass / (Nk + EPS)
 
-        drymass = jnp.sum(Mk_s[k, :icomp_nodiag])
-        avg = drymass / (Nk_s[k] + EPS)
+    # avg > xk[ibins+1] → trim mass
+    too_high = avg > xk[nbins]
+    mshift = Nk * xk[nbins] / 1.2
+    scale = mshift / (drymass + EPS)
+    Mk_trimmed = Mk * scale[:, None]
+    Mk = jnp.where(too_high[:, None], Mk_trimmed, Mk)
 
-        # avg > xk[ibins+1] → trim mass
-        too_high = avg > xk[nbins]
-        mshift = Nk_s[k] * xk[nbins] / 1.2
-        scale = mshift / (drymass + EPS)
-        Mk_trimmed = Mk_s[k] * scale
-        Mk_s = jnp.where(too_high, Mk_s.at[k].set(Mk_trimmed), Mk_s)
+    # Recompute drymass after potential trim
+    drymass2 = jnp.where(
+        too_high, jnp.sum(Mk_trimmed[:, :icomp_nodiag], axis=1), drymass)
 
-        # Recompute drymass after potential trim
-        drymass2 = jnp.where(too_high, jnp.sum(Mk_trimmed[:icomp_nodiag]), drymass)
-
-        # avg < xk[0] → trim number
-        too_low = drymass2 / (Nk_s[k] + EPS) < xk[0]
-        new_nk = drymass2 / (xk[0] * 1.2)
-        Nk_s = jnp.where(too_low, Nk_s.at[k].set(new_nk), Nk_s)
-
-        return Nk_s, Mk_s
-
-    Nk, Mk = jax.lax.fori_loop(0, nbins, fix_extreme, (Nk, Mk))
+    # avg < xk[0] → trim number
+    too_low = drymass2 / (Nk + EPS) < xk[0]
+    new_nk = drymass2 / (xk[0] * 1.2)
+    Nk = jnp.where(too_low, new_nk, Nk)
 
     # =========================================================================
     # Phase 3: Partial transfer for out-of-range bins (mnfix.f lines 96-156)
@@ -120,6 +108,9 @@ def mnfix_jax(
     #
     # Similarly for avg < xk[k] (downward shift).
     # =========================================================================
+    # log of bin mass ratio — constant, hoisted out of the loop
+    log_p = jnp.log(xk[1] / xk[0])
+
     def fix_drift(k, state):
         Nk_s, Mk_s = state
 
@@ -148,26 +139,10 @@ def mnfix_jax(
         # General formula for xk[j] = xk[0] * p^j where p = xk[1]/xk[0]:
         #   xk[kk+1] > avg*1.1 => p^(kk+1) > avg*1.1/xk[0]
         #   kk = ceil(log_p(avg*1.1/xk[0])) - 1
-        log_p = jnp.log(xk[1] / xk[0])  # log of doubling factor
         ratio_up = avg * 1.1 / (xk[0] + EPS)
         kk_up_raw = jnp.ceil(jnp.log(jnp.maximum(ratio_up, 1.0)) / log_p).astype(jnp.int32) - 1
         kk_up = jnp.clip(kk_up_raw, k + 1, nbins - 1)
         xnew_up = xk[jnp.minimum(kk_up + 1, nbins)] / 1.1
-
-        nshift_up = (drymass - xold * number) / (xnew_up - xold + EPS)
-        nshift_up = jnp.maximum(nshift_up, 0.0)  # Safety: no negative shifts
-        nshift_up = jnp.minimum(nshift_up, number)  # Can't shift more than we have
-        mshift_up = xnew_up * nshift_up
-
-        # Apply upward shift
-        Nk_up = Nk_s.at[k].add(-nshift_up)
-        Nk_up = Nk_up.at[kk_up].add(nshift_up)
-
-        # Remaining particles in bin k get avg mass = xold, composition = fj
-        n_remain_up = number - nshift_up
-        Mk_up = Mk_s.at[k].set(xold * n_remain_up * fj)
-        # Shifted particles in bin kk get mass = mshift_up * fj
-        Mk_up = Mk_up.at[kk_up].add(mshift_up * fj)
 
         # ===== DOWNWARD SHIFT (avg < xk[k]) =====
         needs_down = (avg < xk_lo) & (k > 0)
@@ -181,26 +156,31 @@ def mnfix_jax(
         kk_dn = jnp.clip(kk_dn_raw, 0, jnp.maximum(k - 1, 0))
         xnew_dn = xk[kk_dn] * 1.1
 
-        nshift_dn = (drymass - xold * number) / (xnew_dn - xold + EPS)
-        nshift_dn = jnp.maximum(nshift_dn, 0.0)
-        nshift_dn = jnp.minimum(nshift_dn, number)
-        mshift_dn = xnew_dn * nshift_dn
+        # ===== SELECT SHIFT PARAMETERS, APPLY ONCE =====
+        # Select (kk, xnew) first, then compute the shift — the arithmetic of
+        # whichever branch fires is preserved, but only one scatter pair is
+        # materialized instead of both candidate state arrays.
+        # (Equivalent to the original two-branch formulation to within
+        # compiler-level rounding, ~1e-15 relative.)
+        needs_shift = needs_up | needs_down
+        kk = jnp.where(needs_up, kk_up, kk_dn)
+        xnew = jnp.where(needs_up, xnew_up, xnew_dn)
 
-        # Apply downward shift
-        Nk_dn = Nk_s.at[k].add(-nshift_dn)
-        Nk_dn = Nk_dn.at[kk_dn].add(nshift_dn)
+        nshift = (drymass - xold * number) / (xnew - xold + EPS)
+        nshift = jnp.maximum(nshift, 0.0)  # Safety: no negative shifts
+        nshift = jnp.minimum(nshift, number)  # Can't shift more than we have
+        nshift = jnp.where(needs_shift, nshift, 0.0)
+        mshift = xnew * nshift
 
-        n_remain_dn = number - nshift_dn
-        Mk_dn = Mk_s.at[k].set(xold * n_remain_dn * fj)
-        Mk_dn = Mk_dn.at[kk_dn].add(mshift_dn * fj)
+        Nk_out = Nk_s.at[k].add(-nshift)
+        Nk_out = Nk_out.at[kk].add(nshift)
 
-        # ===== SELECT CASE =====
-        Nk_out = jnp.where(needs_up, Nk_up,
-                 jnp.where(needs_down, Nk_dn,
-                 Nk_s))
-        Mk_out = jnp.where(needs_up, Mk_up,
-                 jnp.where(needs_down, Mk_dn,
-                 Mk_s))
+        # Remaining particles in bin k get avg mass = xold, composition = fj;
+        # shifted particles in bin kk get mass = mshift * fj
+        n_remain = number - nshift
+        row_k = jnp.where(needs_shift, xold * n_remain * fj, Mk_s[k])
+        Mk_out = Mk_s.at[k].set(row_k)
+        Mk_out = Mk_out.at[kk].add(jnp.where(needs_shift, mshift * fj, 0.0))
 
         return Nk_out, Mk_out
 

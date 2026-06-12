@@ -88,6 +88,7 @@ benchmarks/
   python/validate_so2_chemistry.py — SO2 chemistry validation (7 figures vs Sun et al. 2022, incl. stratospheric lifetime heatmaps)
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
   python/benchmark_dilution.py — Dilution benchmark (3 cases × 24h, all processes + SO2 + dilution, 6 figures)
+  python/capture_golden.py    — Golden-output regression harness (3 scenarios × 9 code paths → NPZ; --compare for before/after optimization diffs; GOLDEN_NSTEPS env var)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)

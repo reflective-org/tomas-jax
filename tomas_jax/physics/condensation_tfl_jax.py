@@ -5,8 +5,9 @@ Python/Fortran implementation while being fully traceable by JAX.
 
 Key approach:
   - Top-hat construction and dmdt_int translation are vectorized across all bins
-  - Bin remapping uses jax.lax.fori_loop over 36 source bins, with vectorized
-    overlap computation inside each iteration
+  - Bin remapping is fully vectorized over (source, destination) bin pairs:
+    each source bin's contribution is independent, so the per-bin loop is
+    replaced by masked sums/matmuls over the source axis
   - Condensing species uses inverse dmdt_int at bin boundaries for trapezoidal
     interpolation, matching Fortran exactly (including 1.5*YM for full middle bins)
 """
@@ -130,7 +131,11 @@ def tmcond_jax(
     # YM at boundaries: condensing species mass at boundary point
     YM_all = XP_all * species_frac[:, None] + xk[None, :] - XP_all  # (36, 37)
 
-    # --- Remapping via fori_loop ---
+    # --- Remapping (vectorized over source bins) ---
+    # Each source bin's contribution is independent of the accumulator, so the
+    # sequential per-bin loop is replaced by masked sums over the source axis.
+    # (Summation order differs from the sequential original — agreement is at
+    # roundoff level, ~1e-15 relative.)
     # Active bins: have particles, have forcing, valid top-hat
     active = (ANKD > NEPS) & (jnp.abs(TAU) > TEPS) & xi_valid
     # Bins with zero tau keep their content in same bin
@@ -140,101 +145,66 @@ def tmcond_jax(
     # YU < xk[0]: particles completely below grid, skip
     completely_below = YU < xk[0]
 
-    def remap_bin(L, carry):
-        ANK, AMK = carry
+    # Case masks per source bin (priority: skip > zero_tau/inactive > below > remap)
+    mask_skip = completely_below | (~xi_valid)
+    mask_ident = (~mask_skip) & (zero_tau | (~active))
+    mask_below = (~mask_skip) & (~mask_ident) & below_grid
+    mask_remap = (~mask_skip) & (~mask_ident) & (~mask_below)
 
-        nk_L = ANKD[L]
-        tau_L = TAU[L]
+    # Overlap of each source bin's translated top-hat with all destination
+    # bins: shape (source L, destination k)
+    overlap = jnp.maximum(
+        0.0,
+        jnp.minimum(YU[:, None], xk[None, 1:])
+        - jnp.maximum(YL[:, None], xk[None, :-1])
+    )
+    frac = overlap * DYI[:, None]  # (ibins, ibins)
 
-        # === Case 1: Zero TAU — keep in same bin ===
-        ank_zt = ANK.at[L].add(nk_L)
-        amk_zt = AMK.at[L].add(AMKD[L])
+    # Number contribution per (source, dest)
+    dn = ANKD[:, None] * frac
 
-        # === Case 2: Below grid — keep in same bin with cspecies correction ===
-        avg_cond_bg = (YUC[L] + YLC[L]) * 0.5
-        amkd_bg = AMKD[L]
-        amkd_bg = amkd_bg.at[cspecies].set(avg_cond_bg * nk_L)
-        ank_bg = ANK.at[L].add(nk_L)
-        amk_bg = AMK.at[L].add(amkd_bg)
+    # Condensing species: trapezoidal interpolation using boundary values
+    left_at_yl = YL[:, None] >= xk[None, :-1]
+    left_cond = jnp.where(left_at_yl, YLC[:, None], YM_all[:, :-1])
+    right_at_yu = YU[:, None] <= xk[None, 1:]
+    right_cond = jnp.where(right_at_yu, YUC[:, None], YM_all[:, 1:])
+    avg_cond = (left_cond + right_cond) * 0.5
 
-        # === Case 3: Normal remapping ===
-        # Overlap of this bin's translated top-hat with all destination bins
-        yu_L = YU[L]
-        yl_L = YL[L]
-        yuc_L = YUC[L]
-        ylc_L = YLC[L]
-        dyi_L = DYI[L]
+    # Fortran uses 1.5 * YM_left for full middle bins (mass-doubling approximation)
+    is_full_middle = (~left_at_yl) & (~right_at_yu) & (frac > 0.0)
+    avg_cond = jnp.where(is_full_middle, 1.5 * YM_all[:, :-1], avg_cond)
 
-        # Overlap fraction with each destination bin
-        overlap = jnp.maximum(
-            0.0,
-            jnp.minimum(yu_L, xk[1:]) - jnp.maximum(yl_L, xk[:-1])
-        )
-        frac = overlap * dyi_L  # (ibins,)
+    # Clamp negative cond mass to zero (matching Fortran val < 0 check)
+    cond_contrib = jnp.maximum(dn * avg_cond, 0.0)
 
-        # Number contribution
-        dn = nk_L * frac
+    # --- Sum contributions over source bins ---
+    W = jnp.where(mask_remap[:, None], frac, 0.0)  # masked remap weights
 
-        # Non-condensing species: proportional redistribution
-        # AMK[:, j] += AMKD[L, j] * frac[:]
-        amk_noncond = frac[:, None] * AMKD[L, :][None, :]  # (ibins, icomp)
+    # Number: remapped + identity/below placed at the source bin itself
+    ANK_out = (
+        jnp.sum(jnp.where(mask_remap[:, None], dn, 0.0), axis=0)
+        + jnp.where(mask_ident | mask_below, ANKD, 0.0)
+    )
 
-        # Condensing species: trapezoidal interpolation using boundary values
-        # Left edge of overlap in each bin
-        left_at_yl = yl_L >= xk[:-1]
-        left_cond = jnp.where(left_at_yl, ylc_L, YM_all[L, :-1])
+    # Mass: proportional redistribution for all species (W^T @ AMKD), then
+    # the condensing species column is replaced by the trapezoidal sum
+    AMK_remap = W.T @ AMKD  # (dest, icomp)
+    cond_col = jnp.sum(jnp.where(mask_remap[:, None], cond_contrib, 0.0), axis=0)
+    AMK_remap = AMK_remap.at[:, cspecies].set(cond_col)
 
-        # Right edge of overlap in each bin
-        right_at_yu = yu_L <= xk[1:]
-        right_cond = jnp.where(right_at_yu, yuc_L, YM_all[L, 1:])
+    # Identity rows: AMKD unchanged at the source bin
+    AMK_ident = jnp.where(mask_ident[:, None], AMKD, 0.0)
 
-        # Average condensing mass per particle in overlap
-        avg_cond = (left_cond + right_cond) * 0.5
+    # Below-grid rows: AMKD with cspecies replaced by avg boundary mass
+    avg_cond_bg = (YUC + YLC) * 0.5
+    AMK_below_row = AMKD.at[:, cspecies].set(avg_cond_bg * ANKD)
+    AMK_below = jnp.where(mask_below[:, None], AMK_below_row, 0.0)
 
-        # Fortran uses 1.5 * YM_left for full middle bins (mass-doubling approximation)
-        is_full_middle = (~left_at_yl) & (~right_at_yu) & (frac > 0.0)
-        avg_cond = jnp.where(is_full_middle, 1.5 * YM_all[L, :-1], avg_cond)
-
-        # Condensing species contribution
-        cond_contrib = dn * avg_cond
-        # Clamp negative cond mass to zero (matching Fortran val < 0 check)
-        cond_contrib = jnp.maximum(cond_contrib, 0.0)
-
-        # Build the species contribution
-        # Start from proportional, then override cspecies
-        amk_contrib = amk_noncond
-        amk_contrib = amk_contrib.at[:, cspecies].set(cond_contrib)
-
-        ank_remap = ANK + dn
-        amk_remap = AMK + amk_contrib
-
-        # === Select which case applies ===
-        is_active = active[L]
-        is_zero_tau = zero_tau[L]
-        is_below = below_grid[L] & (~completely_below[L])
-        is_skip = completely_below[L] | (~xi_valid[L])
-
-        # Priority: skip > zero_tau > below_grid > normal remap
-        ANK_out = jnp.where(is_skip, ANK,
-                  jnp.where(is_zero_tau | (~is_active), ank_zt,
-                  jnp.where(is_below, ank_bg,
-                  ank_remap)))
-
-        AMK_out = jnp.where(is_skip, AMK,
-                  jnp.where(is_zero_tau | (~is_active), amk_zt,
-                  jnp.where(is_below, amk_bg,
-                  amk_remap)))
-
-        return ANK_out, AMK_out
+    AMK_out = AMK_remap + AMK_ident + AMK_below
 
     # Handle trivial case: no forcing (JAX arrays are immutable, no copy needed)
     ANK_trivial = ANKD
     AMK_trivial = AMKD
-
-    ANK_init = jnp.zeros(ibins)
-    AMK_init = jnp.zeros((ibins, icomp))
-
-    ANK_out, AMK_out = jax.lax.fori_loop(0, ibins, remap_bin, (ANK_init, AMK_init))
 
     # If max tau is negligible, return input unchanged
     ANK_out = jnp.where(maxtau < TEPS, ANK_trivial, ANK_out)
