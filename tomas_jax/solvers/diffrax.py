@@ -87,13 +87,17 @@ def diffrax_step(
     term = diffrax.ODETerm(coagulation_rhs)
 
     # 2. Integration Loop (Splitting for MNFIX)
+    # Overflow tracking costs one extra rates evaluation per chunk, so it is
+    # only included in the scan when requested (trace-time Python branch —
+    # the Nk/Mk trajectory is identical either way).
     def scan_body(current_state, _):
         Nk_prev, Mk_prev, overflow_acc = current_state
 
-        # Estimate overflow rate at start of chunk (first-order approximation)
-        _dNdt, _dMdt, dM_overflow = calc_coagulation_rates(
-            Nk_prev, Mk_prev, kij, xk, icomp_nodiag)
-        overflow_acc = overflow_acc + dt_chunk * dM_overflow
+        if return_overflow:
+            # Estimate overflow rate at start of chunk (first-order approximation)
+            _dNdt, _dMdt, dM_overflow = calc_coagulation_rates(
+                Nk_prev, Mk_prev, kij, xk, icomp_nodiag)
+            overflow_acc = overflow_acc + dt_chunk * dM_overflow
 
         solution = diffrax.diffeqsolve(
             term,
