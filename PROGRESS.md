@@ -4,6 +4,58 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-06-13 (Sat) — Refresh VBS/SOA branch onto dev + validate vs Fortran
+
+**Time**: afternoon PST
+**Branch**: `feat/vbs-soa-updated` (from `origin/dev`, merging stale `origin/vbs-soa`)
+
+### Summary
+The SOA/VBS work lived on `origin/vbs-soa`, which had fallen ~17 commits
+behind `dev` (radiative forcing, 1000-scenario benchmark, nucleation-rate
+helper refactor, etc. all landed on dev after vbs-soa diverged). Created a
+fresh `feat/vbs-soa-updated` off current `dev` and merged the VBS work
+forward, resolving conflicts, then rebuilt the Fortran reference and
+re-validated.
+
+### Conflict resolutions
+- `tomas_jax/physics/dilution.py` + `tests/test_dilution.py`: took the
+  vbs-soa **volume-expansion** dilution rewrite (`dilution_step` returns
+  `(boxvol_new, Nk, Mk, Gc)`, background in [per cm³]). Supersedes dev's
+  exponential-relaxation version.
+- `tomas_jax/solvers/condensation.py` `make_step()`: unified both API
+  evolutions — kept dev's kwarg/process-order validation and `jit=True`
+  auto-compile **and** vbs-soa's `soa_condensation` process, `soa_solver`/
+  `soa_redistribution` params, and 4-tuple `(Nk, Mk, Gc, boxvol)` return.
+  Updated `_VALID_MAKE_STEP_KWARGS` (added VBS + `*_bg_conc`) and
+  `_CANONICAL_PROCESS_ORDER` (inserted `soa_condensation`).
+- `run_box_model.py`, `tomas_fortran/Makefile`, `CLAUDE.md`: unioned both
+  sides (atmos + SOA harness targets; volume-based dilution docs).
+- `PROGRESS.md`: merged both histories (56 entries, date-descending).
+- `tests/test_smoke.py`: updated the two `make_step` smoke tests to the
+  4-tuple return + `*_bg_conc` dilution kwargs (dev tests predated the
+  vbs-soa API change).
+
+### Validation
+- **446/446 fast tests pass** (includes 68 SOA/VBS tests:
+  `tests/test_soa_condensation.py`, plus updated dilution/smoke tests).
+- **Fortran comparison** (rebuilt `benchmark_soa.exe` from `soacond.f`,
+  ran `benchmark_soa --run`, 3 scenarios × 24h, shared 36-bin grid):
+  per-VBS-bin gas depletion agrees within **0.3 percentage points** in all
+  cases; worst 24h conserved-total relative errors N=1.5e-3, M_dry=1.1e-3,
+  M_org=2.3e-3 — consistent with JAX PPM vs Fortran top-hat redistribution.
+
+### Known limitations / next steps
+- Differences are dominated by the redistribution scheme (PPM vs top-hat),
+  not the partitioning physics; expected and documented in
+  `docs/soa_benchmark.md`.
+- Kelvin effect applied to organics only (open question for inorganic
+  H2SO4), per `docs/soa_vbs.md`.
+- Performance optimizations from PR #18 (MNFIX/TFL/diffrax) are **not** in
+  this branch; if both merge, re-validate the SOA paths since they call
+  `mnfix_jax`.
+
+---
+
 ## 2026-05-07 (Wed) — Nucleation rate helpers refactored
 
 **Time**: evening PST
