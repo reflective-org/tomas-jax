@@ -107,7 +107,7 @@ class TestMakeStepSmoke:
         Nk, Mk, Gc = make_lognormal(xk, N_total=1e4, GMD_um=0.1, GSD=1.8,
                                      h2so4_molec_cm3=1e7)
 
-        Nk_out, Mk_out, Gc_out = step_fn(
+        Nk_out, Mk_out, Gc_out, boxvol_out = step_fn(
             Nk, Mk, Gc, xk, 298.0, 101325.0, BOXVOL, 0.5, 1.0, 60.0)
 
         assert Nk_out.shape == Nk.shape
@@ -115,6 +115,8 @@ class TestMakeStepSmoke:
         assert Gc_out.shape == Gc.shape
         assert jnp.all(jnp.isfinite(Nk_out))
         assert jnp.all(jnp.isfinite(Mk_out))
+        # No dilution in process list -> boxvol returned unchanged
+        assert float(boxvol_out) == BOXVOL
 
     def test_make_step_all_processes(self, xk):
         """Full 5-process pipeline runs without error."""
@@ -124,16 +126,18 @@ class TestMakeStepSmoke:
         Nk, Mk, Gc = make_lognormal(xk, N_total=1e4, GMD_um=0.1, GSD=1.8,
                                      h2so4_molec_cm3=1e7)
 
-        Nk_out, Mk_out, Gc_out = step_fn(
+        Nk_out, Mk_out, Gc_out, boxvol_out = step_fn(
             Nk, Mk, Gc, xk, 298.0, 101325.0, BOXVOL, 0.5, 1.0, 60.0,
             oh_conc=1e6,
             org_conc=1e7, nh3_conc=1.0, fion=0.0,
             kdil=1e-5,
-            Nk_bg=jnp.zeros_like(Nk),
-            Mk_bg=jnp.zeros_like(Mk),
-            Gc_bg=jnp.zeros_like(Gc),
+            Nk_bg_conc=jnp.zeros_like(Nk),
+            Mk_bg_conc=jnp.zeros_like(Mk),
+            Gc_bg_conc=jnp.zeros_like(Gc),
         )
 
         assert Nk_out.shape == Nk.shape
         assert jnp.all(jnp.isfinite(Nk_out))
         assert jnp.all(jnp.isfinite(Gc_out))
+        # Dilution active -> box volume expands
+        assert float(boxvol_out) > BOXVOL
