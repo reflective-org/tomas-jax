@@ -64,6 +64,8 @@ from ..physics.so2_chemistry import (
     calc_solar_zenith_angle, calc_oh_concentration,
 )
 from ..physics.dilution import dilution_step
+from ..physics.soa_condensation import soa_condensation_step
+from ..physics.vbs_config import DEFAULT_VBS_CONFIG
 from ..physics.nucleation import (
     nucleation_step, ricco_dunne_nucleation_rate, compute_nucleation_substeps,
     zhao2024_nucleation_step, ZHAO2024_ALL_ENABLED,
@@ -89,13 +91,16 @@ _VALID_MAKE_STEP_KWARGS = {
     'hno3', 'ulvoc', 'dma', 'hio3', 'enable_masks',
     # coagulation
     'icomp_nodiag',
-    # dilution
-    'kdil', 'Nk_bg', 'Mk_bg', 'Gc_bg',
+    # soa_condensation
+    'vbs_config', 'soa_redistribution', 'soa_use_ppm',
+    # dilution (volume-expansion; background in [per cm^3] units)
+    'kdil', 'Nk_bg_conc', 'Mk_bg_conc', 'Gc_bg_conc',
 }
 
 # Canonical physical process ordering
 _CANONICAL_PROCESS_ORDER = [
-    'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution',
+    'so2_chemistry', 'nucleation', 'coagulation', 'condensation',
+    'soa_condensation', 'dilution',
 ]
 
 
@@ -744,12 +749,16 @@ def run_full_scan(
 def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
               n_coag_substeps=10,
               max_nucleation_frac=0.5, max_nuc_substeps=20,
+              soa_solver='sequential', soa_redistribution='tfl',
               jit=True):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
         step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs)
-    and returns (Nk, Mk, Gc).
+    and returns (Nk, Mk, Gc, boxvol).
+
+    When dilution is active, boxvol is updated (expanded) each timestep.
+    When dilution is not in the process list, boxvol is returned unchanged.
 
     The ``for process in processes`` loop is Python-level — unrolled at JAX
     trace time. This makes it trivial to reorder, skip, or add processes.
@@ -759,7 +768,8 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
 
     Args:
         processes: Ordered list of process names, e.g.
-            ['so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution']
+            ['so2_chemistry', 'nucleation', 'coagulation', 'condensation',
+             'soa_condensation', 'dilution']
         cond_method: 'ppm_jit' or 'tfl_jit'
         nucl_scheme: 'ricco_dunne' (Riccobono 2014 + Dunne 2016) or
             'zhao2024' (11-mechanism Zhao et al. 2024). For zhao2024,
@@ -767,6 +777,9 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         n_coag_substeps: Number of forward-Euler substeps for coagulation
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
+        soa_solver: SOA condensation solver — 'sequential' (default) or 'coupled'
+        soa_redistribution: Bin redistribution for sequential SOA solver —
+            'tfl' (default, Fortran-matching), 'ppm' (smoother), 'direct'
         jit: If True (default), wrap the returned function in ``jax.jit``.
             Callers no longer need to wrap manually. Double-JIT is a no-op.
 
@@ -779,22 +792,26 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
 
         step = make_step(['nucleation', 'coagulation', 'condensation'],
                          cond_method='ppm_jit')
-        Nk, Mk, Gc = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                           org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
+        Nk, Mk, Gc, boxvol = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                                    org_conc=org_conc, nh3_conc=nh3_conc, fion=fion)
 
-        # With SO2 chemistry:
-        step = make_step(['so2_chemistry', 'nucleation', 'coagulation', 'condensation'])
-        Nk, Mk, Gc = step(..., oh_conc=1e6)
+        # With dilution (volume-based):
+        step = make_step(['coagulation', 'condensation', 'dilution'])
+        Nk, Mk, Gc, boxvol = step(..., kdil=1e-4)  # clean-air, boxvol grows
 
-        # Zhao 2024 11-mechanism scheme:
-        step = make_step(['nucleation', 'coagulation', 'condensation'],
-                         nucl_scheme='zhao2024')
-        Nk, Mk, Gc = step(..., org_conc=..., nh3_conc=..., fion=...,
-                           hno3=..., ulvoc=..., dma=..., hio3=...)
+        # With ambient background (entrained air adds mass):
+        Nk_bg_conc = Nk_init / boxvol_init  # [#/cm³]
+        Mk_bg_conc = Mk_init / boxvol_init  # [kg/cm³]
+        Gc_bg_conc = Gc_init / boxvol_init  # [kg/cm³]
+        Nk, Mk, Gc, boxvol = step(..., kdil=1e-4,
+                                    Nk_bg_conc=Nk_bg_conc,
+                                    Mk_bg_conc=Mk_bg_conc,
+                                    Gc_bg_conc=Gc_bg_conc)
     """
     ezcond_fn = ezcond_tfl_jax if 'tfl' in cond_method else ezcond_ppm_jax
 
-    valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'}
+    valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation',
+             'soa_condensation', 'dilution'}
     for p in processes:
         if p not in valid:
             raise ValueError(f"Unknown process '{p}'. Valid: {sorted(valid)}")
@@ -815,6 +832,8 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         raise ValueError(f"Unknown nucl_scheme '{nucl_scheme}'. Valid: {sorted(valid_schemes)}")
 
     use_zhao = nucl_scheme == 'zhao2024'
+
+    has_dilution = 'dilution' in processes
 
     def step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs):
         unknown = set(kwargs) - _VALID_MAKE_STEP_KWARGS
@@ -897,14 +916,25 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                     ezcond_fn=ezcond_fn,
                 )
+            elif process == 'soa_condensation':
+                vbs_cfg = kwargs.get('vbs_config', DEFAULT_VBS_CONFIG)
+                redist = kwargs.get('soa_redistribution', soa_redistribution)
+                # Backward compat: old soa_use_ppm kwarg
+                if 'soa_use_ppm' in kwargs:
+                    redist = 'tfl' if kwargs['soa_use_ppm'] else 'direct'
+                Nk, Mk, Gc = soa_condensation_step(
+                    Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                    vbs_config=vbs_cfg, redistribution=redist,
+                    solver=soa_solver,
+                )
             elif process == 'dilution':
                 kdil = kwargs.get('kdil', 0.0)
-                Nk, Mk, Gc = dilution_step(
-                    Nk, Mk, Gc, dt, kdil,
-                    kwargs.get('Nk_bg', jnp.zeros_like(Nk)),
-                    kwargs.get('Mk_bg', jnp.zeros_like(Mk)),
-                    kwargs.get('Gc_bg', jnp.zeros_like(Gc)),
+                boxvol, Nk, Mk, Gc = dilution_step(
+                    boxvol, Nk, Mk, Gc, dt, kdil,
+                    Nk_bg_conc=kwargs.get('Nk_bg_conc', None),
+                    Mk_bg_conc=kwargs.get('Mk_bg_conc', None),
+                    Gc_bg_conc=kwargs.get('Gc_bg_conc', None),
                 )
-        return Nk, Mk, Gc
+        return Nk, Mk, Gc, boxvol
 
     return jax.jit(step_fn) if jit else step_fn

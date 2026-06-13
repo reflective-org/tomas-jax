@@ -21,11 +21,18 @@ import jax
 import jax.numpy as jnp
 from typing import Union
 
-from ..core.config import PI, R_GAS, MW_H2SO4, SV_H2SO4
+from ..core.config import PI, R_GAS, KB, AVOGADRO, MW_H2SO4, SV_H2SO4
 
 # Air properties (from gasdiff.f)
 MW_AIR = 28.9   # Molecular weight of air [g/mol]
 SV_AIR = 20.1   # Atomic diffusion volume of air
+
+# Kinetic theory constants for organic diffusivity (soacond.f lines 167-172)
+_NA_FORTRAN = 6.023e23        # Avogadro's number used in Fortran
+_KB_FORTRAN = 1.38e-23        # Boltzmann constant used in Fortran
+_DORG = 1.0e-9                # Organic molecule diameter [m] (10e-10 in Fortran)
+_DAIR = 0.79 * 1.09e-10 + 0.21 * 1.21e-10  # Air molecule diameter [m]
+_MAIR_KG = (0.79 * 28.0 + 0.21 * 32.0) * 1.0e-3 / _NA_FORTRAN  # kg/molecule
 
 
 def calc_air_viscosity(temp: Union[float, jnp.ndarray]) -> Union[float, jnp.ndarray]:
@@ -42,19 +49,21 @@ def calc_air_viscosity(temp: Union[float, jnp.ndarray]) -> Union[float, jnp.ndar
 
 def calc_mean_molecular_speed(
     temp: Union[float, jnp.ndarray],
-    molecular_weight: float = MW_H2SO4
+    molecular_weight: float = MW_H2SO4,
+    r_gas: float = R_GAS,
 ) -> Union[float, jnp.ndarray]:
     """Mean molecular speed (S&P eqn 9.2, getCondSink.f line 79).
 
     Args:
         temp: Temperature [K]
         molecular_weight: Molecular weight [g/mol]
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         ms: Mean molecular speed [m/s]
     """
     mw_kg = molecular_weight / 1000.0
-    return jnp.sqrt(8.0 * R_GAS * temp / (PI * mw_kg))
+    return jnp.sqrt(8.0 * r_gas * temp / (PI * mw_kg))
 
 
 def calc_gas_diffusivity(
@@ -81,11 +90,42 @@ def calc_gas_diffusivity(
     return Di
 
 
+def calc_gas_diffusivity_kinetic(
+    temp: Union[float, jnp.ndarray],
+    pres: Union[float, jnp.ndarray],
+    molecular_weight: float = 200.0,
+) -> Union[float, jnp.ndarray]:
+    """Gas diffusivity via kinetic theory matching soacond.f lines 186-187.
+
+    Uses collision-based formula with hard-coded molecular diameters for
+    organic molecules (dorg=1e-9 m) and air (dair~1.115e-10 m).
+
+    This gives ~2x lower diffusivity than Fuller-Schettler-Giddings (FSG)
+    for MW~200 organics. Used by soacond.f for SOA condensation sink.
+
+    Args:
+        temp: Temperature [K]
+        pres: Pressure [Pa]
+        molecular_weight: Molecular weight of organic [g/mol]
+
+    Returns:
+        Di: Gas diffusivity [m^2/s]
+    """
+    morg = molecular_weight * 1.0e-3 / _NA_FORTRAN  # kg/molecule
+    reduced_mass_term = 0.5 * (1.0 / morg + 1.0 / _MAIR_KG)
+    collision_speed = jnp.sqrt(_KB_FORTRAN * temp / PI * reduced_mass_term)
+    cross_section = PI * (0.5 * (_DORG + _DAIR)) ** 2
+    Di = ((2.0 / 3.0) * collision_speed / cross_section / _NA_FORTRAN
+          * (R_GAS * temp / pres))
+    return Di
+
+
 def calc_mean_free_path(
     temp: Union[float, jnp.ndarray],
     pres: Union[float, jnp.ndarray],
     molecular_weight: float = MW_H2SO4,
-    diffusion_volume: float = SV_H2SO4
+    diffusion_volume: float = SV_H2SO4,
+    r_gas: float = R_GAS,
 ) -> Union[float, jnp.ndarray]:
     """Mean free path using TOMAS-specific formula mfp = 2*Di/ms (getCondSink.f line 84).
 
@@ -99,12 +139,13 @@ def calc_mean_free_path(
         pres: Pressure [Pa]
         molecular_weight: Molecular weight [g/mol]
         diffusion_volume: Diffusion volume parameter
+        r_gas: Gas constant [J/mol/K]. Default exact; pass 8.314 for Fortran.
 
     Returns:
         mfp: Mean free path [m]
     """
     Di = calc_gas_diffusivity(temp, pres, molecular_weight, diffusion_volume)
-    ms = calc_mean_molecular_speed(temp, molecular_weight)
+    ms = calc_mean_molecular_speed(temp, molecular_weight, r_gas=r_gas)
     return 2.0 * Di / ms
 
 

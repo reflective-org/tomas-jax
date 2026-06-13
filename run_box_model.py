@@ -213,21 +213,21 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     # --- Dilution Parameters ---
     if enable_dilution:
         if dilution_bg == 'ambient':
-            # Use initial state as background (relaxation to initial conditions)
-            Nk_bg = Nk.copy()
-            Mk_bg = Mk.copy()
-            Gc_bg = Gc.copy()
+            # Use initial concentrations as background
+            Nk_bg_conc = Nk / boxvol   # [#/cm³]
+            Mk_bg_conc = Mk / boxvol   # [kg/cm³]
+            Gc_bg_conc = Gc / boxvol   # [kg/cm³]
         else:
             # Clean air (zeros)
-            Nk_bg = jnp.zeros_like(Nk)
-            Mk_bg = jnp.zeros_like(Mk)
-            Gc_bg = jnp.zeros_like(Gc)
+            Nk_bg_conc = jnp.zeros_like(Nk)
+            Mk_bg_conc = jnp.zeros_like(Mk)
+            Gc_bg_conc = jnp.zeros_like(Gc)
         print(f"Dilution rate:     {dilution_rate:.1e} s^-1 "
               f"(tau = {1.0/dilution_rate:.0f} s = {1.0/dilution_rate/3600:.1f} h)")
     else:
-        Nk_bg = jnp.zeros_like(Nk)
-        Mk_bg = jnp.zeros_like(Mk)
-        Gc_bg = jnp.zeros_like(Gc)
+        Nk_bg_conc = None
+        Mk_bg_conc = None
+        Gc_bg_conc = None
 
     # Calculate initial totals for conservation check
     total_N_init = jnp.sum(Nk)
@@ -262,7 +262,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                            enable_masks=ZHAO2024_ALL_ENABLED)
         if enable_dilution:
             _kw.update(kdil=jnp.float64(dilution_rate),
-                       Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg)
+                       Nk_bg_conc=Nk_bg_conc, Mk_bg_conc=Mk_bg_conc,
+                       Gc_bg_conc=Gc_bg_conc)
         _ = step_fn_jit(Nk, Mk, Gc, xk,
                         jnp.float64(temp), jnp.float64(pres),
                         jnp.float64(boxvol), jnp.float64(rh),
@@ -342,13 +343,16 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                               enable_masks=ZHAO2024_ALL_ENABLED)
             if enable_dilution:
                 kw.update(kdil=jnp.float64(dilution_rate),
-                          Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg)
-            Nk, Mk, Gc = step_fn_jit(
+                          Nk_bg_conc=Nk_bg_conc, Mk_bg_conc=Mk_bg_conc,
+                          Gc_bg_conc=Gc_bg_conc)
+            j_boxvol = jnp.float64(boxvol)
+            Nk, Mk, Gc, j_boxvol = step_fn_jit(
                 Nk, Mk, Gc, xk,
-                jnp.float64(temp), jnp.float64(pres), jnp.float64(boxvol),
+                jnp.float64(temp), jnp.float64(pres), j_boxvol,
                 jnp.float64(rh), jnp.float64(alpha), jnp.float64(dt_model),
                 **kw,
             )
+            boxvol = float(j_boxvol)  # update for next iteration
         else:
             # SO2 chemistry (manual path)
             if enable_so2:

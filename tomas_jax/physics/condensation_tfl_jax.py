@@ -71,18 +71,22 @@ def tmcond_jax(
     AMKD = jnp.where(empty[:, None], Mk_empty, Mk)
 
     # --- Transfer overflow (lines 97-110) ---
-    # If average mass > upper boundary, shift 10% to next bin
-    AMKDRY_pre = jnp.sum(AMKD[:, :icomp_nodiag], axis=1)
-    avg_pre = AMKDRY_pre / ANKD
-    overflow = (avg_pre > xk[1:]) & (jnp.arange(ibins) < ibins - 1)
+    # If average mass > upper boundary, shift 10% to next bin.
+    # Must be SEQUENTIAL (Fortran loop): overflow cascades k→k+1→k+2.
+    def _overflow_step(k, state):
+        ankd, amkd = state
+        amkdry_k = jnp.sum(amkd[k, :icomp_nodiag])
+        avg_k = amkdry_k / ankd[k]
+        do_shift = (avg_k > xk[k + 1]) & (k < ibins - 1)
+        n_shift = jnp.where(do_shift, 0.1 * ankd[k], 0.0)
+        m_shift = jnp.where(do_shift, 0.1 * amkd[k], jnp.zeros(icomp))
+        ankd = ankd.at[k].add(-n_shift)
+        ankd = ankd.at[k + 1].add(n_shift)
+        amkd = amkd.at[k].add(-m_shift)
+        amkd = amkd.at[k + 1].add(m_shift)
+        return (ankd, amkd)
 
-    # Apply overflow: shift 10% from k to k+1
-    # Use a single pass (Fortran does sequential, but one pass is close enough)
-    N_shift = jnp.where(overflow, 0.1 * ANKD, 0.0)
-    M_shift = jnp.where(overflow[:, None], 0.1 * AMKD, 0.0)
-
-    ANKD = ANKD - N_shift + jnp.concatenate([jnp.zeros(1), N_shift[:-1]])
-    AMKD = AMKD - M_shift + jnp.concatenate([jnp.zeros((1, icomp)), M_shift[:-1]])
+    ANKD, AMKD = jax.lax.fori_loop(0, ibins - 1, _overflow_step, (ANKD, AMKD))
 
     # --- Compute WR (lines 119-129) ---
     AMKDRY = jnp.sum(AMKD[:, :icomp_nodiag], axis=1)
@@ -212,7 +216,7 @@ def tmcond_jax(
         is_active = active[L]
         is_zero_tau = zero_tau[L]
         is_below = below_grid[L] & (~completely_below[L])
-        is_skip = completely_below[L] | (~xi_valid[L])
+        is_skip = completely_below[L]
 
         # Priority: skip > zero_tau > below_grid > normal remap
         ANK_out = jnp.where(is_skip, ANK,

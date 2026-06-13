@@ -194,10 +194,10 @@ def run_scenario(case_key, nbins, xk, verbose=True):
 
     Nk, Mk, Gc = make_initial_state(nbins, xk)
 
-    # Save initial state for background (clean-air: zeros)
-    Nk_bg = jnp.zeros_like(Nk)
-    Mk_bg = jnp.zeros_like(Mk)
-    Gc_bg = jnp.zeros_like(Gc)
+    # Background concentrations for entrainment (clean-air: zeros)
+    Nk_bg_conc = jnp.zeros_like(Nk)
+    Mk_bg_conc = jnp.zeros_like(Mk)
+    Gc_bg_conc = jnp.zeros_like(Gc)
 
     # Build process list
     processes = ['so2_chemistry', 'nucleation', 'coagulation', 'condensation']
@@ -215,10 +215,11 @@ def run_scenario(case_key, nbins, xk, verbose=True):
     if kdil > 0:
         kw.update(
             kdil=jnp.float64(kdil),
-            Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg,
+            Nk_bg_conc=Nk_bg_conc, Mk_bg_conc=Mk_bg_conc,
+            Gc_bg_conc=Gc_bg_conc,
         )
 
-    # Warmup JIT
+    # Warmup JIT (returns 4 values: Nk, Mk, Gc, boxvol)
     _ = step_fn_jit(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kw)
 
     # Storage
@@ -235,19 +236,17 @@ def run_scenario(case_key, nbins, xk, verbose=True):
 
     tracer = jnp.float64(1.0)
 
-    so2_to_molec = AVOGADRO / (MW_SO2 / 1000.0) / BOXVOL
-    so4_to_molec = AVOGADRO / (MW_H2SO4 / 1000.0) / BOXVOL
-
     t0 = time.time()
 
     for i in range(nsteps):
         # Record state BEFORE stepping
         Nk_np = np.array(Nk)
         Gc_np = np.array(Gc)
+        bv = float(boxvol)  # current boxvol for concentration conversion
 
         Nk_every[i] = Nk_np
-        Gc_SO2_every[i] = Gc_np[SRTSO2] * so2_to_molec
-        Gc_SO4_every[i] = Gc_np[SRTSO4] * so4_to_molec
+        Gc_SO2_every[i] = Gc_np[SRTSO2] * AVOGADRO / (MW_SO2 / 1000.0) / bv
+        Gc_SO4_every[i] = Gc_np[SRTSO4] * AVOGADRO / (MW_H2SO4 / 1000.0) / bv
         N_tot_every[i] = float(jnp.sum(Nk))
         M_dry_every[i] = float(jnp.sum(Mk[:, :SRTH2O]))
         tracer_every[i] = float(tracer)
@@ -258,9 +257,9 @@ def run_scenario(case_key, nbins, xk, verbose=True):
             N_tot_hourly[hr] = N_tot_every[i]
             M_dry_hourly[hr] = M_dry_every[i]
 
-        # Step
-        Nk, Mk, Gc = step_fn_jit(Nk, Mk, Gc, xk, temp, pres, boxvol,
-                                   rh, alpha, dt, **kw)
+        # Step (boxvol evolves when dilution is active)
+        Nk, Mk, Gc, boxvol = step_fn_jit(Nk, Mk, Gc, xk, temp, pres, boxvol,
+                                           rh, alpha, dt, **kw)
 
         # Update passive tracer
         if kdil > 0:
