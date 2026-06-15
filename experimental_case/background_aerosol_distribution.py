@@ -396,6 +396,78 @@ def plot_redcircles_crosscheck(temp=210.0, pres=5500.0, nbins=40, outdir=None):
 
 
 # =========================================================================
+# Fig. S4-style reproduction (matches the original screenshot's framing)
+# =========================================================================
+
+def plot_redcircles_figure_style(temp=210.0, pres=5500.0, nbins=40,
+                                 ylim_stp=(0, 1000), outdir=None):
+    """Reproduce the digitized red-circles distribution in the same framing as
+    the original figure (Fig. S4) so it can be overlaid for confirmation.
+
+    Two panels, both: Diameter (µm) on a log x-axis, dN/dlogDp on a linear
+    y-axis, digitized observation as red OPEN circles connected by a thin red
+    line (the figure's "observation" style), plus the 40-bin TOMAS mapping.
+      - Left : STP  (y-limits match the screenshot, default 0-1000)
+      - Right: AMBIENT (= STP * f), auto-scaled to its own magnitude.
+    """
+    f = stp_to_ambient_factor(temp, pres)
+    data = _DIST_META['redcircles']['data']
+    dp_um, dndlogdp = data[:, 0], data[:, 1]
+
+    if nbins == 80:
+        xk = np.array(make_grid_80bin())
+    else:
+        xk = np.array(make_grid(nbins, XK0, 2.0))
+    _, _, Nk_stp, dp40_um, dlogDp40 = map_to_grid(xk, dist='redcircles')
+    dn40_stp = Nk_stp / dlogDp40
+    N_stp = float(Nk_stp.sum())
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+    fig.suptitle(
+        'Background size distribution (red circles, obs 220-230 ppbv) '
+        '— reproduction of Fig. S4 framing',
+        fontsize=12, fontweight='bold')
+
+    panels = [
+        (axes[0], 1.0,  'dN/dlogDp (cm$^{-3}$ STP)',      f'STP   (N={N_stp:.0f} cm⁻³)',        ylim_stp),
+        (axes[1], f,    'dN/dlogDp (cm$^{-3}$ ambient)',  f'AMBIENT  (×{f:.4f}, N={N_stp*f:.2f} cm⁻³)', None),
+    ]
+    for ax, scale, ylabel, title, ylim in panels:
+        # Observation: red open circles + thin connecting line (Fig. S4 style)
+        ax.plot(dp_um, dndlogdp * scale, color='#E53935', lw=1.0, zorder=4)
+        ax.plot(dp_um, dndlogdp * scale, marker='o', ls='none',
+                markerfacecolor='none', markeredgecolor='#E53935',
+                markersize=7, markeredgewidth=1.3, zorder=5,
+                label='observation, 220-230 ppbv')
+        # 40-bin TOMAS mapping
+        ax.step(dp40_um, dn40_stp * scale, where='mid', color='#1565C0',
+                lw=1.8, alpha=0.9, label='TOMAS 40-bin mapping')
+        ax.set_xscale('log'); ax.set_xlim(3e-3, 3.0)
+        ax.set_xlabel('Diameter (µm)'); ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+        else:
+            ax.set_ylim(bottom=0)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.grid(True, alpha=0.2, which='both')
+        ax.legend(fontsize=9, frameon=False)
+
+    fig.tight_layout()
+    if outdir is None:
+        outdir = os.path.join(os.path.dirname(__file__), 'results')
+    os.makedirs(outdir, exist_ok=True)
+    out = os.path.join(outdir, 'redcircles_figure_style.png')
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'redcircles (Fig.S4 style): N_STP={N_stp:.1f} cm⁻³, '
+          f'N_ambient={N_stp*f:.2f} cm⁻³ (f={f:.4f})')
+    print(f'Saved: {out}')
+    return out
+
+
+# =========================================================================
 # CLI
 # =========================================================================
 
@@ -404,10 +476,14 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--redcircles', action='store_true',
                     help='Plot the red-circles extraction cross-check (STP vs ambient)')
+    ap.add_argument('--figure-style', action='store_true',
+                    help='Reproduce the Fig. S4 framing (STP + ambient panels)')
     ap.add_argument('--temp', type=float, default=210.0)
     ap.add_argument('--pres', type=float, default=5500.0)
     args = ap.parse_args()
-    if args.redcircles:
+    if args.figure_style:
+        plot_redcircles_figure_style(temp=args.temp, pres=args.pres)
+    elif args.redcircles:
         plot_redcircles_crosscheck(temp=args.temp, pres=args.pres)
     else:
         plot_distribution()

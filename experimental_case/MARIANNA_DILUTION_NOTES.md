@@ -11,6 +11,9 @@ uv run python -m experimental_case.check_ion_nucleation
 # 2. Confirm the digitized initial size distribution (STP vs ambient)
 uv run python -m experimental_case.background_aerosol_distribution --redcircles
 #    -> results/redcircles_crosscheck.png
+uv run python -m experimental_case.background_aerosol_distribution --figure-style
+#    -> results/redcircles_figure_style.png  (Fig. S4 framing, STP + ambient;
+#       STP panel overlays directly on the original screenshot)
 
 # 3. Full 10-day run + plots (~25 s)
 uv run python -m experimental_case.run_marianna_dilution
