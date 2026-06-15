@@ -64,7 +64,13 @@ V(t)/V₀ = 1585 · exp{ 8.89×10⁻⁹ · (t − 10⁴)^(3/2) }   t > 10⁴ s
 
 - The exponent argument is **(t − 10⁴)** (read from `(t − t⁴)` in the source,
   which would be negative/complex; `(t − 10⁴)` gives continuity and growth).
-- 10-day growth ≈ **1.77×10⁶×**.
+- **Clamp `V/V0 ≥ 1`**: `t^0.8 → 0` as `t → 0`, which is singular (infinite kdil
+  on the first step). The plume starts at V0 and only expands, so `V/V0` is
+  clamped to ≥ 1; `t^0.8 < 1` only for `t < 1 s`, so the effect is confined to
+  the first second.
+- **Fast early growth**: `V/V0 ≈ 40` by 100 s, **≈402 by 30 min**, **1585 by
+  2.8 h**, then exponential to **≈1.77×10⁶ by 10 days**. Concentrations of inert
+  species drop by the same factors (inert tracer ≈ V0/V(t)).
 - Per-step dilution rate: `kdil[i] = ln(V(t_i+dt)/V(t_i)) / dt`.
 - **Inert tracer** integrated as `tracer ·= exp(−kdil·dt)` (background 0) → tracks
   `V₀/V(t)`, isolating the pure dilution signal.
