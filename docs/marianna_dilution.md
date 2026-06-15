@@ -4,6 +4,27 @@
 > This document is the canonical record of the simulation plan, the chosen
 > parameters, the unit conversions, and the caveats / future-run alternatives.
 
+## Scenarios
+
+Simulations are organized as **named scenarios** in a registry
+(`SCENARIOS` in `experimental_case/run_marianna_dilution.py`). Each is a
+`ScenarioConfig` (T, P, H2O, OH, SO2, H2SO4, fion, initial/background aerosol,
+dilution `V(t)/V0` params, duration). Outputs go to
+`results/marianna/<scenario_slug>/` (NPZ + `figs/`, including a
+`parameters.png` table of all inputs).
+
+| id | name | notes |
+|----|------|-------|
+| 1 | Low Latitude, High Altitude, Clean Stratosphere | the run specified below (§2–§3) |
+
+Run / add scenarios:
+```bash
+uv run python -m experimental_case.run_marianna_dilution --scenario 1
+```
+To add a scenario, append a `ScenarioConfig(id=..., name=..., <overrides>)` to
+`SCENARIOS`. Parameters §2–§3 are the defaults (scenario 1); a new scenario
+only overrides what differs.
+
 ## 1. Context & goal
 
 Run a **10-day** TOMAS-JAX box-model simulation of a concentrated stratospheric

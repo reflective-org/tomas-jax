@@ -16,15 +16,24 @@ uv run python -m experimental_case.background_aerosol_distribution --figure-styl
 #       STP panel overlays directly on the original screenshot)
 
 # 3. Full 10-day run + plots (~25 s)
-uv run python -m experimental_case.run_marianna_dilution
+uv run python -m experimental_case.run_marianna_dilution --scenario 1
 
 # Short test / re-plot
-uv run python -m experimental_case.run_marianna_dilution --hours 12
-uv run python -m experimental_case.run_marianna_dilution --plot-only
+uv run python -m experimental_case.run_marianna_dilution --scenario 1 --hours 12
+uv run python -m experimental_case.run_marianna_dilution --scenario 1 --plot-only
 ```
-Outputs: `results/marianna/marianna_dilution.npz` + 7 figures in
-`results/marianna/figs/` (dilution_trend, gas_timeseries, banana,
-sizedist_dN/dA/dV, ntotal).
+Outputs: `results/marianna/<scenario_slug>/data.npz` + figures in
+`.../figs/`: **parameters** (input table), dilution_trend, gas_timeseries,
+banana_dN/dA/dV, sizedist_dN/dA/dV (+ t=0 reference), ntotal.
+
+## Scenarios
+Defined in the `SCENARIOS` registry in `run_marianna_dilution.py`. To add one,
+append a `ScenarioConfig(id=..., name=..., <overrides>)`; only override fields
+that differ from scenario 1's defaults.
+
+| id | name |
+|----|------|
+| 1 | Low Latitude, High Altitude, Clean Stratosphere |
 
 ## Chosen parameters (this run)
 | Param | Value | Notes |
