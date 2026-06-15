@@ -4,6 +4,50 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-06-15 (Mon) — Marianna SAI dilution case (10-day box model)
+
+**Time**: afternoon PST
+**Branch**: `feat/marianna-dilution` (based on `dev`)
+
+### Summary
+Added a self-contained experimental case simulating a concentrated
+stratospheric SO2 plume diluting under an **explicit analytic `V(t)/V0`**
+parameterization, with ion-induced nucleation, over 10 days.
+
+### Changes
+- `experimental_case/background_aerosol_distribution.py`: ported from
+  `feat/experimental-sai-dilution` (seaborn removed). Added the `redcircles`
+  distribution (digitized Fig. S4 obs 220–230 ppbv, cm⁻³ STP),
+  `stp_to_ambient_factor()`, a `to_ambient` option in `get_initial_state()`,
+  and `plot_redcircles_crosscheck()` (STP vs ambient).
+- `experimental_case/check_ion_nucleation.py`: pre-check that the Dunne 2016
+  ion mechanism fires at T=210 K, NH3=0, fion=30 (Jbi>0, total↑). Passes.
+- `experimental_case/run_marianna_dilution.py`: 10-day box model.
+  ICs T=210 K, P=55 hPa, [H2O]=4 ppm (rh=0.0172), OH=5e5, SO2=2.9e9 ppt,
+  H2SO4=1e5, fion=30, red-circles ambient aerosol. Analytic `V_ratio(t)`
+  (`t^0.8` clamped ≥1, then `1585·exp{8.89e-9 (t−1e4)^1.5}`), per-step
+  `kdil=ln(V(t+dt)/V(t))/dt`, entrains background aerosol + SO2=0.01 ppb,
+  H2SO4=0. Inert tracer validated (= V0/V(t)). Multi-res stepping → NPZ.
+- `experimental_case/plot_marianna_dilution.py`: dilution trend, gas
+  timeseries, banana, dN/dA/dV size dists (12/24/48/72/168/240 h, log+linear),
+  N_total.
+- `docs/marianna_dilution.md`, `experimental_case/MARIANNA_DILUTION_NOTES.md`:
+  full spec + run notes.
+
+### Results (240 h)
+N_total peaks ~4e6/cm³ (d1) → 2.4e4/cm³ (d10); SO2 5.5e15 → 6.9e9; H2SO4 gas
+peaks ~1.4e7 (d4); aerosol grows nucleation mode (~2 nm) → ~150–200 nm. Wall
+time ~22 s.
+
+### Known issues / next steps
+- SO2 = 2.9e9 ppt represents only 1.76 t in V0=3e6 m³ (not mass-equivalent to
+  the prior 10 t plume; 1.65e10 ppt would match). Documented as a future-run
+  alternative, along with: start H2SO4 at 0, background SO2 = 0.
+- Red-circles `_DATA3` is an eyeball digitization — pending user confirmation
+  against `redcircles_crosscheck.png`.
+
+---
+
 ## 2026-05-07 (Wed) — Nucleation rate helpers refactored
 
 **Time**: evening PST
