@@ -25,6 +25,7 @@ import os
 import time
 import math
 import argparse
+from dataclasses import dataclass
 import numpy as np
 import jax.numpy as jnp
 
@@ -43,56 +44,96 @@ from .background_aerosol_distribution import (
 )
 
 # =========================================================================
-# Conditions / constants
+# Fixed numerics (shared across scenarios)
 # =========================================================================
-TEMP   = 210.0          # K
-PRES   = 5500.0         # Pa  (55 hPa)
-H2O_PPM = 4.0           # ppm (volume mixing ratio) -> rh below
 ALPHA  = 1.0
 BOXVOL = 1.0e6          # cm³ (1 m³ reference cell)
 DENS_INIT = 1770.0      # kg/m³ sulfate
 
-OH_CONC    = 5e5        # molec/cm³ constant
-H2SO4_INIT = 1e5        # molec/cm³ initial plume H2SO4 (future runs: 0)
-FION       = 30.0       # pairs/cm³/s ion-pair production
-NUC_ORG    = 0.0
-NUC_NH3    = 0.0
-
-# Initial SO2: 2.9e9 ppt = 2900 ppm (literal, as specified). NB: only 1.76 t in
-# V0=3e6 m³ — see docs/marianna_dilution.md §6 (mass-equivalence caveat).
-SO2_INIT_PPT = 2.9e9
-
-# Background (entrained air)
-BG_SO2_PPB   = 0.01     # ppb  -> molec/cm³ below
-BG_H2SO4     = 0.0      # molec/cm³ (no background H2SO4)
-
-# Initial plume geometry (informational only — box model is in concentration
-# space; only V(t)/V0 enters via kdil)
-V0_M3 = 10.0 * 10.0 * 30000.0   # 3.0e6 m³
-
-# =========================================================================
-# Time schedule (multi-resolution) and snapshots
-# =========================================================================
 PHASE1_END = 20 * 60        # 20 min
 PHASE2_END = 4 * 3600       # 4 h
 DT1, DT2, DT3 = 1.0, 10.0, 60.0
-
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
 
-_OUTDIR = os.path.join(os.path.dirname(__file__), 'results', 'marianna')
-_NPZ = os.path.join(_OUTDIR, 'marianna_dilution.npz')
+_RESULTS_ROOT = os.path.join(os.path.dirname(__file__), 'results', 'marianna')
+
+
+# =========================================================================
+# Scenario configuration
+# =========================================================================
+
+@dataclass
+class ScenarioConfig:
+    """All inputs that define one Marianna dilution simulation."""
+    id: str
+    name: str
+    # Ambient conditions
+    temp: float = 210.0          # K
+    pres: float = 5500.0         # Pa
+    h2o_ppm: float = 4.0         # ppm volume mixing ratio (-> rh internally)
+    # Chemistry / nucleation
+    oh_conc: float = 5e5         # molec/cm³ constant
+    fion: float = 30.0           # pairs/cm³/s ion-pair production
+    nuc_org: float = 0.0
+    nuc_nh3: float = 0.0
+    # Initial plume
+    so2_init_ppt: float = 2.9e9  # ppt volume mixing ratio
+    h2so4_init: float = 1e5      # molec/cm³
+    init_dist: str = 'redcircles'
+    init_to_ambient: bool = True
+    # Entrained-air background
+    bg_dist: str = 'redcircles'  # aerosol dist entrained as plume expands ('' = clean)
+    bg_to_ambient: bool = True
+    bg_so2_ppb: float = 0.01     # ppb
+    bg_h2so4: float = 0.0        # molec/cm³
+    # Explicit volume dilution V(t)/V0 (piecewise)
+    v0_m3: float = 10.0 * 10.0 * 30000.0   # informational only
+    v_early_exp: float = 0.8     # V/V0 = t^v_early_exp for t <= v_t_break
+    v_t_break: float = 1e4       # s
+    v_prefactor: float = 1585.0  # continuity: v_t_break ** v_early_exp
+    v_k: float = 8.89e-9         # exp prefactor for late branch
+    v_late_exp: float = 1.5      # (t - v_t_break) ** v_late_exp
+    # Run length
+    max_hours: float = 240.0
+
+    @property
+    def slug(self):
+        s = self.name.lower()
+        for ch in ' ,/:();':
+            s = s.replace(ch, '_')
+        while '__' in s:
+            s = s.replace('__', '_')
+        return f"{self.id}_{s.strip('_')}"
+
+    @property
+    def outdir(self):
+        return os.path.join(_RESULTS_ROOT, self.slug)
+
+    @property
+    def npz(self):
+        return os.path.join(self.outdir, 'data.npz')
+
+
+# Scenario registry. Add new scenarios here.
+SCENARIOS = {
+    '1': ScenarioConfig(
+        id='1',
+        name='Low Latitude, High Altitude, Clean Stratosphere',
+        # all other fields use the defaults above (the run already executed)
+    ),
+}
 
 
 # =========================================================================
 # Unit helpers
 # =========================================================================
 
-def n_air_cm3(temp=TEMP, pres=PRES):
+def n_air_cm3(temp, pres):
     """Air number density [molec/cm³]."""
     return pres / (KB * temp) * 1.0e-6
 
 
-def rh_for_h2o_ppm(h2o_ppm, temp=TEMP, pres=PRES):
+def rh_for_h2o_ppm(h2o_ppm, temp, pres):
     """RH [fraction] that yields a given H2O volume mixing ratio, using the same
     Buck formula the SO2 chemistry uses internally:  x_h2o = rh * e_sat / P."""
     T_C = temp - 273.15
@@ -114,23 +155,22 @@ def gc_to_conc(gc_kg, mw):
 # Explicit volume-dilution parameterization V(t)/V0
 # =========================================================================
 
-def V_ratio(t_seconds):
-    """V(t)/V0 (vectorized). Piecewise, continuous at t=1e4 s:
+def V_ratio(t_seconds, cfg):
+    """V(t)/V0 (vectorized). Piecewise, continuous at t=v_t_break:
 
-        t^0.8                                  0 < t <= 1e4
-        1585 * exp{8.89e-9 * (t-1e4)^(3/2)}    t  > 1e4
+        t^v_early_exp                              0 < t <= v_t_break
+        v_prefactor * exp{v_k * (t-v_t_break)^v_late_exp}   t > v_t_break
 
     The plume starts at V0 (V/V0 = 1) at t=0 and only expands, so the early
-    branch is clamped to >= 1 (t^0.8 < 1 only for t < 1 s). This removes the
-    t->0 singularity (t^0.8 -> 0) that would otherwise give an infinite kdil
-    on the first step. Net effect is confined to the first second.
+    branch is clamped to >= 1 (removes the t->0 singularity giving infinite
+    kdil on the first step; effect confined to t < 1 s for exp 0.8).
     """
     t = np.asarray(t_seconds, dtype=np.float64)
     t_safe = np.maximum(t, 0.0)
-    early = np.maximum(1.0, np.power(np.maximum(t_safe, 1e-30), 0.8))
-    dt_late = np.maximum(t_safe - 1e4, 0.0)
-    late = 1585.0 * np.exp(8.89e-9 * np.power(dt_late, 1.5))
-    return np.where(t_safe <= 1e4, early, late)
+    early = np.maximum(1.0, np.power(np.maximum(t_safe, 1e-30), cfg.v_early_exp))
+    dt_late = np.maximum(t_safe - cfg.v_t_break, 0.0)
+    late = cfg.v_prefactor * np.exp(cfg.v_k * np.power(dt_late, cfg.v_late_exp))
+    return np.where(t_safe <= cfg.v_t_break, early, late)
 
 
 def build_time_schedule(max_hours):
@@ -146,36 +186,41 @@ def build_time_schedule(max_hours):
     return np.array(t_starts), np.array(dts)
 
 
-def build_kdil_array(t_starts, dts):
+def build_kdil_array(t_starts, dts, cfg):
     """Per-step kdil = ln(V(t+dt)/V(t)) / dt  [s^-1]  (>=0; volume only grows)."""
-    V0 = V_ratio(t_starts)
-    V1 = V_ratio(t_starts + dts)
+    V0 = V_ratio(t_starts, cfg)
+    V1 = V_ratio(t_starts + dts, cfg)
     ratio = np.clip(V1 / np.maximum(V0, 1e-300), 1e-300, None)
     return np.log(ratio) / dts
 
 
 # =========================================================================
-# Initial state
+# Initial state & background
 # =========================================================================
 
-def make_initial_state(nbins, xk):
-    """Red-circles ambient aerosol + SO2/H2SO4 gas seed. Returns (Nk, Mk, Gc)."""
-    Nk_np, Mk_np = get_initial_state(nbins=nbins, boxvol=BOXVOL, dist='redcircles',
-                                     to_ambient=True, temp=TEMP, pres=PRES)
-    so2_init_cm3 = SO2_INIT_PPT * 1e-12 * n_air_cm3()
+def _aerosol(cfg, dist, to_ambient, nbins):
+    if not dist:
+        return (np.zeros(nbins), np.zeros((nbins, ICOMP)))
+    return get_initial_state(nbins=nbins, boxvol=BOXVOL, dist=dist,
+                             to_ambient=to_ambient, temp=cfg.temp, pres=cfg.pres)
+
+
+def make_initial_state(cfg, nbins):
+    """Plume aerosol + SO2/H2SO4 gas seed. Returns (Nk, Mk, Gc, so2_init_cm3)."""
+    Nk_np, Mk_np = _aerosol(cfg, cfg.init_dist, cfg.init_to_ambient, nbins)
+    so2_init_cm3 = cfg.so2_init_ppt * 1e-12 * n_air_cm3(cfg.temp, cfg.pres)
     Gc = np.zeros(N_GAS_SPECIES)
-    Gc[SRTSO4] = conc_to_gc(H2SO4_INIT, MW_H2SO4)
+    Gc[SRTSO4] = conc_to_gc(cfg.h2so4_init, MW_H2SO4)
     Gc[SRTSO2] = conc_to_gc(so2_init_cm3, MW_SO2)
     return jnp.array(Nk_np), jnp.array(Mk_np), jnp.array(Gc), so2_init_cm3
 
 
-def make_background(nbins):
-    """Entrained-air background: red-circles ambient aerosol, SO2=0.01 ppb, H2SO4=0."""
-    Nk_bg_np, Mk_bg_np = get_initial_state(nbins=nbins, boxvol=BOXVOL, dist='redcircles',
-                                           to_ambient=True, temp=TEMP, pres=PRES)
-    bg_so2_cm3 = BG_SO2_PPB * 1e-9 * n_air_cm3()
+def make_background(cfg, nbins):
+    """Entrained-air background aerosol + gases. Returns (Nk_bg, Mk_bg, Gc_bg, bg_so2_cm3)."""
+    Nk_bg_np, Mk_bg_np = _aerosol(cfg, cfg.bg_dist, cfg.bg_to_ambient, nbins)
+    bg_so2_cm3 = cfg.bg_so2_ppb * 1e-9 * n_air_cm3(cfg.temp, cfg.pres)
     Gc_bg = np.zeros(N_GAS_SPECIES)
-    Gc_bg[SRTSO4] = BG_H2SO4
+    Gc_bg[SRTSO4] = cfg.bg_h2so4
     Gc_bg[SRTSO2] = conc_to_gc(bg_so2_cm3, MW_SO2)
     return jnp.array(Nk_bg_np), jnp.array(Mk_bg_np), jnp.array(Gc_bg), bg_so2_cm3
 
@@ -184,43 +229,46 @@ def make_background(nbins):
 # Run
 # =========================================================================
 
-def run(max_hours=240.0, nbins=NBINS, verbose=True):
+def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
+    cfg = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
+    if max_hours is None:
+        max_hours = cfg.max_hours
     xk = make_grid(nbins, XK0, 2.0)
-    rh = rh_for_h2o_ppm(H2O_PPM)
+    rh = rh_for_h2o_ppm(cfg.h2o_ppm, cfg.temp, cfg.pres)
 
     t_starts, dts = build_time_schedule(max_hours)
-    kdil_arr = build_kdil_array(t_starts, dts)
-    V_arr = V_ratio(t_starts)
+    kdil_arr = build_kdil_array(t_starts, dts, cfg)
+    V_arr = V_ratio(t_starts, cfg)
     nsteps = len(t_starts)
 
-    Nk, Mk, Gc, so2_init = make_initial_state(nbins, xk)
-    Nk_bg, Mk_bg, Gc_bg, bg_so2 = make_background(nbins)
+    Nk, Mk, Gc, so2_init = make_initial_state(cfg, nbins)
+    Nk_bg, Mk_bg, Gc_bg, bg_so2 = make_background(cfg, nbins)
+    N_init = float(jnp.sum(Nk)) / BOXVOL
+    N_bg   = float(jnp.sum(Nk_bg)) / BOXVOL
 
     if verbose:
         print('=' * 72)
-        print('Marianna SAI dilution — 10-day box model')
-        print(f'  T={TEMP}K  P={PRES/100:.0f}hPa  rh={rh:.4f} (=> {H2O_PPM} ppm H2O)')
-        print(f'  n_air={n_air_cm3():.3e} molec/cm³')
-        print(f'  SO2_init = {SO2_INIT_PPT:.2e} ppt = {so2_init:.3e} molec/cm³')
-        print(f'  H2SO4_init = {H2SO4_INIT:.0e}  OH = {OH_CONC:.0e}  fion = {FION}')
-        print(f'  bg: SO2={BG_SO2_PPB} ppb ({bg_so2:.2e} cm⁻³), H2SO4={BG_H2SO4:.0e}, '
-              f'aerosol=red-circles ambient (N={float(jnp.sum(Nk_bg))/BOXVOL:.2f}/cm³)')
-        print(f'  V0={V0_M3:.2e} m³  V(t)/V0: t^0.8 then 1585·exp(...)  '
-              f'-> V({max_hours:.0f}h)/V0={V_ratio(max_hours*3600.0):.3e}')
-        print(f'  steps={nsteps}  (dt=1s/10s/60s)  '
-              f'kdil∈[{kdil_arr.min():.2e},{kdil_arr.max():.2e}] s⁻¹')
+        print(f'Marianna scenario {cfg.id}: {cfg.name}')
+        print(f'  T={cfg.temp}K  P={cfg.pres/100:.0f}hPa  rh={rh:.4f} (=> {cfg.h2o_ppm} ppm H2O)')
+        print(f'  n_air={n_air_cm3(cfg.temp, cfg.pres):.3e} molec/cm³')
+        print(f'  SO2_init = {cfg.so2_init_ppt:.2e} ppt = {so2_init:.3e} molec/cm³')
+        print(f'  H2SO4_init = {cfg.h2so4_init:.0e}  OH = {cfg.oh_conc:.0e}  fion = {cfg.fion}')
+        print(f'  init aerosol: {cfg.init_dist} (N={N_init:.2f}/cm³)')
+        print(f'  bg: SO2={cfg.bg_so2_ppb} ppb ({bg_so2:.2e} cm⁻³), H2SO4={cfg.bg_h2so4:.0e}, '
+              f'aerosol={cfg.bg_dist or "clean"} (N={N_bg:.2f}/cm³)')
+        print(f'  V0={cfg.v0_m3:.2e} m³  V({max_hours:.0f}h)/V0={V_ratio(max_hours*3600.0, cfg):.3e}')
+        print(f'  steps={nsteps}  kdil∈[{kdil_arr.min():.2e},{kdil_arr.max():.2e}] s⁻¹')
         print('=' * 72)
 
     step_fn = make_step(
         ['so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'],
         cond_method='ppm_jit', nucl_scheme='ricco_dunne')
 
-    temp = jnp.float64(TEMP); pres = jnp.float64(PRES)
+    temp = jnp.float64(cfg.temp); pres = jnp.float64(cfg.pres)
     rhj = jnp.float64(rh); alpha = jnp.float64(ALPHA); boxvol = jnp.float64(BOXVOL)
-    oh = jnp.float64(OH_CONC); fion = jnp.float64(FION)
-    org = jnp.float64(NUC_ORG); nh3 = jnp.float64(NUC_NH3)
+    oh = jnp.float64(cfg.oh_conc); fion = jnp.float64(cfg.fion)
+    org = jnp.float64(cfg.nuc_org); nh3 = jnp.float64(cfg.nuc_nh3)
 
-    # Storage
     Nk_every     = np.zeros((nsteps, nbins))
     Mk_dry_every = np.zeros((nsteps, nbins))
     N_tot_every  = np.zeros(nsteps)
@@ -260,40 +308,50 @@ def run(max_hours=240.0, nbins=NBINS, verbose=True):
         print(f'  -> {wall:.1f}s wall, N_final={N_tot_every[-1]/BOXVOL:.3e}/cm³, '
               f'tracer_final={tracer_every[-1]:.3e}')
 
-    os.makedirs(_OUTDIR, exist_ok=True)
+    os.makedirs(cfg.outdir, exist_ok=True)
     np.savez_compressed(
-        _NPZ,
+        cfg.npz,
         t_seconds=t_starts, dts=dts,
         Nk_every=Nk_every, Mk_dry_every=Mk_dry_every,
         N_tot_every=N_tot_every, M_dry_every=M_dry_every,
         SO2_molec_cm3=SO2_every, SO4_molec_cm3=SO4_every,
         tracer_every=tracer_every, kdil_every=kdil_arr, V_ratio_every=V_arr,
         nbins=nbins, max_hours=max_hours, so2_init_molec_cm3=so2_init,
-        temp=TEMP, pres=PRES, rh=rh, boxvol=BOXVOL,
+        # Scenario identity + full input parameter set (for the param-summary plot)
+        scenario_id=cfg.id, scenario_name=cfg.name,
+        temp=cfg.temp, pres=cfg.pres, h2o_ppm=cfg.h2o_ppm, rh=rh, boxvol=BOXVOL,
+        oh_conc=cfg.oh_conc, fion=cfg.fion, nuc_org=cfg.nuc_org, nuc_nh3=cfg.nuc_nh3,
+        so2_init_ppt=cfg.so2_init_ppt, h2so4_init=cfg.h2so4_init,
+        init_dist=cfg.init_dist, init_to_ambient=cfg.init_to_ambient, N_init=N_init,
+        bg_dist=(cfg.bg_dist or 'clean'), bg_to_ambient=cfg.bg_to_ambient,
+        bg_so2_ppb=cfg.bg_so2_ppb, bg_so2_cm3=bg_so2, bg_h2so4=cfg.bg_h2so4, N_bg=N_bg,
+        v0_m3=cfg.v0_m3, v_early_exp=cfg.v_early_exp, v_t_break=cfg.v_t_break,
+        v_prefactor=cfg.v_prefactor, v_k=cfg.v_k, v_late_exp=cfg.v_late_exp,
+        V_final=float(V_ratio(max_hours*3600.0, cfg)),
+        n_air_cm3=n_air_cm3(cfg.temp, cfg.pres),
     )
     if verbose:
-        print(f'  saved: {_NPZ}')
-    return _NPZ
+        print(f'  saved: {cfg.npz}')
+    return cfg.npz
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--hours', type=float, default=240.0,
-                    help='Simulation duration in hours (default 240 = 10 days)')
+    ap.add_argument('--scenario', default='1', choices=sorted(SCENARIOS),
+                    help='Scenario id to run (default 1)')
+    ap.add_argument('--hours', type=float, default=None,
+                    help='Override duration in hours (default: scenario max_hours)')
     ap.add_argument('--nbins', type=int, default=NBINS)
     ap.add_argument('--plot-only', action='store_true',
                     help='Skip the run; regenerate plots from the existing NPZ')
     args = ap.parse_args()
+    cfg = SCENARIOS[args.scenario]
 
     if not args.plot_only:
-        run(max_hours=args.hours, nbins=args.nbins)
+        run(scenario=cfg, nbins=args.nbins, max_hours=args.hours)
 
-    # Plotting added in plot_marianna_dilution (next commit)
-    try:
-        from .plot_marianna_dilution import plot_all
-        plot_all(_NPZ)
-    except ImportError:
-        print('(plotting module not available yet)')
+    from .plot_marianna_dilution import plot_all
+    plot_all(cfg.npz)
 
 
 if __name__ == '__main__':
