@@ -105,11 +105,47 @@ _DATA2 = np.array([
     [2.0,      0  ],
 ])
 
+# Distribution 3 — Marianna observed size distribution, red OPEN circles
+# "observation, 220-230 ppbv" from Fig. S4 (CARMA box-model study; the figure
+# reports dN/dlogDp in cm^-3 STP). Digitized by eye from the provided figure.
+# An aged/sparse accumulation mode: near-zero below ~0.05 um, broad peak
+# ~94 cm^-3 STP near Dp ~0.12 um, tailing to 0 by ~0.6 um.
+# NOTE: eyeball digitization — VERIFY against the cross-check plot
+# (background_aerosol_distribution.py CLI) before trusting absolute N.
+_DATA3 = np.array([
+    [0.003,   0   ],
+    [0.010,   1   ],
+    [0.020,   1   ],
+    [0.030,   2   ],
+    [0.040,   4   ],
+    [0.050,   8   ],
+    [0.060,   18  ],
+    [0.070,   35  ],
+    [0.080,   55  ],
+    [0.090,   72  ],
+    [0.100,   85  ],
+    [0.110,   92  ],
+    [0.120,   94  ],   # peak
+    [0.130,   92  ],
+    [0.150,   82  ],
+    [0.180,   58  ],
+    [0.200,   42  ],
+    [0.250,   22  ],
+    [0.300,   11  ],
+    [0.400,   4   ],
+    [0.500,   1.5 ],
+    [0.600,   0.5 ],
+    [0.800,   0   ],
+    [1.000,   0   ],
+])
+
 _DIST_META = {
     'tabulated':  {'data': _DATA1, 'label': 'Dist 1 (nucleation-mode, peak 45 nm)',
                    'color1': '#1E88E5', 'color2': '#E53935'},
     'tabulated2': {'data': _DATA2, 'label': 'Dist 2 (accumulation-mode, peak 150 nm)',
                    'color1': '#43A047', 'color2': '#FB8C00'},
+    'redcircles': {'data': _DATA3, 'label': 'Marianna obs (red circles, 220-230 ppbv)',
+                   'color1': '#E53935', 'color2': '#1565C0'},
 }
 
 # =========================================================================
@@ -117,6 +153,21 @@ _DIST_META = {
 # =========================================================================
 DENS_SO4 = 1770.0    # kg/m³
 BOXVOL   = 1.0e6     # cm³ (1 m³)
+
+KB       = 1.380649e-23   # J/K  Boltzmann
+T_STP    = 273.15         # K    (0 °C)
+P_STP    = 101325.0       # Pa   (1 atm)
+
+
+def stp_to_ambient_factor(temp, pres):
+    """Multiplicative factor to convert a number concentration reported per
+    cm³ STP into a number concentration per cm³ at ambient (temp, pres).
+
+    n_ambient/n_STP = (pres/P_STP) * (T_STP/temp).  At 210 K / 5500 Pa this
+    is ~0.0706, i.e. ambient air is much thinner than STP so the actual
+    ambient concentration is lower than the STP-normalised value.
+    """
+    return (pres / P_STP) * (T_STP / temp)
 
 
 # =========================================================================
@@ -242,21 +293,106 @@ def plot_distribution(outdir=None):
 # Public accessor
 # =========================================================================
 
-def get_initial_state(nbins=40, boxvol=BOXVOL, dist='tabulated'):
+def get_initial_state(nbins=40, boxvol=BOXVOL, dist='tabulated',
+                      to_ambient=False, temp=None, pres=None):
     """Return Nk and Mk for the chosen distribution mapped onto nbins bins.
 
     Parameters
     ----------
     nbins : 40 or 80
     boxvol : cm³
-    dist : 'tabulated' or 'tabulated2'
+    dist : 'tabulated', 'tabulated2', or 'redcircles'
+    to_ambient : if True, the tabulated dN/dlogDp (assumed reported per cm³ STP)
+        is converted to per cm³ at ambient (temp, pres) by multiplying Nk and
+        Mk by ``stp_to_ambient_factor(temp, pres)``. Requires temp and pres.
+    temp, pres : ambient temperature [K] and pressure [Pa] (only used when
+        ``to_ambient=True``).
     """
     if nbins == 80:
         xk = np.array(make_grid_80bin())
     else:
         xk = np.array(make_grid(nbins, XK0, 2.0))
     Nk, Mk, _, _, _ = map_to_grid(xk, boxvol, dist=dist)
+    if to_ambient:
+        if temp is None or pres is None:
+            raise ValueError("to_ambient=True requires temp and pres")
+        f = stp_to_ambient_factor(temp, pres)
+        Nk = Nk * f
+        Mk = Mk * f
     return Nk, Mk
+
+
+# =========================================================================
+# Red-circles cross-check plot (STP vs ambient)
+# =========================================================================
+
+def plot_redcircles_crosscheck(temp=210.0, pres=5500.0, nbins=40, outdir=None):
+    """Cross-check the digitized 'redcircles' distribution against the figure.
+
+    Plots, side by side (linear-y and log-y):
+      - digitized dN/dlogDp points (STP)        [scatter]
+      - fine linear interpolation (STP)          [dashed]
+      - 40-bin TOMAS mapping (STP)               [step]
+      - 40-bin TOMAS mapping (ambient = STP*f)   [step]
+    so the user can confirm the extraction matches the original figure (STP)
+    and see the ambient values actually used in the simulation.
+    """
+    f = stp_to_ambient_factor(temp, pres)
+    data = _DIST_META['redcircles']['data']
+    dp_um, dndlogdp = data[:, 0], data[:, 1]
+
+    if nbins == 80:
+        xk = np.array(make_grid_80bin())
+    else:
+        xk = np.array(make_grid(nbins, XK0, 2.0))
+    _, _, Nk_stp, dp40, dlogDp40 = map_to_grid(xk, dist='redcircles')
+    N_orig_stp = float(np.trapezoid(dndlogdp, np.log10(dp_um)))
+    N_40_stp   = float(Nk_stp.sum())
+
+    dp_fine = np.logspace(np.log10(0.003), np.log10(2.0), 500)
+    dn_fine = dndlogdp_at(dp_fine, dist='redcircles')
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(
+        f'Red-circles (obs 220-230 ppbv) extraction cross-check\n'
+        f'STP->ambient factor f = (P/Pstp)(Tstp/T) = {f:.4f}  '
+        f'(T={temp:.0f}K, P={pres/100:.0f}hPa)',
+        fontsize=11, fontweight='bold')
+
+    for ax in axes:
+        ax.scatter(dp_um, dndlogdp, s=28, color='#E53935', zorder=5,
+                   label=f'digitized points (STP), N={N_orig_stp:.0f} cm⁻³')
+        ax.plot(dp_fine, dn_fine, color='#E53935', lw=1.2, ls='--', alpha=0.6,
+                label='linear interp (STP)')
+        ax.step(dp40, Nk_stp / dlogDp40, where='mid', color='#1565C0', lw=2.0,
+                label=f'40-bin map (STP), N={N_40_stp:.0f} cm⁻³')
+        ax.step(dp40, (Nk_stp * f) / dlogDp40, where='mid', color='#2E7D32',
+                lw=2.0, label=f'40-bin map (AMBIENT), N={N_40_stp*f:.1f} cm⁻³')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_xlabel('Dp [µm]')
+        ax.set_ylabel('dN/dlogDp [cm⁻³]')
+        ax.set_xlim(3e-3, 2.0)
+        ax.set_xscale('log')
+        ax.grid(True, alpha=0.25, which='both')
+        ax.legend(fontsize=8, frameon=False)
+
+    axes[0].set_title('Linear y-axis')
+    axes[1].set_title('Log y-axis')
+    axes[1].set_yscale('log')
+    axes[1].set_ylim(1e-2, 200)
+
+    fig.tight_layout()
+    if outdir is None:
+        outdir = os.path.join(os.path.dirname(__file__), 'results')
+    os.makedirs(outdir, exist_ok=True)
+    out = os.path.join(outdir, 'redcircles_crosscheck.png')
+    fig.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f'redcircles: N_STP(orig)={N_orig_stp:.1f}, N_STP(40bin)={N_40_stp:.1f}, '
+          f'N_ambient(40bin)={N_40_stp*f:.2f} cm⁻³')
+    print(f'Saved: {out}')
+    return out
 
 
 # =========================================================================
@@ -264,4 +400,14 @@ def get_initial_state(nbins=40, boxvol=BOXVOL, dist='tabulated'):
 # =========================================================================
 
 if __name__ == '__main__':
-    plot_distribution()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--redcircles', action='store_true',
+                    help='Plot the red-circles extraction cross-check (STP vs ambient)')
+    ap.add_argument('--temp', type=float, default=210.0)
+    ap.add_argument('--pres', type=float, default=5500.0)
+    args = ap.parse_args()
+    if args.redcircles:
+        plot_redcircles_crosscheck(temp=args.temp, pres=args.pres)
+    else:
+        plot_distribution()
