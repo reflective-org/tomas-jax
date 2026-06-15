@@ -50,10 +50,17 @@ ALPHA  = 1.0
 BOXVOL = 1.0e6          # cm³ (1 m³ reference cell)
 DENS_INIT = 1770.0      # kg/m³ sulfate
 
-PHASE1_END = 20 * 60        # 20 min
-PHASE2_END = 4 * 3600       # 4 h
-DT1, DT2, DT3 = 1.0, 10.0, 60.0
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
+
+# Default multi-resolution timestep schedule: list of (phase_end_seconds, dt).
+# Fine head resolves the operator-split stress while H2SO4 production is highest
+# (sub-second H2SO4 turnover in the first ~2 min); coarsens as dilution drops SO2.
+DEFAULT_DT_SCHEDULE = (
+    (120.0,    0.01),   # 0–2 min     : 0.01 s  (resolves H2SO4 transient)
+    (1200.0,   0.1),    # 2–20 min    : 0.1  s
+    (14400.0,  10.0),   # 20 min–4 h  : 10   s
+    (864000.0, 60.0),   # 4 h–10 d    : 60   s
+)
 
 _RESULTS_ROOT = os.path.join(os.path.dirname(__file__), 'results', 'marianna')
 
@@ -93,8 +100,18 @@ class ScenarioConfig:
     v_prefactor: float = 1585.0  # continuity: v_t_break ** v_early_exp
     v_k: float = 8.89e-9         # exp prefactor for late branch
     v_late_exp: float = 1.5      # (t - v_t_break) ** v_late_exp
+    # Numerics
+    dt_schedule: tuple = DEFAULT_DT_SCHEDULE   # ((phase_end_s, dt), ...)
     # Run length
     max_hours: float = 240.0
+
+    @property
+    def dt_schedule_str(self):
+        parts, t0 = [], 0.0
+        for t_end, dt in self.dt_schedule:
+            parts.append(f"{t0:g}-{t_end:g}s@{dt:g}s")
+            t0 = t_end
+        return ", ".join(parts)
 
     @property
     def slug(self):
@@ -173,16 +190,20 @@ def V_ratio(t_seconds, cfg):
     return np.where(t_safe <= cfg.v_t_break, early, late)
 
 
-def build_time_schedule(max_hours):
-    """Return (t_starts, dts) arrays for multi-resolution stepping."""
+def build_time_schedule(dt_schedule, max_hours):
+    """Return (t_starts, dts) arrays for multi-resolution stepping.
+
+    dt_schedule: iterable of (phase_end_seconds, dt). Phases run in order;
+    the final phase end is capped at max_hours.
+    """
     max_s = max_hours * 3600.0
     t, t_starts, dts = 0.0, [], []
-    while t < PHASE1_END - 1e-9 and t < max_s - 1e-9:
-        t_starts.append(t); dts.append(DT1); t += DT1
-    while t < PHASE2_END - 1e-9 and t < max_s - 1e-9:
-        t_starts.append(t); dts.append(DT2); t += DT2
-    while t < max_s - 1e-9:
-        t_starts.append(t); dts.append(DT3); t += DT3
+    for t_end, dt in dt_schedule:
+        end = min(t_end, max_s)
+        while t < end - 1e-9:
+            t_starts.append(t); dts.append(dt); t += dt
+        if t >= max_s - 1e-9:
+            break
     return np.array(t_starts), np.array(dts)
 
 
@@ -236,7 +257,7 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
     xk = make_grid(nbins, XK0, 2.0)
     rh = rh_for_h2o_ppm(cfg.h2o_ppm, cfg.temp, cfg.pres)
 
-    t_starts, dts = build_time_schedule(max_hours)
+    t_starts, dts = build_time_schedule(cfg.dt_schedule, max_hours)
     kdil_arr = build_kdil_array(t_starts, dts, cfg)
     V_arr = V_ratio(t_starts, cfg)
     nsteps = len(t_starts)
@@ -257,6 +278,7 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
         print(f'  bg: SO2={cfg.bg_so2_ppb} ppb ({bg_so2:.2e} cm⁻³), H2SO4={cfg.bg_h2so4:.0e}, '
               f'aerosol={cfg.bg_dist or "clean"} (N={N_bg:.2f}/cm³)')
         print(f'  V0={cfg.v0_m3:.2e} m³  V({max_hours:.0f}h)/V0={V_ratio(max_hours*3600.0, cfg):.3e}')
+        print(f'  dt schedule: {cfg.dt_schedule_str}')
         print(f'  steps={nsteps}  kdil∈[{kdil_arr.min():.2e},{kdil_arr.max():.2e}] s⁻¹')
         print('=' * 72)
 
@@ -329,6 +351,7 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
         v_prefactor=cfg.v_prefactor, v_k=cfg.v_k, v_late_exp=cfg.v_late_exp,
         V_final=float(V_ratio(max_hours*3600.0, cfg)),
         n_air_cm3=n_air_cm3(cfg.temp, cfg.pres),
+        dt_schedule_str=cfg.dt_schedule_str,
     )
     if verbose:
         print(f'  saved: {cfg.npz}')

@@ -103,10 +103,31 @@ The plume entrains ambient stratospheric air as it expands:
 - `Gc_bg[SRTSO2]` = **0.01 ppb** (≈1.90×10⁷ molec/cm³ at 210 K / 55 hPa).
 
 ## 4. Time stepping (multi-resolution)
-Captures the fast early expansion (`V/V₀ = t^0.8` rises steeply):
-- dt = 1 s   for 0 – 20 min
-- dt = 10 s  for 20 min – 4 h
-- dt = 60 s  for 4 h – 240 h
+Per-scenario `dt_schedule` (a `ScenarioConfig` field). Scenario 1 default —
+fine head to resolve the early operator-split stress, coarsening as dilution
+drops SO₂:
+- dt = **0.01 s** for 0 – 2 min   (resolves the sub-second H₂SO₄ transient)
+- dt = **0.1 s**  for 2 – 20 min
+- dt = **10 s**   for 20 min – 4 h
+- dt = **60 s**   for 4 h – 240 h
+(38,280 steps, ~50 s wall.)
+
+### Timestep convergence (why this is safe — and why a fine head)
+The huge SO₂ makes H₂SO₄ production ≈ 1.8×10⁹ molec/cm³/s, so H₂SO₄ turns over
+in **~0.01–0.06 s** — far faster than a 1 s step. A convergence test (dt over
+the whole 0–1200 s window at 1 / 0.2 / 0.05 s) showed:
+- **N_total, dry mass, and the per-bin size distribution are converged at dt=1 s**
+  (0.0 % difference by 12 h); the only transient is a ≤4.5 % per-bin wiggle in
+  the **first hour** that coagulation erases by 12 h.
+- The instantaneous **peak H₂SO₄ is dt-sensitive** (sampling of the sub-second
+  transient): 1.16×10⁸ at dt=1 s → 3.68×10⁸ at dt=0.05 s. It does **not** propagate
+  to the particles (nucleation is gas-clamped + adaptively sub-stepped; chemistry
+  & condensation are analytic).
+
+The fine head is therefore *conservative insurance* (accurate early-time
+diagnostics + robustness for harder scenarios), not a correctness requirement
+for the aerosol outputs. **Re-check convergence per scenario** when OH or SO₂
+(hence H₂SO₄ production) increase substantially.
 
 ## 5. Process step
 ```python

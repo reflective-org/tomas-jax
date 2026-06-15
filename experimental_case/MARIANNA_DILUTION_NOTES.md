@@ -48,7 +48,8 @@ that differ from scenario 1's defaults.
 | NH3, organics | 0 | binary nucleation only |
 | V(t)/V0 | t^0.8 (clamped ≥1), then 1585·exp{8.89e-9 (t−1e4)^1.5} | grows ×1.77×10⁶ over 10 d |
 | Dilution bg | aerosol = red-circles ambient; SO2 = 0.01 ppb; H2SO4 = 0 | |
-| Duration | 240 h (10 d), dt = 1/10/60 s | |
+| Duration | 240 h (10 d) | |
+| dt schedule | 0.01 s (0–2 min), 0.1 s (2–20 min), 10 s (20 min–4 h), 60 s (4 h–end) | per-scenario `dt_schedule`; fine head for H₂SO₄ stiffness. Aerosol outputs converge already at dt=1 s — see `docs/marianna_dilution.md` §4. |
 
 ## Result summary (240 h run)
 - Validation: inert tracer_final = 5.67×10⁻⁷ = 1/V(240h) = V0/V(t) (dilution wiring OK).

@@ -309,7 +309,8 @@ def plot_parameter_summary(d, figdir):
         ('Numerics', [
             ('Duration', f"{float(d['max_hours']):.0f} h ({float(d['max_hours'])/24:.1f} d)"),
             ('Size bins', f"{int(d['nbins'])} (TOMAS, 1.7 nm – 17.5 µm)"),
-            ('Time steps', f"{len(d['t_seconds'])}  (dt = 1/10/60 s)"),
+            ('Time steps', f"{len(d['t_seconds'])}"),
+            ('dt schedule', f"{g('dt_schedule_str', 'dt = 1/10/60 s')}"),
             ('Processes', 'SO2 chem → nucleation → coagulation → condensation → dilution'),
         ]),
     ]
