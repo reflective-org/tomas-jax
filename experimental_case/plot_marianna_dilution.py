@@ -109,29 +109,57 @@ def plot_gas_timeseries(d, figdir):
 
 
 # =========================================================================
-# 3. Banana plot
+# 3. Banana plots (number / surface area / volume)
 # =========================================================================
 
-def plot_banana(d, figdir):
+# qty -> (title, colorbar label, dyn-range floor relative to vmax)
+_BANANA_QTY = {
+    'dN': ('dN/dlogDp', 'dN/dlogDp [#/cm³]'),
+    'dA': ('dA/dlogDp', 'dA/dlogDp [m²/cm³]'),
+    'dV': ('dV/dlogDp', 'dV/dlogDp [µm³/cm³]'),
+}
+
+
+def _banana_field(d, qty):
+    """Return (t_h, dp_nm, field[nt, nbins]) for the chosen quantity."""
     nbins = int(d['nbins'])
-    dp_nm, dlogDp, _, _ = _grid_geometry(nbins)
+    dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(nbins)
     t_h = d['t_seconds'] / 3600.0
-    dNdlogDp = (d['Nk_every'] / BOXVOL) / dlogDp[np.newaxis, :]
+    Nk_cm3 = d['Nk_every'] / BOXVOL                      # [nt, nbins]
+    if qty == 'dN':
+        per = np.ones(nbins)
+    elif qty == 'dA':
+        per = np.pi * dp_m ** 2                          # m²/particle
+    elif qty == 'dV':
+        per = np.pi / 6.0 * dp_um ** 3                   # µm³/particle
+    else:
+        raise ValueError(f'Unknown banana qty {qty!r}')
+    field = (Nk_cm3 * per[np.newaxis, :]) / dlogDp[np.newaxis, :]
+    return t_h, dp_nm, field
+
+
+def plot_banana(d, figdir, qty='dN', fname=None):
+    title, cbar_label = _BANANA_QTY[qty]
+    t_h, dp_nm, field = _banana_field(d, qty)
+
+    vmax = float(np.nanmax(field))
+    if not np.isfinite(vmax) or vmax <= 0:
+        raise ValueError(f'Banana {qty}: no positive data to plot.')
+    vmin = vmax / 1e8   # fixed 8-decade dynamic range
 
     fig, ax = plt.subplots(figsize=(12, 5))
-    vmax = max(1e1, float(np.nanmax(dNdlogDp)))
     pcm = ax.pcolormesh(
-        t_h, dp_nm, dNdlogDp.T,
-        norm=mcolors.LogNorm(vmin=1.0, vmax=vmax),
+        t_h, dp_nm, field.T,
+        norm=mcolors.LogNorm(vmin=vmin, vmax=vmax),
         cmap='inferno', shading='nearest')
     ax.set_yscale('log'); ax.set_ylim(1, 2e4)
     ax.set_xlabel('Time [h]'); ax.set_ylabel('Dp [nm]')
-    ax.set_title(f'Banana — dN/dlogDp  (T={float(d["temp"]):.0f}K, '
+    ax.set_title(f'Banana — {title}  (T={float(d["temp"]):.0f}K, '
                  f'P={float(d["pres"])/100:.0f}hPa)')
     _despine(ax)
-    fig.colorbar(pcm, ax=ax, label='dN/dlogDp [#/cm³]', pad=0.01)
+    fig.colorbar(pcm, ax=ax, label=cbar_label, pad=0.01)
     fig.tight_layout()
-    out = os.path.join(figdir, 'banana.png')
+    out = os.path.join(figdir, fname or f'banana_{qty}.png')
     fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
     return out
 
@@ -230,7 +258,9 @@ def plot_all(npz_path):
     outs = []
     outs.append(plot_dilution_trend(d, figdir))
     outs.append(plot_gas_timeseries(d, figdir))
-    outs.append(plot_banana(d, figdir))
+    outs.append(plot_banana(d, figdir, 'dN', 'banana_dN.png'))
+    outs.append(plot_banana(d, figdir, 'dA', 'banana_dA.png'))
+    outs.append(plot_banana(d, figdir, 'dV', 'banana_dV.png'))
     outs.append(_plot_sizedist(d, figdir, 'dN', 'dN/dlogDp [#/cm³]', 'sizedist_dN.png'))
     outs.append(_plot_sizedist(d, figdir, 'dA', 'dA/dlogDp [m²/cm³]', 'sizedist_dA.png'))
     outs.append(_plot_sizedist(d, figdir, 'dV', 'dV/dlogDp [µm³/cm³]', 'sizedist_dV.png'))
