@@ -140,40 +140,55 @@ def plot_banana(d, figdir):
 # 4-6. Size / area / volume distributions at snapshot times
 # =========================================================================
 
+def _dist_from_Nk(Nk_row, dlogDp, dp_m, dp_um, label, t_h):
+    """Build the dN/dA/dV size distributions for a single Nk record."""
+    Nk_cm3 = Nk_row / BOXVOL
+    return {
+        'label': label,
+        't_h': t_h,
+        'dN': Nk_cm3 / dlogDp,
+        'dA': (np.pi * dp_m ** 2 * Nk_cm3) / dlogDp,        # m²/cm³
+        'dV': (np.pi / 6.0 * dp_um ** 3 * Nk_cm3) / dlogDp,  # µm³/cm³
+    }
+
+
 def _snapshots(d):
+    """Return (dp_nm, initial_snap, time_snaps). initial_snap is the t=0 state."""
     nbins = int(d['nbins'])
     dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(nbins)
     t_s = d['t_seconds']
     Nk_every = d['Nk_every']
     t_end = float(t_s[-1] + d['dts'][-1])   # total simulated time [s]
+
+    initial = _dist_from_Nk(Nk_every[0], dlogDp, dp_m, dp_um,
+                            label='t=0 (initial)', t_h=t_s[0] / 3600.0)
     snaps = []
     for h in SNAPSHOT_HOURS:
         if h * 3600.0 > t_end + 1.0:
             continue
         idx = _snap_index(t_s, h * 3600.0)
-        Nk_cm3 = Nk_every[idx] / BOXVOL
-        snaps.append({
-            'h': h,
-            't_h': t_s[idx] / 3600.0,
-            'dN': Nk_cm3 / dlogDp,
-            'dA': (np.pi * dp_m ** 2 * Nk_cm3) / dlogDp,        # m²/cm³
-            'dV': (np.pi / 6.0 * dp_um ** 3 * Nk_cm3) / dlogDp,  # µm³/cm³
-        })
-    return dp_nm, snaps
+        snaps.append(_dist_from_Nk(Nk_every[idx], dlogDp, dp_m, dp_um,
+                                   label=f'{h}h', t_h=t_s[idx] / 3600.0))
+    return dp_nm, initial, snaps
 
 
 def _plot_sizedist(d, figdir, qty, ylabel, fname):
-    dp_nm, snaps = _snapshots(d)
+    dp_nm, initial, snaps = _snapshots(d)
     if not snaps:
         raise ValueError(f'No snapshots available for {qty} — run longer.')
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle(f'{qty} size distribution — Marianna  '
                  f'(T={float(d["temp"]):.0f}K, P={float(d["pres"])/100:.0f}hPa)',
                  fontsize=11, fontweight='bold')
+    # Initial distribution as a black dashed reference curve
+    axes[0].loglog(dp_nm, np.maximum(initial[qty], 1e-30), color='k', lw=2.4,
+                   ls='--', label=initial['label'], zorder=6)
+    axes[1].semilogx(dp_nm, initial[qty], color='k', lw=2.4, ls='--',
+                     label=initial['label'], zorder=6)
     for s, c in zip(snaps, SNAP_COLORS):
-        lbl = f"{s['h']}h"
-        axes[0].loglog(dp_nm, np.maximum(s[qty], 1e-30), color=c, lw=1.8, label=lbl)
-        axes[1].semilogx(dp_nm, s[qty], color=c, lw=1.8, label=lbl)
+        axes[0].loglog(dp_nm, np.maximum(s[qty], 1e-30), color=c, lw=1.8,
+                       label=s['label'])
+        axes[1].semilogx(dp_nm, s[qty], color=c, lw=1.8, label=s['label'])
     for ax, title in zip(axes, ['log-y', 'linear-y']):
         _despine(ax)
         ax.set_xlabel('Dp [nm]'); ax.set_ylabel(ylabel); ax.set_title(title)
