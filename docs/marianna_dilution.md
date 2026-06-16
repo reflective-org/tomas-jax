@@ -6,24 +6,60 @@
 
 ## Scenarios
 
-Simulations are organized as **named scenarios** in a registry
-(`SCENARIOS` in `experimental_case/run_marianna_dilution.py`). Each is a
-`ScenarioConfig` (T, P, H2O, OH, SO2, H2SO4, fion, initial/background aerosol,
-dilution `V(t)/V0` params, duration). Outputs go to
-`results/marianna/<scenario_slug>/` (NPZ + `figs/`, including a
-`parameters.png` table of all inputs).
+Simulations are a **3 × 5 matrix** = 3 atmospheric **baselines** (B1/B2/B3) ×
+5 **dilution regimes** (D1–D5) = 15 runs, generated in
+`experimental_case/run_marianna_dilution.py` (`BASELINES` × `DILUTIONS` →
+`SCENARIOS`). Each run is a `ScenarioConfig`; outputs go to
+`results/marianna/<run_id>/` (NPZ + `figs/`, incl. a `parameters.png` table).
+**All runs use the digitized red-circles distribution for both initial and
+entrained-background aerosol** (per-baseline background-aerosol specs ignored),
+scaled STP→ambient per each baseline's T,P. Duration: **336 h (14 days)**.
 
-| id | name | notes |
-|----|------|-------|
-| 1 | Low Latitude, High Altitude, Clean Stratosphere | the run specified below (§2–§3) |
+### Baselines (only these vary)
+| id | name | T[K] | P[hPa] | C0 SO2[ppt] | OH[cm⁻³] | H2O[ppm] | H2SO4₀[cm⁻³] | ion[/cm³/s] |
+|----|------|------|--------|-------------|----------|----------|--------------|-------------|
+| B1 | Low Lat/High Alt, Clean | 210 | 55  | 2.9e9 | 5e5   | 4   | 1e5 | 30 |
+| B2 | High Lat/Low Alt, Clean | 210 | 120 | 1.3e9 | 2e5   | 4   | 5e4 | 40 |
+| B3 | Low Lat/High Alt, Geoeng| 213 | 55  | 2.9e9 | 3.5e5 | 5.5 | 4e5 | 30 |
 
-Run / add scenarios:
+B1 == the original "scenario 1"; **B1-D2 reproduces it exactly**.
+
+### Dilution regimes — V(t)/V0 (shared early `t^0.8` clamped ≥1, 1<t<1e4 s)
+| id | late branch | V/V0 @ 10 d |
+|----|-------------|-------------|
+| D1 Low Kz    | `1585·exp{2.811e-9 (t−1e4)^1.5}` | 1.5e4 |
+| D2 Med Kz    | `1585·exp{8.89e-9 (t−1e4)^1.5}`  | 1.8e6 (= scenario 1) |
+| D3 High Kz   | `1585·exp{2.811e-8 (t−1e4)^1.5}` | 6.8e12 |
+| D4 Burst     | 4-piece (t^0.8; D1-exp to 1.728e5 s; 1906·exp{2.811e-7 …} burst to 2.238e5 s; 4.83e4·exp{2.811e-9 …}) | 2.0e5 |
+| D5 Very High | `1585·exp{1.33e-7 (t−1e4)^1.5}`  | 6.1e48 (→ full dilution to bg) |
+
+Dilution is stored as **piecewise segments** (`('power',p)` / `('exp',A,k,t0,q)`)
+evaluated by `V_ratio`. **D4-vs-D2 check**: V/V0 matches to 1.000 at 7 days
+(the brief's claim), then diverges (D4 → 0.4 % of D2 by 14 d).
+
+### Run
 ```bash
-uv run python -m experimental_case.run_marianna_dilution --scenario 1
+uv run python -m experimental_case.run_marianna_dilution --scenario B1-D2   # one
+uv run python -m experimental_case.run_marianna_dilution --baseline B1       # one row
+uv run python -m experimental_case.run_marianna_dilution --all               # all 15 (40-bin)
+uv run python -m experimental_case.compare_matrix                            # 3×6 figures (40-bin)
+
+# 80-bin high-resolution set (sqrt2 grid), 11-way parallel, data-only:
+printf '%s\n' B1-D1 B1-D2 ... B3-D5 | xargs -P 11 -I{} sh -c \
+  'OMP_NUM_THREADS=1 XLA_FLAGS="--xla_cpu_multi_thread_eigen=false" \
+   uv run python -m experimental_case.run_marianna_dilution --scenario "$1" --nbins 80 --no-plot' _ {}
+uv run python -m experimental_case.compare_matrix --nbins 80                 # -> comparison_80bin/
 ```
-To add a scenario, append a `ScenarioConfig(id=..., name=..., <overrides>)` to
-`SCENARIOS`. Parameters §2–§3 are the defaults (scenario 1); a new scenario
-only overrides what differs.
+
+### Resolution (40 vs 80 bin)
+The matrix is run at both 40 bins (mass-doubling) and **80 bins** (√2 grid,
+`make_grid_80bin`; outputs in `<id>_80bin/`). Convergence (B1-D2):
+- **Dry mass: converged to 0.1 %** (resolution-independent — good).
+- **N_total: 40-bin over-counts by ~1 % (24 h) → ~16 % (240 h)** vs the finer
+  80-bin; r_eff differs ~5–7 %. So number/size carry a modest resolution
+  sensitivity (40-bin slightly coarse for the coagulation tail); 80-bin is the
+  reference. Comparison figures for each resolution: `comparison/` and
+  `comparison_80bin/` (`compare_dN/dA/dV/dN_perS.png`).
 
 ## 1. Context & goal
 

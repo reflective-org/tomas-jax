@@ -4,6 +4,42 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-06-16 (Tue) — Marianna run matrix (3×5) + RF diagnostics + 80-bin
+
+**Branch**: `feat/marianna-dilution`
+
+### Summary
+Extended the Marianna case to a **3 baselines × 5 dilution regimes** matrix
+(15 runs), at both 40- and 80-bin resolution, plus radiative-forcing diagnostics.
+
+### Changes
+- `run_marianna_dilution.py`: piecewise-segment dilution (`DILUTIONS` D1–D5,
+  incl. D4's 4-piece burst), `BASELINES` (B1/B2/B3), `make_matrix(nbins)` →
+  15 `ScenarioConfig`s (ids `B1-D2` …). nbins-aware grid (`make_grid_for`;
+  80-bin uses √2 `make_grid_80bin`) and output paths (`<id>` / `<id>_80bin`).
+  Runner CLI `--scenario/--baseline/--dilution/--all/--nbins/--no-plot`.
+- `rf_efficiency.py`: choice-(c) intensive RF — MSE, per-gram forcing [W/g,
+  all-sky ≈ Pinatubo], r_eff vs solar-broadband r_opt (~224 nm), global-mean
+  RF contribution, and sulfur-normalized efficacy (forcing per total S).
+- `compare_matrix.py`: four 3×6 comparison figures (dN, dA, dV, and dN÷total-S
+  dilution-corrected), per resolution.
+
+### Results
+- All 15 runs converge per regime: `tracer_final` depends only on dilution
+  (D1 1.6e-5 … D5 8e-80); N_final orders D1 > D4 > D2 > D3 ≳ D5(→bg).
+- B1-D2 reproduces the prior single scenario exactly.
+- D4≈D2 cumulative dilution at 7 d (brief's claim), diverges after.
+- Forcing efficiency peaks ~4.6 d; particles stay undersized (r_eff/r_opt<1);
+  only ~26 % of S converts to aerosol by day 10 (low OH + dilution).
+- **Resolution**: dry mass converged to 0.1 % (40 vs 80 bin); N_total differs
+  ~1–16 % (40-bin over-counts the coagulation tail), 80-bin is the reference.
+
+### Known issues / next steps
+- Per-run 80-bin figure suites not yet generated (data + comparison only;
+  regenerate with `--plot-only --nbins 80` if needed).
+
+---
+
 ## 2026-06-15 (Mon) — Marianna SAI dilution case (10-day box model)
 
 **Time**: afternoon PST

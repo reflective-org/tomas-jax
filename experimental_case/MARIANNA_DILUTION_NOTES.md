@@ -26,14 +26,15 @@ Outputs: `results/marianna/<scenario_slug>/data.npz` + figures in
 `.../figs/`: **parameters** (input table), dilution_trend, gas_timeseries,
 banana_dN/dA/dV, sizedist_dN/dA/dV (+ t=0 reference), ntotal.
 
-## Scenarios
-Defined in the `SCENARIOS` registry in `run_marianna_dilution.py`. To add one,
-append a `ScenarioConfig(id=..., name=..., <overrides>)`; only override fields
-that differ from scenario 1's defaults.
+## Run matrix (3 baselines × 5 dilutions = 15 runs, ids B1-D1 … B3-D5)
+Built by `make_matrix(nbins)` from `BASELINES` × `DILUTIONS` in
+`run_marianna_dilution.py`. Run at **40 and 80 bins** (336 h each). B1-D2 ==
+the original scenario 1. See `docs/marianna_dilution.md` for the full baseline/
+dilution tables, the D4-vs-D2 check, and the 40-vs-80 resolution result.
+All runs use red-circles for initial+background aerosol; bg SO2=0.01 ppb, H2SO4=0.
 
-| id | name |
-|----|------|
-| 1 | Low Latitude, High Altitude, Clean Stratosphere |
+Per-run params below are **B1** (the original scenario 1); B2/B3 differ in
+T/P/SO2/OH/H2O/H2SO4/ion (see docs).
 
 ## Chosen parameters (this run)
 | Param | Value | Notes |
