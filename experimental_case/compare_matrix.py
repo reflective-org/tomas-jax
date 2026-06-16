@@ -23,18 +23,20 @@ import matplotlib.pyplot as plt
 
 from tomas_jax.core.config import AVOGADRO, MW_H2SO4, NBINS
 from .run_marianna_dilution import BASELINES, DILUTIONS, make_matrix, _RESULTS_ROOT
-from .plot_marianna_dilution import _grid_geometry, _load, BOXVOL
+from .plot_marianna_dilution import (_grid_geometry, _load, BOXVOL,
+                                     TOL_BLUE, TOL_CYAN, TOL_GREEN, TOL_RED, TOL_PURPLE)
 
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
 MW_S = 32.06
 
-# D1..D5 styles (low→high Kz: blue→red; D4 burst dashed purple)
+# D1..D5 styles — Paul Tol bright (colorblind-safe). Cool→warm = low→high Kz;
+# D4 (burst) is the odd one out: purple + dashed.
 DIL_STYLE = {
-    'D1': ('#1565C0', '-',  'D1 Low Kz'),
-    'D2': ('#2E7D32', '-',  'D2 Med Kz'),
-    'D3': ('#EF6C00', '-',  'D3 High Kz'),
-    'D4': ('#8E24AA', '--', 'D4 Burst'),
-    'D5': ('#C62828', '-',  'D5 Very High'),
+    'D1': (TOL_BLUE,   '-',  'D1 Low Kz'),
+    'D2': (TOL_CYAN,   '-',  'D2 Med Kz'),
+    'D3': (TOL_GREEN,  '-',  'D3 High Kz'),
+    'D4': (TOL_PURPLE, '--', 'D4 Burst'),
+    'D5': (TOL_RED,    '-',  'D5 Very High'),
 }
 
 _QTY = {
@@ -105,11 +107,13 @@ def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=Non
     dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(nbins)
 
     fig, axes = plt.subplots(len(baselines), len(SNAPSHOT_HOURS),
-                             figsize=(22, 11), squeeze=False,
-                             sharex=True, sharey='row')
-    fig.suptitle(f'Dilution-regime comparison — {ylabel}  ({nbins}-bin, {yscale}-y)\n'
-                 f'rows = baselines, columns = time; curves = D1–D5',
-                 fontsize=14, fontweight='bold')
+                             figsize=(15, 8), squeeze=False,
+                             sharex=True, sharey='row', layout='constrained')
+    fig.suptitle(f'{ylabel}', fontsize=13, fontweight='bold')
+    fig.text(0.5, 0.945,
+             f'dilution-regime comparison · rows: baselines · columns: time · '
+             f'{nbins}-bin · {yscale}-y',
+             ha='center', va='top', fontsize=9.5, color='#555555')
 
     for r, bid in enumerate(baselines):
         row_max = 0.0
@@ -126,16 +130,16 @@ def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=Non
                 if y is None:
                     continue
                 ax.plot(dp_nm, np.maximum(y, 1e-300), color=color, ls=ls,
-                        lw=1.6, label=lbl if (r == 0 and c == 0) else None)
+                        label=lbl if (r == 0 and c == 0) else None)
                 row_max = max(row_max, float(np.max(y)))
             if r == 0:
                 ax.set_title(f'{h} h')
             if c == 0:
-                ax.set_ylabel(f'{bid} {BASELINES[bid]["name"]}\n{ylabel}', fontsize=8)
+                ax.set_ylabel(f'{bid}\n{BASELINES[bid]["name"]}',
+                              fontsize=9, fontweight='medium')
             ax.set_xlim(1, 2e4)
-            ax.grid(True, alpha=0.2, which='both')
-            ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-        # y-limits per row (sharey='row' propagates from the first axis)
+            ax.tick_params(labelsize=8)
+            ax.grid(True, alpha=0.25, which='both')
         if row_max > 0:
             if yscale == 'log':
                 axes[r][0].set_ylim(row_max * 3 / 1e8, row_max * 3)
@@ -145,16 +149,15 @@ def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=Non
         axes[-1][c].set_xlabel('Dp [nm]')
 
     handles, labels = axes[0][0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='upper right', ncol=5, frameon=False,
-               fontsize=10, bbox_to_anchor=(0.99, 0.99))
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.legend(handles, labels, loc='outside lower center', ncol=5,
+               handlelength=2.4, columnspacing=2.0)
 
     if outdir is None:
         sub = 'comparison' if nbins == NBINS else f'comparison_{nbins}bin'
         outdir = os.path.join(_RESULTS_ROOT, sub)
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, fname)
-    fig.savefig(out, dpi=140, bbox_inches='tight'); plt.close(fig)
+    fig.savefig(out, dpi=120); plt.close(fig)   # 15in×120 ≈ 1800px (viewable)
     return out
 
 

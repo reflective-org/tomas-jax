@@ -24,10 +24,31 @@ import matplotlib.colors as mcolors
 from tomas_jax.core.config import PI
 from .run_marianna_dilution import make_grid_for
 
+# ---- Global figure style (clean, consistent, colorblind-safe) ----------------
+matplotlib.rcParams.update({
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
+    'font.size': 11,
+    'axes.titlesize': 11, 'axes.titleweight': 'medium',
+    'axes.labelsize': 10.5,
+    'legend.fontsize': 9.5, 'legend.frameon': False,
+    'xtick.labelsize': 9, 'ytick.labelsize': 9,
+    'axes.spines.top': False, 'axes.spines.right': False,
+    'axes.linewidth': 0.8, 'axes.grid': True,
+    'grid.alpha': 0.25, 'grid.linewidth': 0.6,
+    'lines.linewidth': 1.8,
+    'figure.dpi': 110, 'savefig.dpi': 130, 'savefig.bbox': 'tight',
+    'mathtext.default': 'regular',
+})
+
 DENS_INIT = 1770.0   # kg/m³
 BOXVOL    = 1.0e6    # cm³
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
-SNAP_COLORS = ['#333333', '#1E88E5', '#43A047', '#E53935', '#FB8C00', '#8E24AA']
+
+# Paul Tol "bright" qualitative palette — colorblind-safe (all 7 mutually distinct)
+TOL_BRIGHT = ['#4477AA', '#66CCEE', '#228833', '#CCBB44', '#EE6677', '#AA3377', '#BBBBBB']
+TOL_BLUE, TOL_CYAN, TOL_GREEN, TOL_YELLOW, TOL_RED, TOL_PURPLE, TOL_GREY = TOL_BRIGHT
+SNAP_COLORS = TOL_BRIGHT[:6]   # 6 snapshot times (initial dist drawn separately, black)
 
 
 def _grid_geometry(nbins):

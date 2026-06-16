@@ -65,7 +65,9 @@ DEFAULT_DT_SCHEDULE = (
     (120.0,    0.01),   # 0–2 min     : 0.01 s  (resolves H2SO4 transient)
     (1200.0,   0.1),    # 2–20 min    : 0.1  s
     (14400.0,  10.0),   # 20 min–4 h  : 10   s
-    (1.30e6,   60.0),   # 4 h–>15 d   : 60   s  (covers up to 336 h runs)
+    (1.30e6,   20.0),   # 4 h–>15 d   : 20   s  (60s left visible step-to-step
+                        #              jaggedness, esp. at 80 bins; 20s cuts the
+                        #              operator-split |dN/N| ~4x. covers 336 h.)
 )
 
 _RESULTS_ROOT = os.path.join(os.path.dirname(__file__), 'results', 'marianna')
