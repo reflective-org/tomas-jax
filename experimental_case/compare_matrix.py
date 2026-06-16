@@ -78,33 +78,40 @@ def _load_runs(nbins=NBINS):
     return runs
 
 
-def plot_matrix_comparison(qty, nbins=NBINS, runs=None, outdir=None):
+def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=None):
+    """One 3×6 comparison figure. yscale='log' (loglog) or 'linear' (log-x,
+    linear-y). x-axis shared across the grid; y shared per row."""
     ylabel, fname = _QTY[qty]
+    if yscale == 'linear':
+        fname = fname.replace('.png', '_linear.png')
     runs = runs or _load_runs(nbins)
     baselines = list(BASELINES)
     dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(nbins)
 
     fig, axes = plt.subplots(len(baselines), len(SNAPSHOT_HOURS),
-                             figsize=(22, 11), squeeze=False)
-    fig.suptitle(f'Dilution-regime comparison — {ylabel}  ({nbins}-bin)\n'
+                             figsize=(22, 11), squeeze=False,
+                             sharex=True, sharey='row')
+    fig.suptitle(f'Dilution-regime comparison — {ylabel}  ({nbins}-bin, {yscale}-y)\n'
                  f'rows = baselines, columns = time; curves = D1–D5',
                  fontsize=14, fontweight='bold')
 
     for r, bid in enumerate(baselines):
-        row_vals = []
+        row_max = 0.0
         for c, h in enumerate(SNAPSHOT_HOURS):
             ax = axes[r][c]
+            ax.set_xscale('log')
+            if yscale == 'log':
+                ax.set_yscale('log')
             for did, (color, ls, lbl) in DIL_STYLE.items():
-                rid = f'{bid}-{did}'
-                d = runs.get(rid)
+                d = runs.get(f'{bid}-{did}')
                 if d is None:
                     continue
                 y = _snap_distribution(d, qty, dp_m, dp_um, dlogDp, h * 3600.0)
                 if y is None:
                     continue
-                ax.loglog(dp_nm, np.maximum(y, 1e-300), color=color, ls=ls,
-                          lw=1.6, label=lbl if (r == 0 and c == 0) else None)
-                row_vals.append(np.max(y))
+                ax.plot(dp_nm, np.maximum(y, 1e-300), color=color, ls=ls,
+                        lw=1.6, label=lbl if (r == 0 and c == 0) else None)
+                row_max = max(row_max, float(np.max(y)))
             if r == 0:
                 ax.set_title(f'{h} h')
             if c == 0:
@@ -112,11 +119,12 @@ def plot_matrix_comparison(qty, nbins=NBINS, runs=None, outdir=None):
             ax.set_xlim(1, 2e4)
             ax.grid(True, alpha=0.2, which='both')
             ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
-        # shared y-limits per row
-        if row_vals:
-            ymax = max(row_vals) * 3
-            for c in range(len(SNAPSHOT_HOURS)):
-                axes[r][c].set_ylim(ymax / 1e8, ymax)
+        # y-limits per row (sharey='row' propagates from the first axis)
+        if row_max > 0:
+            if yscale == 'log':
+                axes[r][0].set_ylim(row_max * 3 / 1e8, row_max * 3)
+            else:
+                axes[r][0].set_ylim(0, row_max * 1.05)
     for c in range(len(SNAPSHOT_HOURS)):
         axes[-1][c].set_xlabel('Dp [nm]')
 
@@ -134,9 +142,11 @@ def plot_matrix_comparison(qty, nbins=NBINS, runs=None, outdir=None):
     return out
 
 
-def plot_all_comparisons(nbins=NBINS, outdir=None):
+def plot_all_comparisons(nbins=NBINS, yscale='both', outdir=None):
     runs = _load_runs(nbins)
-    outs = [plot_matrix_comparison(q, nbins=nbins, runs=runs, outdir=outdir) for q in _QTY]
+    scales = ['log', 'linear'] if yscale == 'both' else [yscale]
+    outs = [plot_matrix_comparison(q, nbins=nbins, yscale=s, runs=runs, outdir=outdir)
+            for s in scales for q in _QTY]
     print(f'Saved {nbins}-bin comparison figures:')
     for o in outs:
         print(f'  {o}')
@@ -147,5 +157,6 @@ if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument('--nbins', type=int, default=NBINS)
+    ap.add_argument('--yscale', default='both', choices=['log', 'linear', 'both'])
     args = ap.parse_args()
-    plot_all_comparisons(args.nbins)
+    plot_all_comparisons(args.nbins, yscale=args.yscale)

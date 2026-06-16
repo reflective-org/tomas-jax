@@ -50,6 +50,9 @@ printf '%s\n' B1-D1 B1-D2 ... B3-D5 | xargs -P 11 -I{} sh -c \
    uv run python -m experimental_case.run_marianna_dilution --scenario "$1" --nbins 80 --no-plot' _ {}
 uv run python -m experimental_case.compare_matrix --nbins 80                 # -> comparison_80bin/
 ```
+Each `compare_matrix` run emits **log-y and linear-y** variants (`--yscale
+log|linear|both`, default both; `*_linear.png`). All panels share the x-axis;
+y is shared per row (log: 8-decade window; linear: 0→row-max).
 
 ### Resolution (40 vs 80 bin)
 The matrix is run at both 40 bins (mass-doubling) and **80 bins** (√2 grid,
