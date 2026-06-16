@@ -171,6 +171,30 @@ smaller than the previous one (4.71×10⁹ m³).
 5. **N_total** vs time.
 - All time series saved to NPZ for re-plotting (`--plot-only`).
 
+### Radiative-forcing diagnostics (`rf_efficiency.py`) — choice (c)
+Box-honest, geometry-free RF metrics (the box is 0-D = the plume only; absolute
+W/m² needs a global-spreading assumption the box does not contain):
+- `rf_efficiency.png` — **MSE [m²/g]** and **per-gram forcing efficiency [W/g, all-sky]**
+  vs time. These are ratios (scattering / dry mass), so they are
+  **dilution-invariant** — pure size-distribution physics. "W/g" = global-mean
+  forcing power per gram of aerosol (optically thin). All-sky ≈ −85 to −95 W/g,
+  matching Pinatubo (~−89 W/g) — a validation.
+- `rf_and_radius.png` — global-mean RF contribution of one plume (× N for a
+  campaign), **effective radius** `r_eff = ⟨r³⟩/⟨r²⟩`, and **r_eff / r_opt**
+  where `r_opt ≈ 224 nm` (Dp 448 nm) maximizes per-mass forcing (∝ β·Q_sca/r),
+  computed **solar-broadband** (matches the literature/codebase ~400-440 nm band).
+- `sulfur_normalized.png` — **dilution-normalized** metrics (per total sulfur
+  [SO2 + gas H2SO4 + particulate SO4], which is conserved by chemistry and lost
+  only to dilution): the gas→particle **conversion fraction** and the **forcing
+  per unit sulfur [W/g-S]** (≈ dRF/dS in the optically-thin regime). Unlike the
+  per-aerosol efficiency, this rises monotonically (captures conversion).
+- **Key results (scenario 1):** (1) `r_eff/r_opt < 1` throughout (peak ~0.63 at
+  ~4.6 d) — particles stay **undersized**; forcing is limited by *under-growth*,
+  not over-coagulation. (2) Only ~**26 % of injected sulfur converts to aerosol**
+  by day 10 (low OH + dilution strip SO2 before it oxidizes); forcing-per-S is
+  still rising at day 10.
+- **2 wk (336 h) is beyond the 10-day run** — extend `max_hours` to capture it.
+
 ## 9. Files
 - `experimental_case/run_marianna_dilution.py` — main script (new).
 - `experimental_case/background_aerosol_distribution.py` — digitize→bin helper (ported; red-circles dist added).

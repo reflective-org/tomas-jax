@@ -365,6 +365,11 @@ def plot_all(npz_path):
     outs.append(_plot_sizedist(d, figdir, 'dA', 'dA/dlogDp [m²/cm³]', 'sizedist_dA.png'))
     outs.append(_plot_sizedist(d, figdir, 'dV', 'dV/dlogDp [µm³/cm³]', 'sizedist_dV.png'))
     outs.append(plot_ntotal(d, figdir))
+    from .rf_efficiency import (plot_rf_efficiency, plot_rf_and_radius,
+                                plot_sulfur_normalized)
+    outs.append(plot_rf_efficiency(d, figdir))
+    outs.append(plot_rf_and_radius(d, figdir))
+    outs.append(plot_sulfur_normalized(d, figdir))
     print('Saved figures:')
     for o in outs:
         print(f'  {o}')
