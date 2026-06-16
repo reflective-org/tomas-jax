@@ -62,7 +62,8 @@ The matrix is run at both 40 bins (mass-doubling) and **80 bins** (√2 grid,
   80-bin; r_eff differs ~5–7 %. So number/size carry a modest resolution
   sensitivity (40-bin slightly coarse for the coagulation tail); 80-bin is the
   reference. Comparison figures for each resolution: `comparison/` and
-  `comparison_80bin/` (`compare_dN/dA/dV/dN_perS.png`).
+  `comparison_80bin/` — `compare_{dN,dA,dV}.png` (raw) and the dilution-corrected
+  `compare_{dN,dA,dV}_perS.png` (÷ total S), each in log-y and `_linear` variants.
 
 ## 1. Context & goal
 

@@ -42,28 +42,44 @@ _QTY = {
     'dA':      ('dA/dlogDp [m²/cm³]',       'compare_dA.png'),
     'dV':      ('dV/dlogDp [µm³/cm³]',      'compare_dV.png'),
     'dN_perS': ('dN/dlogDp ÷ total S [per molec-S]', 'compare_dN_perS.png'),
+    'dA_perS': ('dA/dlogDp ÷ total S [m²·cm³/cm³ per molec-S]', 'compare_dA_perS.png'),
+    'dV_perS': ('dV/dlogDp ÷ total S [µm³ per molec-S]', 'compare_dV_perS.png'),
 }
 
 
+def _base_dist(base, Nk_cm3, dp_m, dp_um, dlogDp):
+    if base == 'dN':
+        return Nk_cm3 / dlogDp
+    if base == 'dA':
+        return (np.pi * dp_m ** 2 * Nk_cm3) / dlogDp        # m²/cm³
+    if base == 'dV':
+        return (np.pi / 6.0 * dp_um ** 3 * Nk_cm3) / dlogDp  # µm³/cm³
+    raise ValueError(base)
+
+
+def _total_sulfur(d, i):
+    """Total S concentration [molec/cm³] = SO2 + gas H2SO4 + particulate SO4."""
+    SO2 = float(d['SO2_molec_cm3'][i])
+    H2SO4g = float(d['SO4_molec_cm3'][i])
+    aer = float(d['M_dry_every'][i]) * 1e3 / MW_H2SO4 * AVOGADRO / 1e6
+    return max(SO2 + H2SO4g + aer, 1e-300)
+
+
 def _snap_distribution(d, qty, dp_m, dp_um, dlogDp, t_target_s):
-    """Per-bin distribution of `qty` at the snapshot nearest t_target_s."""
+    """Per-bin distribution of `qty` at the snapshot nearest t_target_s.
+
+    `qty` is dN/dA/dV, optionally suffixed '_perS' to normalize by total
+    sulfur concentration (dilution-corrected)."""
     t_s = d['t_seconds']
     if t_target_s > t_s[-1] + d['dts'][-1] + 1.0:
         return None
     i = int(np.argmin(np.abs(t_s - t_target_s)))
     Nk_cm3 = d['Nk_every'][i] / BOXVOL
-    if qty == 'dN':
-        y = Nk_cm3 / dlogDp
-    elif qty == 'dA':
-        y = (np.pi * dp_m ** 2 * Nk_cm3) / dlogDp
-    elif qty == 'dV':
-        y = (np.pi / 6.0 * dp_um ** 3 * Nk_cm3) / dlogDp
-    elif qty == 'dN_perS':
-        SO2 = float(d['SO2_molec_cm3'][i])
-        H2SO4g = float(d['SO4_molec_cm3'][i])
-        aer = float(d['M_dry_every'][i]) * 1e3 / MW_H2SO4 * AVOGADRO / 1e6
-        S_tot = max(SO2 + H2SO4g + aer, 1e-300)
-        y = (Nk_cm3 / dlogDp) / S_tot
+    per_s = qty.endswith('_perS')
+    base = qty[:-5] if per_s else qty
+    y = _base_dist(base, Nk_cm3, dp_m, dp_um, dlogDp)
+    if per_s:
+        y = y / _total_sulfur(d, i)
     return y
 
 
