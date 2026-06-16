@@ -143,14 +143,18 @@ The plume entrains ambient stratospheric air as it expands:
 - `Gc_bg[SRTSO2]` = **0.01 ppb** (≈1.90×10⁷ molec/cm³ at 210 K / 55 hPa).
 
 ## 4. Time stepping (multi-resolution)
-Per-scenario `dt_schedule` (a `ScenarioConfig` field). Scenario 1 default —
-fine head to resolve the early operator-split stress, coarsening as dilution
-drops SO₂:
+Per-scenario `dt_schedule` (a `ScenarioConfig` field), fine head to resolve the
+early operator-split stress, coarsening as dilution drops SO₂:
 - dt = **0.01 s** for 0 – 2 min   (resolves the sub-second H₂SO₄ transient)
 - dt = **0.1 s**  for 2 – 20 min
 - dt = **10 s**   for 20 min – 4 h
-- dt = **60 s**   for 4 h – 240 h
-(38,280 steps, ~50 s wall.)
+- dt = **20 s**   for 4 h – end    (~84k steps for 336 h)
+
+The late-phase dt is **20 s, not 60 s**: at 60 s the operator-split between
+nucleation/coagulation/condensation left visible step-to-step jaggedness
+(median |dN/N| ≈ 8 % in the active 4–72 h window, worse at 80 bins where the √2
+grid resolves the noise the 40-bin grid blurs). 20 s cuts it ~4× (median ≈ 2 %;
+0.2–0.3 % over the full run) and smooths the banana striations.
 
 ### Timestep convergence (why this is safe — and why a fine head)
 The huge SO₂ makes H₂SO₄ production ≈ 1.8×10⁹ molec/cm³/s, so H₂SO₄ turns over

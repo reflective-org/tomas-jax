@@ -109,11 +109,11 @@ def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=Non
     fig, axes = plt.subplots(len(baselines), len(SNAPSHOT_HOURS),
                              figsize=(15, 8), squeeze=False,
                              sharex=True, sharey='row', layout='constrained')
-    fig.suptitle(f'{ylabel}', fontsize=13, fontweight='bold')
-    fig.text(0.5, 0.945,
-             f'dilution-regime comparison · rows: baselines · columns: time · '
-             f'{nbins}-bin · {yscale}-y',
-             ha='center', va='top', fontsize=9.5, color='#555555')
+    fig.suptitle(
+        f'{ylabel}\n'
+        f'dilution-regime comparison · rows: baselines · columns: time · '
+        f'{nbins}-bin · {yscale}-y',
+        fontsize=12, fontweight='bold')
 
     for r, bid in enumerate(baselines):
         row_max = 0.0
