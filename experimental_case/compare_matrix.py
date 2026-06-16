@@ -21,8 +21,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from tomas_jax.core.config import AVOGADRO, MW_H2SO4
-from .run_marianna_dilution import BASELINES, DILUTIONS, SCENARIOS, _RESULTS_ROOT
+from tomas_jax.core.config import AVOGADRO, MW_H2SO4, NBINS
+from .run_marianna_dilution import BASELINES, DILUTIONS, make_matrix, _RESULTS_ROOT
 from .plot_marianna_dilution import _grid_geometry, _load, BOXVOL
 
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
@@ -67,10 +67,10 @@ def _snap_distribution(d, qty, dp_m, dp_um, dlogDp, t_target_s):
     return y
 
 
-def _load_runs():
+def _load_runs(nbins=NBINS):
     """Load the 15 NPZs into {run_id: dict}; skip any missing (with a warning)."""
     runs = {}
-    for rid, cfg in SCENARIOS.items():
+    for rid, cfg in make_matrix(nbins).items():
         if os.path.exists(cfg.npz):
             runs[rid] = _load(cfg.npz)
         else:
@@ -78,15 +78,15 @@ def _load_runs():
     return runs
 
 
-def plot_matrix_comparison(qty, runs=None, outdir=None):
+def plot_matrix_comparison(qty, nbins=NBINS, runs=None, outdir=None):
     ylabel, fname = _QTY[qty]
-    runs = runs or _load_runs()
+    runs = runs or _load_runs(nbins)
     baselines = list(BASELINES)
-    dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(40)
+    dp_nm, dlogDp, dp_m, dp_um = _grid_geometry(nbins)
 
     fig, axes = plt.subplots(len(baselines), len(SNAPSHOT_HOURS),
                              figsize=(22, 11), squeeze=False)
-    fig.suptitle(f'Dilution-regime comparison — {ylabel}\n'
+    fig.suptitle(f'Dilution-regime comparison — {ylabel}  ({nbins}-bin)\n'
                  f'rows = baselines, columns = time; curves = D1–D5',
                  fontsize=14, fontweight='bold')
 
@@ -126,21 +126,26 @@ def plot_matrix_comparison(qty, runs=None, outdir=None):
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     if outdir is None:
-        outdir = os.path.join(_RESULTS_ROOT, 'comparison')
+        sub = 'comparison' if nbins == NBINS else f'comparison_{nbins}bin'
+        outdir = os.path.join(_RESULTS_ROOT, sub)
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, fname)
     fig.savefig(out, dpi=140, bbox_inches='tight'); plt.close(fig)
     return out
 
 
-def plot_all_comparisons(outdir=None):
-    runs = _load_runs()
-    outs = [plot_matrix_comparison(q, runs=runs, outdir=outdir) for q in _QTY]
-    print('Saved comparison figures:')
+def plot_all_comparisons(nbins=NBINS, outdir=None):
+    runs = _load_runs(nbins)
+    outs = [plot_matrix_comparison(q, nbins=nbins, runs=runs, outdir=outdir) for q in _QTY]
+    print(f'Saved {nbins}-bin comparison figures:')
     for o in outs:
         print(f'  {o}')
     return outs
 
 
 if __name__ == '__main__':
-    plot_all_comparisons()
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--nbins', type=int, default=NBINS)
+    args = ap.parse_args()
+    plot_all_comparisons(args.nbins)

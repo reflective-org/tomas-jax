@@ -53,7 +53,8 @@ def _get_mie(nbins):
     # wavelength. The forcing optimum is ~224 nm radius (Dp 448 nm) under this,
     # matching the literature/codebase ~400-440 nm RF diameter band.
     if nbins not in _MIE:
-        xk = np.array(make_grid(nbins, XK0, 2.0))
+        from .run_marianna_dilution import make_grid_for
+        xk = np.array(make_grid_for(nbins))
         _MIE[nbins] = precompute_mie_properties(
             xk, density=DENSITY_H2SO4_SOLUTION, refindex=REFINDEX_SULFATE,
             spectral=True, n_wavelengths=30)

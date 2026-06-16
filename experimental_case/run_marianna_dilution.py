@@ -33,8 +33,14 @@ from tomas_jax.core.config import (
     NBINS, ICOMP, N_GAS_SPECIES,
     SRTSO4, SRTSO2, SRTH2O,
     MW_H2SO4, MW_SO2, AVOGADRO, PI,
-    make_grid, XK0, KB,
+    make_grid, make_grid_80bin, XK0, KB,
 )
+
+
+def make_grid_for(nbins):
+    """Correct TOMAS grid for the requested resolution: the 80-bin grid uses a
+    sqrt(2) mass ratio (make_grid_80bin), the 40-bin default uses mass-doubling."""
+    return make_grid_80bin() if nbins == 80 else make_grid(nbins, XK0, 2.0)
 from tomas_jax.solvers.condensation import make_step
 from tomas_jax.physics.so2_chemistry import (
     _BUCK_A, _BUCK_B, _BUCK_C, _BUCK_D,
@@ -147,6 +153,7 @@ class ScenarioConfig:
     baseline: str = ''           # e.g. 'B1'
     dilution_id: str = ''        # e.g. 'D2'
     # Numerics
+    nbins: int = NBINS           # 40 (default) or 80 (high-res, sqrt2 grid)
     dt_schedule: tuple = DEFAULT_DT_SCHEDULE   # ((phase_end_s, dt), ...)
     # Run length
     max_hours: float = 240.0
@@ -165,7 +172,8 @@ class ScenarioConfig:
 
     @property
     def slug(self):
-        return self.id   # e.g. 'B1-D2' -> results/marianna/B1-D2/
+        # 40-bin: 'B1-D2'; 80-bin: 'B1-D2_80bin' (so resolutions never collide)
+        return self.id if self.nbins == NBINS else f"{self.id}_{self.nbins}bin"
 
     @property
     def outdir(self):
@@ -198,7 +206,8 @@ BASELINES = {
 MATRIX_MAX_HOURS = 336.0   # 14 days
 
 
-def _make_matrix():
+def make_matrix(nbins=NBINS):
+    """Build the 15 baseline×dilution ScenarioConfigs at the given resolution."""
     out = {}
     for bid, b in BASELINES.items():
         for did, dd in DILUTIONS.items():
@@ -210,12 +219,12 @@ def _make_matrix():
                 temp=b['temp'], pres=b['pres'], h2o_ppm=b['h2o_ppm'],
                 oh_conc=b['oh_conc'], fion=b['fion'],
                 so2_init_ppt=b['so2_init_ppt'], h2so4_init=b['h2so4_init'],
-                dilution=dd['segments'], max_hours=MATRIX_MAX_HOURS,
+                dilution=dd['segments'], nbins=nbins, max_hours=MATRIX_MAX_HOURS,
             )
     return out
 
 
-SCENARIOS = _make_matrix()   # keys: 'B1-D1' ... 'B3-D5'
+SCENARIOS = make_matrix(NBINS)   # 40-bin default; keys 'B1-D1' ... 'B3-D5'
 
 
 # =========================================================================
@@ -336,11 +345,12 @@ def make_background(cfg, nbins):
 # Run
 # =========================================================================
 
-def run(scenario='B1-D2', nbins=NBINS, max_hours=None, verbose=True):
+def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
     cfg = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
+    nbins = cfg.nbins if nbins is None else nbins
     if max_hours is None:
         max_hours = cfg.max_hours
-    xk = make_grid(nbins, XK0, 2.0)
+    xk = make_grid_for(nbins)
     rh = rh_for_h2o_ppm(cfg.h2o_ppm, cfg.temp, cfg.pres)
 
     t_starts, dts = build_time_schedule(cfg.dt_schedule, max_hours)
@@ -445,17 +455,16 @@ def run(scenario='B1-D2', nbins=NBINS, max_hours=None, verbose=True):
     return cfg.npz
 
 
-def select_scenarios(scenario=None, baseline=None, dilution=None, run_all=False):
-    """Resolve which scenario ids to run from the CLI selectors."""
+def select_ids(matrix, scenario=None, baseline=None, dilution=None, run_all=False):
+    """Resolve which run ids to run from the CLI selectors."""
     if scenario:
         return [scenario]
-    ids = list(SCENARIOS)
+    ids = list(matrix)
     if run_all and not (baseline or dilution):
         return ids
-    sel = [rid for rid in ids
-           if (baseline is None or SCENARIOS[rid].baseline == baseline)
-           and (dilution is None or SCENARIOS[rid].dilution_id == dilution)]
-    return sel
+    return [rid for rid in ids
+            if (baseline is None or matrix[rid].baseline == baseline)
+            and (dilution is None or matrix[rid].dilution_id == dilution)]
 
 
 def main():
@@ -469,22 +478,25 @@ def main():
     ap.add_argument('--all', action='store_true', help='Run the full 15-run matrix')
     ap.add_argument('--hours', type=float, default=None,
                     help='Override duration in hours (default: scenario max_hours)')
-    ap.add_argument('--nbins', type=int, default=NBINS)
+    ap.add_argument('--nbins', type=int, default=NBINS, help='40 (default) or 80')
     ap.add_argument('--plot-only', action='store_true',
                     help='Skip the runs; regenerate per-run plots from existing NPZs')
+    ap.add_argument('--no-plot', action='store_true',
+                    help='Run the sim and write the NPZ, but skip per-run plotting '
+                         '(for parallel batch runs; plot later with --plot-only)')
     args = ap.parse_args()
 
-    ids = select_scenarios(args.scenario, args.baseline, args.dilution, args.all)
-    if not ids:
-        ids = ['B1-D2']
-    from .plot_marianna_dilution import plot_all
+    matrix = make_matrix(args.nbins)
+    ids = select_ids(matrix, args.scenario, args.baseline, args.dilution, args.all) or ['B1-D2']
     for i, rid in enumerate(ids, 1):
-        cfg = SCENARIOS[rid]
+        cfg = matrix[rid]
         if len(ids) > 1:
-            print(f'\n##### [{i}/{len(ids)}] {rid} #####')
+            print(f'\n##### [{i}/{len(ids)}] {rid} ({cfg.nbins}-bin) #####')
         if not args.plot_only:
-            run(scenario=cfg, nbins=args.nbins, max_hours=args.hours)
-        plot_all(cfg.npz)
+            run(scenario=cfg, max_hours=args.hours)
+        if not args.no_plot:
+            from .plot_marianna_dilution import plot_all
+            plot_all(cfg.npz)
 
 
 if __name__ == '__main__':

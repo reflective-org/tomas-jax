@@ -21,7 +21,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
-from tomas_jax.core.config import make_grid, XK0, PI
+from tomas_jax.core.config import PI
+from .run_marianna_dilution import make_grid_for
 
 DENS_INIT = 1770.0   # kg/m³
 BOXVOL    = 1.0e6    # cm³
@@ -30,8 +31,8 @@ SNAP_COLORS = ['#333333', '#1E88E5', '#43A047', '#E53935', '#FB8C00', '#8E24AA']
 
 
 def _grid_geometry(nbins):
-    """Return (dp_nm, dlogDp, dp_m, dp_um) for the 40-bin (mass-doubling) grid."""
-    xk = np.array(make_grid(nbins, XK0, 2.0))
+    """Return (dp_nm, dlogDp, dp_m, dp_um) for the given resolution's grid."""
+    xk = np.array(make_grid_for(nbins))
     m_mid = np.sqrt(xk[:-1] * xk[1:])
     dp_m  = (6.0 * m_mid / (DENS_INIT * PI)) ** (1.0 / 3.0)
     dp_edges = (6.0 * xk / (DENS_INIT * PI)) ** (1.0 / 3.0)
