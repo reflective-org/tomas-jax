@@ -302,8 +302,8 @@ def plot_parameter_summary(d, figdir):
         ]),
         ('Dilution  V(t)/V0', [
             ('V0', f"{g('v0_m3',0):.2e} m³  (informational)"),
-            ('Early branch', f"t^{g('v_early_exp','?')}  (t ≤ {g('v_t_break',0):.0e} s, clamped ≥1)"),
-            ('Late branch', f"{g('v_prefactor',0):.0f}·exp[{g('v_k',0):.2e}·(t−{g('v_t_break',0):.0e})^{g('v_late_exp','?')}]"),
+            ('Regime', f"{g('dilution_id','?')}"),
+            ('V(t)/V0', f"{g('dilution_desc','t^0.8 then 1585·exp[...] ')}"),
             ('V(end)/V0', f"{g('V_final',0):.3e}"),
         ]),
         ('Numerics', [
@@ -380,7 +380,7 @@ if __name__ == '__main__':
     import argparse
     from .run_marianna_dilution import SCENARIOS
     ap = argparse.ArgumentParser()
-    ap.add_argument('--scenario', default='1', choices=sorted(SCENARIOS))
+    ap.add_argument('--scenario', default='B1-D2', choices=sorted(SCENARIOS))
     ap.add_argument('--npz', default=None, help='Explicit NPZ path (overrides --scenario)')
     args = ap.parse_args()
     npz = args.npz or SCENARIOS[args.scenario].npz

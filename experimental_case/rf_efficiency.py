@@ -301,7 +301,7 @@ if __name__ == '__main__':
     from .run_marianna_dilution import SCENARIOS
     from .plot_marianna_dilution import _load
     ap = argparse.ArgumentParser()
-    ap.add_argument('--scenario', default='1', choices=sorted(SCENARIOS))
+    ap.add_argument('--scenario', default='B1-D2', choices=sorted(SCENARIOS))
     ap.add_argument('--npz', default=None)
     args = ap.parse_args()
     npz = args.npz or SCENARIOS[args.scenario].npz

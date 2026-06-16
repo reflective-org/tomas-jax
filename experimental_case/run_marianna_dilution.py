@@ -59,10 +59,58 @@ DEFAULT_DT_SCHEDULE = (
     (120.0,    0.01),   # 0–2 min     : 0.01 s  (resolves H2SO4 transient)
     (1200.0,   0.1),    # 2–20 min    : 0.1  s
     (14400.0,  10.0),   # 20 min–4 h  : 10   s
-    (864000.0, 60.0),   # 4 h–10 d    : 60   s
+    (1.30e6,   60.0),   # 4 h–>15 d   : 60   s  (covers up to 336 h runs)
 )
 
 _RESULTS_ROOT = os.path.join(os.path.dirname(__file__), 'results', 'marianna')
+
+
+# =========================================================================
+# Dilution regimes — piecewise V(t)/V0
+# =========================================================================
+# A regime is an ordered tuple of (t_end_seconds, segment). Segment kinds:
+#   ('power', p)          -> V/V0 = max(1, t^p)              (early Schumann t^0.8)
+#   ('exp', A, k, t0, q)  -> V/V0 = A * exp{ k * (t-t0)^q }  (late turbulent growth)
+# Shared early branch: t^0.8 clamped >=1 for 1<t<1e4 s. Late branches differ by Kz.
+_T_BREAK = 1e4
+_BIG_T = 1e12   # sentinel end for the final segment
+
+
+def _D_two_piece(k):
+    """Standard two-piece regime: t^0.8 then 1585*exp{k (t-1e4)^1.5}."""
+    return (
+        (_T_BREAK, ('power', 0.8)),
+        (_BIG_T,   ('exp', 1585.0, k, _T_BREAK, 1.5)),
+    )
+
+
+# D1-D5 (see plan / Schumann et al. 1998 scaling). D2 == prior scenario 1.
+DILUTIONS = {
+    'D1': dict(name='Low Kz',      segments=_D_two_piece(2.811e-9)),
+    'D2': dict(name='Med Kz',      segments=_D_two_piece(8.89e-9)),
+    'D3': dict(name='High Kz',     segments=_D_two_piece(2.811e-8)),
+    'D4': dict(name='Burst', segments=(
+        (_T_BREAK,  ('power', 0.8)),
+        (1.728e5,   ('exp', 1585.0,  2.811e-9, _T_BREAK, 1.5)),
+        (2.238e5,   ('exp', 1906.0,  2.811e-7, 1.728e5,  1.5)),   # 14.2 h burst
+        (_BIG_T,    ('exp', 4.83e4,  2.811e-9, 2.238e5,  1.5)),
+    )),
+    'D5': dict(name='Very High',   segments=_D_two_piece(1.33e-7)),
+}
+
+
+def dilution_str(segments):
+    """Compact human-readable description of a dilution regime."""
+    parts, t0 = [], 0.0
+    for t_end, seg in segments:
+        rng = f"{t0:g}-{'inf' if t_end >= _BIG_T else f'{t_end:g}'}s"
+        if seg[0] == 'power':
+            parts.append(f"{rng}: t^{seg[1]:g}")
+        else:
+            _, A, k, t_ref, q = seg
+            parts.append(f"{rng}: {A:g}*exp[{k:g}(t-{t_ref:g})^{q:g}]")
+        t0 = t_end
+    return " | ".join(parts)
 
 
 # =========================================================================
@@ -93,13 +141,11 @@ class ScenarioConfig:
     bg_to_ambient: bool = True
     bg_so2_ppb: float = 0.01     # ppb
     bg_h2so4: float = 0.0        # molec/cm³
-    # Explicit volume dilution V(t)/V0 (piecewise)
+    # Explicit volume dilution V(t)/V0 (piecewise segments; see DILUTIONS)
     v0_m3: float = 10.0 * 10.0 * 30000.0   # informational only
-    v_early_exp: float = 0.8     # V/V0 = t^v_early_exp for t <= v_t_break
-    v_t_break: float = 1e4       # s
-    v_prefactor: float = 1585.0  # continuity: v_t_break ** v_early_exp
-    v_k: float = 8.89e-9         # exp prefactor for late branch
-    v_late_exp: float = 1.5      # (t - v_t_break) ** v_late_exp
+    dilution: tuple = DILUTIONS['D2']['segments']   # default = Med Kz (scenario 1)
+    baseline: str = ''           # e.g. 'B1'
+    dilution_id: str = ''        # e.g. 'D2'
     # Numerics
     dt_schedule: tuple = DEFAULT_DT_SCHEDULE   # ((phase_end_s, dt), ...)
     # Run length
@@ -114,13 +160,12 @@ class ScenarioConfig:
         return ", ".join(parts)
 
     @property
+    def dilution_desc(self):
+        return dilution_str(self.dilution)
+
+    @property
     def slug(self):
-        s = self.name.lower()
-        for ch in ' ,/:();':
-            s = s.replace(ch, '_')
-        while '__' in s:
-            s = s.replace('__', '_')
-        return f"{self.id}_{s.strip('_')}"
+        return self.id   # e.g. 'B1-D2' -> results/marianna/B1-D2/
 
     @property
     def outdir(self):
@@ -131,14 +176,46 @@ class ScenarioConfig:
         return os.path.join(self.outdir, 'data.npz')
 
 
-# Scenario registry. Add new scenarios here.
-SCENARIOS = {
-    '1': ScenarioConfig(
-        id='1',
-        name='Low Latitude, High Altitude, Clean Stratosphere',
-        # all other fields use the defaults above (the run already executed)
-    ),
+# =========================================================================
+# Baselines + run matrix (3 baselines × 5 dilution regimes = 15 runs)
+# =========================================================================
+# Only these atmospheric/chemistry params vary per baseline. The aerosol size
+# distribution (initial AND entrained background) is the digitized red-circles
+# for ALL baselines (per-baseline background-aerosol specs in the brief ignored).
+# B1 reproduces the prior "scenario 1"; B1-D2 == that exact run.
+BASELINES = {
+    'B1': dict(name='Low Lat/High Alt, Clean',
+               temp=210.0, pres=5500.0,  so2_init_ppt=2.9e9, oh_conc=5.0e5,
+               h2o_ppm=4.0, h2so4_init=1e5, fion=30.0),
+    'B2': dict(name='High Lat/Low Alt, Clean',
+               temp=210.0, pres=12000.0, so2_init_ppt=1.3e9, oh_conc=2.0e5,
+               h2o_ppm=4.0, h2so4_init=5e4, fion=40.0),
+    'B3': dict(name='Low Lat/High Alt, Geoengineered',
+               temp=213.0, pres=5500.0,  so2_init_ppt=2.9e9, oh_conc=3.5e5,
+               h2o_ppm=5.5, h2so4_init=4e5, fion=30.0),
 }
+
+MATRIX_MAX_HOURS = 336.0   # 14 days
+
+
+def _make_matrix():
+    out = {}
+    for bid, b in BASELINES.items():
+        for did, dd in DILUTIONS.items():
+            rid = f"{bid}-{did}"
+            out[rid] = ScenarioConfig(
+                id=rid,
+                name=f"{bid} {b['name']} — {did} {dd['name']}",
+                baseline=bid, dilution_id=did,
+                temp=b['temp'], pres=b['pres'], h2o_ppm=b['h2o_ppm'],
+                oh_conc=b['oh_conc'], fion=b['fion'],
+                so2_init_ppt=b['so2_init_ppt'], h2so4_init=b['h2so4_init'],
+                dilution=dd['segments'], max_hours=MATRIX_MAX_HOURS,
+            )
+    return out
+
+
+SCENARIOS = _make_matrix()   # keys: 'B1-D1' ... 'B3-D5'
 
 
 # =========================================================================
@@ -172,22 +249,31 @@ def gc_to_conc(gc_kg, mw):
 # Explicit volume-dilution parameterization V(t)/V0
 # =========================================================================
 
+def _eval_segment(t_safe, seg):
+    """Evaluate one dilution segment over the whole time array (vectorized)."""
+    if seg[0] == 'power':
+        p = seg[1]
+        # clamp >=1: plume starts at V0 and only expands (removes t->0 singularity)
+        return np.maximum(1.0, np.power(np.maximum(t_safe, 1e-30), p))
+    _, A, k, t0, q = seg
+    dt = np.maximum(t_safe - t0, 0.0)
+    return A * np.exp(k * np.power(dt, q))
+
+
 def V_ratio(t_seconds, cfg):
-    """V(t)/V0 (vectorized). Piecewise, continuous at t=v_t_break:
+    """V(t)/V0 (vectorized), evaluated from cfg.dilution piecewise segments.
 
-        t^v_early_exp                              0 < t <= v_t_break
-        v_prefactor * exp{v_k * (t-v_t_break)^v_late_exp}   t > v_t_break
-
-    The plume starts at V0 (V/V0 = 1) at t=0 and only expands, so the early
-    branch is clamped to >= 1 (removes the t->0 singularity giving infinite
-    kdil on the first step; effect confined to t < 1 s for exp 0.8).
+    Segments are (t_end, kind, params): 'power' -> max(1, t^p); 'exp' ->
+    A*exp{k (t-t0)^q}. Continuous by construction (prefactors chosen to match
+    at the breakpoints). The early t^0.8 branch is clamped >=1.
     """
-    t = np.asarray(t_seconds, dtype=np.float64)
-    t_safe = np.maximum(t, 0.0)
-    early = np.maximum(1.0, np.power(np.maximum(t_safe, 1e-30), cfg.v_early_exp))
-    dt_late = np.maximum(t_safe - cfg.v_t_break, 0.0)
-    late = cfg.v_prefactor * np.exp(cfg.v_k * np.power(dt_late, cfg.v_late_exp))
-    return np.where(t_safe <= cfg.v_t_break, early, late)
+    t_safe = np.maximum(np.asarray(t_seconds, dtype=np.float64), 0.0)
+    conds, vals, t0 = [], [], 0.0
+    for t_end, seg in cfg.dilution:
+        conds.append((t_safe >= t0) & (t_safe < t_end))
+        vals.append(_eval_segment(t_safe, seg))
+        t0 = t_end
+    return np.select(conds, vals, default=vals[-1])
 
 
 def build_time_schedule(dt_schedule, max_hours):
@@ -250,7 +336,7 @@ def make_background(cfg, nbins):
 # Run
 # =========================================================================
 
-def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
+def run(scenario='B1-D2', nbins=NBINS, max_hours=None, verbose=True):
     cfg = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
     if max_hours is None:
         max_hours = cfg.max_hours
@@ -278,6 +364,7 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
         print(f'  bg: SO2={cfg.bg_so2_ppb} ppb ({bg_so2:.2e} cm⁻³), H2SO4={cfg.bg_h2so4:.0e}, '
               f'aerosol={cfg.bg_dist or "clean"} (N={N_bg:.2f}/cm³)')
         print(f'  V0={cfg.v0_m3:.2e} m³  V({max_hours:.0f}h)/V0={V_ratio(max_hours*3600.0, cfg):.3e}')
+        print(f'  dilution {cfg.dilution_id}: {cfg.dilution_desc}')
         print(f'  dt schedule: {cfg.dt_schedule_str}')
         print(f'  steps={nsteps}  kdil∈[{kdil_arr.min():.2e},{kdil_arr.max():.2e}] s⁻¹')
         print('=' * 72)
@@ -347,8 +434,8 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
         init_dist=cfg.init_dist, init_to_ambient=cfg.init_to_ambient, N_init=N_init,
         bg_dist=(cfg.bg_dist or 'clean'), bg_to_ambient=cfg.bg_to_ambient,
         bg_so2_ppb=cfg.bg_so2_ppb, bg_so2_cm3=bg_so2, bg_h2so4=cfg.bg_h2so4, N_bg=N_bg,
-        v0_m3=cfg.v0_m3, v_early_exp=cfg.v_early_exp, v_t_break=cfg.v_t_break,
-        v_prefactor=cfg.v_prefactor, v_k=cfg.v_k, v_late_exp=cfg.v_late_exp,
+        v0_m3=cfg.v0_m3, baseline=cfg.baseline, dilution_id=cfg.dilution_id,
+        dilution_desc=cfg.dilution_desc,
         V_final=float(V_ratio(max_hours*3600.0, cfg)),
         n_air_cm3=n_air_cm3(cfg.temp, cfg.pres),
         dt_schedule_str=cfg.dt_schedule_str,
@@ -358,23 +445,46 @@ def run(scenario='1', nbins=NBINS, max_hours=None, verbose=True):
     return cfg.npz
 
 
+def select_scenarios(scenario=None, baseline=None, dilution=None, run_all=False):
+    """Resolve which scenario ids to run from the CLI selectors."""
+    if scenario:
+        return [scenario]
+    ids = list(SCENARIOS)
+    if run_all and not (baseline or dilution):
+        return ids
+    sel = [rid for rid in ids
+           if (baseline is None or SCENARIOS[rid].baseline == baseline)
+           and (dilution is None or SCENARIOS[rid].dilution_id == dilution)]
+    return sel
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--scenario', default='1', choices=sorted(SCENARIOS),
-                    help='Scenario id to run (default 1)')
+    ap.add_argument('--scenario', default=None, choices=sorted(SCENARIOS),
+                    help='Single run id, e.g. B1-D2')
+    ap.add_argument('--baseline', default=None, choices=sorted(BASELINES),
+                    help='Run all dilutions for this baseline (B1/B2/B3)')
+    ap.add_argument('--dilution', default=None, choices=sorted(DILUTIONS),
+                    help='Run this dilution across all baselines (D1..D5)')
+    ap.add_argument('--all', action='store_true', help='Run the full 15-run matrix')
     ap.add_argument('--hours', type=float, default=None,
                     help='Override duration in hours (default: scenario max_hours)')
     ap.add_argument('--nbins', type=int, default=NBINS)
     ap.add_argument('--plot-only', action='store_true',
-                    help='Skip the run; regenerate plots from the existing NPZ')
+                    help='Skip the runs; regenerate per-run plots from existing NPZs')
     args = ap.parse_args()
-    cfg = SCENARIOS[args.scenario]
 
-    if not args.plot_only:
-        run(scenario=cfg, nbins=args.nbins, max_hours=args.hours)
-
+    ids = select_scenarios(args.scenario, args.baseline, args.dilution, args.all)
+    if not ids:
+        ids = ['B1-D2']
     from .plot_marianna_dilution import plot_all
-    plot_all(cfg.npz)
+    for i, rid in enumerate(ids, 1):
+        cfg = SCENARIOS[rid]
+        if len(ids) > 1:
+            print(f'\n##### [{i}/{len(ids)}] {rid} #####')
+        if not args.plot_only:
+            run(scenario=cfg, nbins=args.nbins, max_hours=args.hours)
+        plot_all(cfg.npz)
 
 
 if __name__ == '__main__':
