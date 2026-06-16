@@ -35,8 +35,9 @@ Extended the Marianna case to a **3 baselines × 5 dilution regimes** matrix
   ~1–16 % (40-bin over-counts the coagulation tail), 80-bin is the reference.
 
 ### Known issues / next steps
-- Per-run 80-bin figure suites not yet generated (data + comparison only;
-  regenerate with `--plot-only --nbins 80` if needed).
+- Condensation uses PPM (`cond_method='ppm_jit'`) for all runs; TFL (`tfl_jit`)
+  not run — could add as a PPM-vs-TFL cross-check if needed.
+- Comparison figures available in both log-y and linear-y (shared x-axis).
 
 ---
 
