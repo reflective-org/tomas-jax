@@ -283,7 +283,7 @@ def plot_distribution(outdir=None):
         outdir = os.path.join(os.path.dirname(__file__), 'results')
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, 'background_aerosol_distribution.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    fig.savefig(out, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'Saved: {out}')
     return out
@@ -387,7 +387,7 @@ def plot_redcircles_crosscheck(temp=210.0, pres=5500.0, nbins=40, outdir=None):
         outdir = os.path.join(os.path.dirname(__file__), 'results')
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, 'redcircles_crosscheck.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    fig.savefig(out, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'redcircles: N_STP(orig)={N_orig_stp:.1f}, N_STP(40bin)={N_40_stp:.1f}, '
           f'N_ambient(40bin)={N_40_stp*f:.2f} cm⁻³')
@@ -459,7 +459,7 @@ def plot_redcircles_figure_style(temp=210.0, pres=5500.0, nbins=40,
         outdir = os.path.join(os.path.dirname(__file__), 'results')
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, 'redcircles_figure_style.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight')
+    fig.savefig(out, dpi=300, bbox_inches='tight')
     plt.close(fig)
     print(f'redcircles (Fig.S4 style): N_STP={N_stp:.1f} cm⁻³, '
           f'N_ambient={N_stp*f:.2f} cm⁻³ (f={f:.4f})')

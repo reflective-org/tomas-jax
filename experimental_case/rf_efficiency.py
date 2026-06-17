@@ -151,7 +151,7 @@ def sulfur_normalized(d):
 
 def plot_sulfur_normalized(d, figdir):
     """Dilution-normalized: S conversion fraction and forcing per total sulfur."""
-    from .plot_marianna_dilution import _sname, _despine
+    from .plot_marianna_dilution import _sname, _despine, save_fig
     t_h, f_conv, fps = sulfur_normalized(d)
     targets = _targets_in_range(t_h)
 
@@ -176,7 +176,7 @@ def plot_sulfur_normalized(d, figdir):
 
     fig.tight_layout()
     out = os.path.join(figdir, 'sulfur_normalized.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
 
     print('  Sulfur-normalized at target times:')
     print(f"    {'time':>6} | {'S conversion':>12} | {'forcing per S [W/g-S]':>22}")
@@ -200,7 +200,7 @@ def plot_rf_efficiency(d, figdir):
     per-gram forcing W/g (all-sky). 'W/g' = forcing power per gram of aerosol
     (optically thin, global-mean insolation) — geometry-free, no burden needed.
     """
-    from .plot_marianna_dilution import _sname, _despine
+    from .plot_marianna_dilution import _sname, _despine, save_fig
     t_h, mse, rfe = efficiency_timeseries(d)
     eff_wg = rfe * (1.0 - CLOUD_FRACTION)   # clear-sky -> all-sky W/g
     targets = _targets_in_range(t_h)
@@ -229,7 +229,7 @@ def plot_rf_efficiency(d, figdir):
 
     fig.tight_layout()
     out = os.path.join(figdir, 'rf_efficiency.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
 
     print('  Forcing efficiency (choice c) at target times:')
     print(f"    {'time':>6} | {'MSE [m²/g]':>12} | {'efficiency [W/g, all-sky]':>26}")
@@ -245,7 +245,7 @@ def plot_rf_efficiency(d, figdir):
 
 def plot_rf_and_radius(d, figdir):
     """3-panel: RF(t) [global-mean, single plume], r_eff(t), and r_eff/r_opt(t)."""
-    from .plot_marianna_dilution import _sname, _despine
+    from .plot_marianna_dilution import _sname, _despine, save_fig
     t_h, rf_glob, M_kg = rf_global_timeseries(d)
     reff = effective_radius_um(d)
     r_opt = optimum_radius_um()
@@ -286,7 +286,7 @@ def plot_rf_and_radius(d, figdir):
 
     fig.tight_layout()
     out = os.path.join(figdir, 'rf_and_radius.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
 
     print('  RF / radius at target times:')
     print(f"    {'time':>6} | {'RF[W/m²]':>11} | {'M_plume[kg]':>11} | {'r_eff[nm]':>9} | {'r_eff/r_opt':>11}")

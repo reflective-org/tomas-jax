@@ -54,6 +54,12 @@ Each `compare_matrix` run emits **log-y and linear-y** variants (`--yscale
 log|linear|both`, default both; `*_linear.png`). All panels share the x-axis;
 y is shared per row (log: 8-decade window; linear: 0→row-max).
 
+**Print/poster quality:** all figures save at **300 dpi** (override with the
+`MARIANNA_DPI` env var, e.g. `MARIANNA_DPI=600`); the comparison figures
+additionally emit a **vector `.pdf`** (line-only → scales crisply to any poster
+size). Fonts embedded (`pdf.fonttype=42`). Colors are the colorblind-safe Paul
+Tol "bright" palette.
+
 ### Resolution (40 vs 80 bin)
 The matrix is run at both 40 bins (mass-doubling) and **80 bins** (√2 grid,
 `make_grid_80bin`; outputs in `<id>_80bin/`). Convergence (B1-D2):

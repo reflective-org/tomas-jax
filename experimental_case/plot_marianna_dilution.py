@@ -24,6 +24,19 @@ import matplotlib.colors as mcolors
 from tomas_jax.core.config import PI
 from .run_marianna_dilution import make_grid_for
 
+# Poster/print resolution. Override with MARIANNA_DPI env var (e.g. 600).
+SAVE_DPI = int(os.environ.get('MARIANNA_DPI', '300'))
+
+
+def save_fig(fig, png_path, vector=False):
+    """Save a figure at poster DPI; optionally also a vector PDF (best for print
+    scaling — used for the line-only comparison figures)."""
+    fig.savefig(png_path, dpi=SAVE_DPI)
+    if vector:
+        fig.savefig(os.path.splitext(png_path)[0] + '.pdf')
+    plt.close(fig)
+
+
 # ---- Global figure style (clean, consistent, colorblind-safe) ----------------
 matplotlib.rcParams.update({
     'font.family': 'sans-serif',
@@ -37,7 +50,8 @@ matplotlib.rcParams.update({
     'axes.linewidth': 0.8, 'axes.grid': True,
     'grid.alpha': 0.25, 'grid.linewidth': 0.6,
     'lines.linewidth': 1.8,
-    'figure.dpi': 110, 'savefig.dpi': 130, 'savefig.bbox': 'tight',
+    'figure.dpi': 110, 'savefig.dpi': SAVE_DPI, 'savefig.bbox': 'tight',
+    'pdf.fonttype': 42, 'ps.fonttype': 42,   # embed real fonts in vector output
     'mathtext.default': 'regular',
 })
 
@@ -125,7 +139,7 @@ def plot_dilution_trend(d, figdir):
 
     fig.tight_layout()
     out = os.path.join(figdir, 'dilution_trend.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 
@@ -144,7 +158,7 @@ def plot_gas_timeseries(d, figdir):
     ax.legend(frameon=False); _despine(ax); ax.grid(True, alpha=0.25, which='both')
     fig.tight_layout()
     out = os.path.join(figdir, 'gas_timeseries.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 
@@ -199,7 +213,7 @@ def plot_banana(d, figdir, qty='dN', fname=None):
     fig.colorbar(pcm, ax=ax, label=cbar_label, pad=0.01)
     fig.tight_layout()
     out = os.path.join(figdir, fname or f'banana_{qty}.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 
@@ -263,7 +277,7 @@ def _plot_sizedist(d, figdir, qty, ylabel, fname):
     axes[1].set_ylim(bottom=0)
     fig.tight_layout()
     out = os.path.join(figdir, fname)
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 
@@ -281,7 +295,7 @@ def plot_ntotal(d, figdir):
     _despine(ax); ax.grid(True, alpha=0.25, which='both')
     fig.tight_layout()
     out = os.path.join(figdir, 'ntotal.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 
@@ -364,7 +378,7 @@ def plot_parameter_summary(d, figdir):
             cell.set_facecolor('#F5F7FA')
 
     out = os.path.join(figdir, 'parameters.png')
-    fig.savefig(out, dpi=150, bbox_inches='tight'); plt.close(fig)
+    save_fig(fig, out)
     return out
 
 

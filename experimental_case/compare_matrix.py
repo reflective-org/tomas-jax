@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 from tomas_jax.core.config import AVOGADRO, MW_H2SO4, NBINS
 from .run_marianna_dilution import BASELINES, DILUTIONS, make_matrix, _RESULTS_ROOT
-from .plot_marianna_dilution import (_grid_geometry, _load, BOXVOL,
+from .plot_marianna_dilution import (_grid_geometry, _load, BOXVOL, save_fig,
                                      TOL_BLUE, TOL_CYAN, TOL_GREEN, TOL_RED, TOL_PURPLE)
 
 SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
@@ -157,7 +157,7 @@ def plot_matrix_comparison(qty, nbins=NBINS, yscale='log', runs=None, outdir=Non
         outdir = os.path.join(_RESULTS_ROOT, sub)
     os.makedirs(outdir, exist_ok=True)
     out = os.path.join(outdir, fname)
-    fig.savefig(out, dpi=120); plt.close(fig)   # 15in×120 ≈ 1800px (viewable)
+    save_fig(fig, out, vector=True)   # 300-dpi PNG + vector PDF (best for poster)
     return out
 
 
