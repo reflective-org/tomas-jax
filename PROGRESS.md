@@ -4,6 +4,57 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-06-17 (Wed) — Injected-sulfur (background-subtracted) figures + SO₂ cutoff + low-Lx redefinition
+
+**Branch**: `feat/marianna-dilution`
+
+### Summary
+Resolved the puzzle where the **sulfur-normalized surface-area comparison showed
+high dilution (D5) as spuriously highest**. Root cause: the mixed per-S figures
+divided an area numerator that floors at the entrained background aerosol by a
+total-S denominator that crashes toward background SO₂, so at strong dilution the
+ratio just measured the background atmosphere, not the injected plume.
+
+**Fix — count only SO₂-derived ("injected") sulfur, by background subtraction:**
+- New comparison figures `compare_d{N,A,V}_injPerS[_linear].{png,pdf}`:
+  numerator = per-bin distribution with the **constant entrained background
+  subtracted** (`max(total_Nk − bg_Nk, 0)`); denominator = **injected sulfur**
+  `(SO₂+H₂SO₄)_init × inert_tracer` (validated equal to the full injected budget
+  to ~3e‑9). Background mixing into the plume is negligible (measured 2.2e‑3),
+  so the subtraction is clean.
+- Implemented in `compare_matrix.py` (`_injected_sulfur`, `_bg_Nk_cm3`,
+  `_snap_distribution` `_injPerS` branch; non-positive bins masked as NaN).
+
+**Plume cutoff** (`run_marianna_dilution.py`): each run now **stops when
+SO₂ ≤ 1.1×background** (perturbation < 10 % of background — plume merged in),
+capped at 2 weeks. NPZ truncated at cutoff; figures auto-prune snapshots past it.
+Cutoffs: D5 ≈ 64–66 h, D1 ≈ 114–118 h, D3 ≈ 173–179 h; D2 & D4 hit the 2-wk cap.
+
+**Low-Lx (D1) redefined**: 5 km scale (was 1.5 km) → late coefficient `5.33e‑8`
+so the plume reaches background within the window (t_max ≈ 5.2 d). Snapshot
+columns changed to **12/24/48/96/168/240 h**.
+
+### Investigated & rejected
+A per-component **sulfate tag** (track injected sulfate in a spare organic column)
+was prototyped and then reverted: although mass-exact, it introduced a **~10 %
+drift in N_tot** from the per-column PPM positivity clamp (systematic,
+mass-conserving, accumulates over ~84k steps). Background subtraction on untagged
+runs avoids this entirely and matches the prior production runs. Kernels
+(`nucleation.py`, `solvers/condensation.py`) are back to pristine.
+
+### Files
+- `experimental_case/run_marianna_dilution.py` — SO₂ cutoff + truncation; D1 = low-Lx 5 km; SNAPSHOT_HOURS.
+- `experimental_case/compare_matrix.py` — injected (background-subtracted) per-S figures + NaN masking.
+- `experimental_case/plot_dilution_regimes.py` — new D1–D5 overlay (V/V₀ and inert tracer).
+
+### Validation
+- Injected-S identity vs `(SO₂+H₂SO₄)_init × tracer`: worst rel err 3.1e‑9.
+- Plume↔background mixing: 2.2e‑3 (negligible). D5 injected area/S now finite
+  (4e‑22…1.8e‑21 band across all regimes), no blow-up.
+- 30/30 runs (15 cells × {40,80} bin) completed, 0 failures.
+
+---
+
 ## 2026-06-16 (Tue) — Marianna run matrix (3×5) + RF diagnostics + 80-bin
 
 **Branch**: `feat/marianna-dilution`

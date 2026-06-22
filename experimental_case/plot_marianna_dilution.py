@@ -28,12 +28,15 @@ from .run_marianna_dilution import make_grid_for
 SAVE_DPI = int(os.environ.get('MARIANNA_DPI', '300'))
 
 
-def save_fig(fig, png_path, vector=False):
-    """Save a figure at poster DPI; optionally also a vector PDF (best for print
-    scaling — used for the line-only comparison figures)."""
+def save_fig(fig, png_path, vector=True):
+    """Save a figure at poster DPI plus a vector PDF (best for print scaling).
+    Pass vector=False to skip the PDF."""
     fig.savefig(png_path, dpi=SAVE_DPI)
     if vector:
-        fig.savefig(os.path.splitext(png_path)[0] + '.pdf')
+        # dpi controls only rasterized=True layers (e.g. pcolormesh heatmaps);
+        # vector elements (axes, text, lines) stay resolution-independent. This
+        # keeps PDFs small while crisp — a non-rasterized mesh bloats to ~100s MB.
+        fig.savefig(os.path.splitext(png_path)[0] + '.pdf', dpi=SAVE_DPI)
     plt.close(fig)
 
 
@@ -57,7 +60,7 @@ matplotlib.rcParams.update({
 
 DENS_INIT = 1770.0   # kg/m³
 BOXVOL    = 1.0e6    # cm³
-SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
+SNAPSHOT_HOURS = [12, 24, 48, 96, 168, 240]
 
 # Paul Tol "bright" qualitative palette — colorblind-safe (all 7 mutually distinct)
 TOL_BRIGHT = ['#4477AA', '#66CCEE', '#228833', '#CCBB44', '#EE6677', '#AA3377', '#BBBBBB']
@@ -205,7 +208,7 @@ def plot_banana(d, figdir, qty='dN', fname=None):
     pcm = ax.pcolormesh(
         t_h, dp_nm, field.T,
         norm=mcolors.LogNorm(vmin=vmin, vmax=vmax),
-        cmap='inferno', shading='nearest')
+        cmap='inferno', shading='nearest', rasterized=True)
     ax.set_yscale('log'); ax.set_ylim(1, 2e4)
     ax.set_xlabel('Time [h]'); ax.set_ylabel('Dp [nm]')
     ax.set_title(f'Banana — {title}  •  {_sname(d)}')

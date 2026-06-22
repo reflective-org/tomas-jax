@@ -36,6 +36,37 @@ All runs use red-circles for initial+background aerosol; bg SO2=0.01 ppb, H2SO4=
 Per-run params below are **B1** (the original scenario 1); B2/B3 differ in
 T/P/SO2/OH/H2O/H2SO4/ion (see docs).
 
+## Water uptake = pure H2SO4/H2O (Tabazadeh 1997) (2026-06-17 update)
+These clean stratospheric runs use **`water_scheme='h2so4_tabazadeh'`** in
+`make_step`, i.e. the **Tabazadeh et al. (1997)** binary H2SO4/H2O equilibrium,
+NOT the default ISORROPIA ammonium-bisulfate fit (these plumes have no NH3).
+Equilibrium H2SO4 weight % is T- and RH-dependent (e.g. B1: 210 K, 1.7% RH →
+~69 wt%, wet/dry mass ratio ≈ 1.45 — vs ISORROPIA's ~1.02, which under-hydrated
+the cold acid). Implemented JIT in `physics/water_equilibrium.py`
+(`calc_equilibrium_water_h2so4`, `h2so4_weight_percent`); selected via the new
+`water_scheme` arg (default `'isorropia'` preserves prior behavior).
+
+## Plume cutoff + injected-sulfur figures (2026-06-17 update)
+- **Cutoff**: each run stops when `SO2 ≤ 1.1×background` (perturbation < 10% of
+  background ⇒ plume effectively merged in), capped at 2 weeks (336 h). The NPZ is
+  **truncated** at the cutoff (`cutoff_hours`, `cutoff_reached` saved); comparison
+  figures auto-prune any snapshot past a run's cutoff. Typical cutoffs:
+  D5 ≈ 64–66 h, D1 ≈ 114–118 h, D3 ≈ 173–179 h; **D2 & D4 hit the 2-wk cap**.
+- **D5 "Very High" = shear-driven dilution** (Med Kz=0.01 but 5 km length):
+  coefficient `5.33e-8` (reaches SO2=1.1×bg at ~5 d — faster than High Kz, as a
+  "very high" case should be). D1–D4 keep their Low/Med/High-Kz + Burst forms
+  (D1=2.811e-9, D2=8.89e-9, D3=2.811e-8).
+- **Snapshot columns**: now **12/24/48/96/168/240 h** (`SNAPSHOT_HOURS`).
+- **Injected-sulfur comparison figures** (`compare_d{N,A,V}_injPerS`): show the
+  *injected* (SO2-derived) aerosol normalized to *injected* sulfur, with the
+  entrained background excluded by **subtraction** — numerator
+  `max(total_Nk − background_Nk, 0)`, denominator `(SO2+H2SO4)_init × inert_tracer`.
+  This is what fixes the earlier artifact where high dilution looked spuriously
+  highest (it was dividing a background-floored numerator by a vanishing total-S).
+  Background mixing into the plume is negligible (validated 2.2e-3), so the
+  subtraction is exact to that level; the injected-S budget matches the analytic
+  `(SO2+H2SO4)_init × tracer` to ~3e-9. The mixed `*_perS` figures are kept too.
+
 ## Chosen parameters (this run)
 | Param | Value | Notes |
 |---|---|---|

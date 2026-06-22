@@ -90,6 +90,80 @@ def water_uptake_seasalt(rh_percent: Union[float, jnp.ndarray]) -> Union[float, 
     return jnp.clip(wr, 1.0, 45.0)
 
 
+# =========================================================================
+# Tabazadeh et al. (1997) — pure H2SO4/H2O binary water uptake (no NH3)
+# =========================================================================
+# For a clean (NH3-free) stratospheric sulfate aerosol the equilibrium
+# composition is a binary H2SO4/H2O solution, NOT ammonium bisulfate. The
+# equilibrium H2SO4 weight percent depends on (T, RH) via the water-vapor-
+# pressure parameterization of Tabazadeh et al. (1997), GRL Table 1:
+#     ln P_H2O(mb) = a + b/T + c/T^2     (over the solution)
+# and the pure-water saturation pressure (their eq. 1). At equilibrium the
+# solution vapor pressure equals the ambient partial pressure RH*P_sat(T),
+# which fixes the weight percent. Valid T = 185-260 K, wt% = 10-80%.
+#
+# Reference: Tabazadeh, A., O. B. Toon, S. L. Clegg, P. Hamill (1997),
+#   A new parameterization of H2SO4/H2O aerosol composition, GRL 24(15).
+_TABZ_WT = jnp.array([10., 15., 20., 25., 30., 35., 40., 45., 50.,
+                      55., 60., 65., 70., 75., 80.])
+_TABZ_A = jnp.array([19.726, 19.747, 19.761, 19.794, 19.883, 20.078, 20.379,
+                     20.637, 20.682, 20.555, 20.405, 20.383, 20.585, 21.169,
+                     21.808])
+_TABZ_B = jnp.array([-4364.8, -4390.9, -4414.7, -4451.1, -4519.2, -4644.0,
+                     -4828.5, -5011.5, -5121.3, -5177.6, -5252.1, -5422.4,
+                     -5743.8, -6310.6, -6985.9])
+_TABZ_C = jnp.array([-147620., -144690., -142940., -140870., -136500., -127240.,
+                     -112550., -98811., -94033., -96984., -100840., -97966.,
+                     -83701., -48396., -12170.])
+_TABZ_EQ1 = (18.452406985, -3505.1578801, -330918.55082, 12725068.262)
+
+
+def h2so4_weight_percent(temp, rh):
+    """Equilibrium H2SO4 weight percent for a binary H2SO4/H2O droplet (JIT).
+
+    Tabazadeh et al. (1997). `temp` [K], `rh` [fraction 0-1]. Returns wt% [%],
+    clamped to the tabulated range (10-80%)."""
+    rh_c = jnp.clip(rh, 1e-4, 0.9999)
+    c0, c1, c2, c3 = _TABZ_EQ1
+    ln_p_sat = c0 + c1 / temp + c2 / temp**2 + c3 / temp**3
+    ln_p_target = jnp.log(rh_c) + ln_p_sat
+    # Solution vapor pressure per tabulated wt% (decreasing in wt%).
+    ln_p_sol = _TABZ_A + _TABZ_B / temp + _TABZ_C / temp**2
+    # interp requires increasing xp -> negate (both sides) so wt% increases.
+    return jnp.interp(-ln_p_target, -ln_p_sol, _TABZ_WT)
+
+
+def calc_equilibrium_water_h2so4(
+    Mk: jnp.ndarray,
+    rh: float,
+    temp: float,
+) -> jnp.ndarray:
+    """Equilibrium water for a PURE H2SO4/H2O aerosol (Tabazadeh 1997, JIT).
+
+    Drop-in alternative to `calc_equilibrium_water` for clean (NH3-free) cases.
+    The wet/dry mass ratio is `wr = 100/wt%` (solution mass per unit dry acid);
+    water_mass = dry_acid_mass * (wr - 1), set into the H2O column.
+
+    Args:
+        Mk: Mass concentration [kg/grid cell], shape (ibins, icomp).
+        rh: Relative humidity [fraction 0-1].
+        temp: Temperature [K].
+
+    Returns:
+        Mk_new: Updated mass with binary-solution equilibrium water.
+
+    Note: the dry-acid basis is `Mk[:,SRTSO4]` (+ organics, treated like acid).
+    Whether that column carries SO4 (96) or H2SO4 (98) is ambiguous in TOMAS
+    (~2% on the dry basis); we use it directly, matching the ISORROPIA path's
+    convention of taking Mk[:,SRTSO4] as the dry basis.
+    """
+    wt = h2so4_weight_percent(temp, rh)
+    wr = 100.0 / wt
+    dry_acid = Mk[:, SRTSO4] + jnp.sum(Mk[:, SRTORG1:SRTORG1 + IORG], axis=1)
+    water_mass = dry_acid * (wr - 1.0)
+    return Mk.at[:, SRTH2O].set(water_mass)
+
+
 def calc_equilibrium_water(
     Mk: jnp.ndarray,
     rh: float,

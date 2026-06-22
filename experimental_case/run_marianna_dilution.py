@@ -56,7 +56,7 @@ ALPHA  = 1.0
 BOXVOL = 1.0e6          # cm³ (1 m³ reference cell)
 DENS_INIT = 1770.0      # kg/m³ sulfate
 
-SNAPSHOT_HOURS = [12, 24, 48, 72, 168, 240]
+SNAPSHOT_HOURS = [12, 24, 48, 96, 168, 240]
 
 # Default multi-resolution timestep schedule: list of (phase_end_seconds, dt).
 # Fine head resolves the operator-split stress while H2SO4 production is highest
@@ -103,7 +103,9 @@ DILUTIONS = {
         (2.238e5,   ('exp', 1906.0,  2.811e-7, 1.728e5,  1.5)),   # 14.2 h burst
         (_BIG_T,    ('exp', 4.83e4,  2.811e-9, 2.238e5,  1.5)),
     )),
-    'D5': dict(name='Very High',   segments=_D_two_piece(1.33e-7)),
+    # "Low Lx": very high dilution via shear orientation (Med Kz=0.01, 5 km
+    # length); coeff 5.33e-8 → reaches SO2=1.1×bg at ~5 d (faster than High Kz).
+    'D5': dict(name='Low Lx', segments=_D_two_piece(5.33e-8)),
 }
 
 
@@ -381,9 +383,12 @@ def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
         print(f'  steps={nsteps}  kdil∈[{kdil_arr.min():.2e},{kdil_arr.max():.2e}] s⁻¹')
         print('=' * 72)
 
+    # Clean stratospheric plume: pure H2SO4/H2O water uptake (Tabazadeh 1997),
+    # not the ammonium-bisulfate ISORROPIA default.
     step_fn = make_step(
         ['so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'],
-        cond_method='ppm_jit', nucl_scheme='ricco_dunne')
+        cond_method='ppm_jit', nucl_scheme='ricco_dunne',
+        water_scheme='h2so4_tabazadeh')
 
     temp = jnp.float64(cfg.temp); pres = jnp.float64(cfg.pres)
     rhj = jnp.float64(rh); alpha = jnp.float64(ALPHA); boxvol = jnp.float64(BOXVOL)
@@ -397,6 +402,13 @@ def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
     SO2_every    = np.zeros(nsteps)
     SO4_every    = np.zeros(nsteps)
     tracer_every = np.zeros(nsteps)
+
+    # Plume cutoff: stop once SO2 has diluted/oxidized down to 1.1 x background
+    # (perturbation < 10% of background — the plume is effectively merged in).
+    # Capped at max_hours (the 2-week build_time_schedule limit) for slow cases.
+    so2_cutoff = 1.1 * bg_so2
+    n_used = nsteps
+    cutoff_reached = False
 
     tracer = 1.0
     t0 = time.time()
@@ -416,6 +428,15 @@ def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
                   f'SO2={SO2_every[i]:.2e}  H2SO4={SO4_every[i]:.2e}  '
                   f'tracer={tracer:.3e}  elapsed={time.time()-t0:.0f}s')
 
+        # Cutoff check (skip the initial transient where SO2 is still huge)
+        if i > 0 and SO2_every[i] <= so2_cutoff:
+            n_used = i + 1
+            cutoff_reached = True
+            if verbose:
+                print(f'  cutoff: SO2={SO2_every[i]:.3e} <= 1.1*bg={so2_cutoff:.3e} '
+                      f'at t={t_s/3600:.1f} h ({t_s/86400:.2f} d) — stopping.')
+            break
+
         kdil_i = jnp.float64(kdil_arr[i]); dt_i = jnp.float64(dts[i])
         Nk, Mk, Gc = step_fn(
             Nk, Mk, Gc, xk, temp, pres, boxvol, rhj, alpha, dt_i,
@@ -424,9 +445,20 @@ def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
         )
         tracer = tracer * float(jnp.exp(-kdil_i * dt_i))
 
+    # Truncate to the used portion (cutoff or full schedule)
+    sl = slice(0, n_used)
+    Nk_every = Nk_every[sl]; Mk_dry_every = Mk_dry_every[sl]
+    N_tot_every = N_tot_every[sl]; M_dry_every = M_dry_every[sl]
+    SO2_every = SO2_every[sl]; SO4_every = SO4_every[sl]
+    tracer_every = tracer_every[sl]
+    t_starts = t_starts[sl]; dts = dts[sl]; kdil_arr = kdil_arr[sl]; V_arr = V_arr[sl]
+    cutoff_hours = float(t_starts[-1]) / 3600.0
+
     wall = time.time() - t0
     if verbose:
-        print(f'  -> {wall:.1f}s wall, N_final={N_tot_every[-1]/BOXVOL:.3e}/cm³, '
+        tag = 'cutoff' if cutoff_reached else '2-wk cap'
+        print(f'  -> {wall:.1f}s wall, ended {cutoff_hours:.1f} h ({tag}), '
+              f'N_final={N_tot_every[-1]/BOXVOL:.3e}/cm³, '
               f'tracer_final={tracer_every[-1]:.3e}')
 
     os.makedirs(cfg.outdir, exist_ok=True)
@@ -448,7 +480,9 @@ def run(scenario='B1-D2', nbins=None, max_hours=None, verbose=True):
         bg_so2_ppb=cfg.bg_so2_ppb, bg_so2_cm3=bg_so2, bg_h2so4=cfg.bg_h2so4, N_bg=N_bg,
         v0_m3=cfg.v0_m3, baseline=cfg.baseline, dilution_id=cfg.dilution_id,
         dilution_desc=cfg.dilution_desc,
-        V_final=float(V_ratio(max_hours*3600.0, cfg)),
+        V_final=float(V_ratio(float(t_starts[-1]), cfg)),
+        cutoff_hours=cutoff_hours, cutoff_reached=cutoff_reached,
+        so2_cutoff_molec_cm3=so2_cutoff,
         n_air_cm3=n_air_cm3(cfg.temp, cfg.pres),
         dt_schedule_str=cfg.dt_schedule_str,
     )

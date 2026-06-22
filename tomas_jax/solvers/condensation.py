@@ -73,7 +73,8 @@ from ..physics.ezcond import ezcond
 from ..physics.ezcond_ppm_jax import ezcond_ppm_jax
 from ..physics.condensation_tfl_jax import ezcond_tfl_jax
 from ..physics.nh3_equilibrium import eznh3eqm
-from ..physics.water_equilibrium import calc_equilibrium_water
+from ..physics.water_equilibrium import (calc_equilibrium_water,
+                                          calc_equilibrium_water_h2so4)
 from ..core.mnfix_jax import mnfix_jax
 from ..solvers.diffrax import coag_euler_step
 
@@ -243,11 +244,16 @@ def condensation_step(
 # =========================================================================
 
 def _condensation_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                            ezcond_fn):
+                            ezcond_fn, water_fn=None):
     """Core condensation: MNFIX -> CS -> gas depletion -> ezcond_fn -> NH3 -> water -> MNFIX.
 
     This is the single implementation that both PPM and TFL JIT paths share.
     The only difference is which ezcond function is passed in.
+
+    water_fn selects the equilibrium-water scheme. None (default) uses the
+    ISORROPIA ammonium-bisulfate fit `calc_equilibrium_water(Mk, rh)`. Otherwise
+    it is called as `water_fn(Mk, rh, temp)` (e.g. the Tabazadeh-1997 pure
+    H2SO4/H2O scheme for clean, NH3-free stratospheric aerosol).
     """
     # 0. MNFIX input
     Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
@@ -290,8 +296,11 @@ def _condensation_step_core(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
     # 3. NH3 equilibrium
     Gc, Mk = eznh3eqm(Gc, Mk)
 
-    # 4. Water equilibrium
-    Mk = calc_equilibrium_water(Mk, rh)
+    # 4. Water equilibrium (ISORROPIA NH4HSO4 by default; water_fn overrides)
+    if water_fn is None:
+        Mk = calc_equilibrium_water(Mk, rh)
+    else:
+        Mk = water_fn(Mk, rh, temp)
 
     # 5. MNFIX cleanup
     Nk, Mk = mnfix_jax(Nk, Mk, xk, ICOMP_NODIAG)
@@ -744,7 +753,7 @@ def run_full_scan(
 def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
               n_coag_substeps=10,
               max_nucleation_frac=0.5, max_nuc_substeps=20,
-              jit=True):
+              water_scheme='isorropia', jit=True):
     """Build a step function from an ordered list of process names.
 
     The returned function has signature:
@@ -767,6 +776,10 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         n_coag_substeps: Number of forward-Euler substeps for coagulation
         max_nucleation_frac: Max dN/N_total per nucleation substep (0.5 = 50%)
         max_nuc_substeps: Hard cap on nucleation substeps
+        water_scheme: Equilibrium-water uptake scheme. 'isorropia' (default)
+            uses the ammonium-bisulfate ISORROPIA fit; 'h2so4_tabazadeh' uses
+            the Tabazadeh-1997 pure H2SO4/H2O binary scheme (for clean, NH3-free
+            stratospheric aerosol — T-dependent). Default preserves prior behavior.
         jit: If True (default), wrap the returned function in ``jax.jit``.
             Callers no longer need to wrap manually. Double-JIT is a no-op.
 
@@ -793,6 +806,14 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                            hno3=..., ulvoc=..., dma=..., hio3=...)
     """
     ezcond_fn = ezcond_tfl_jax if 'tfl' in cond_method else ezcond_ppm_jax
+
+    valid_water = {'isorropia', 'h2so4_tabazadeh'}
+    if water_scheme not in valid_water:
+        raise ValueError(f"Unknown water_scheme '{water_scheme}'. "
+                         f"Valid: {sorted(valid_water)}")
+    # None => ISORROPIA (default, behavior-preserving); else the Tabazadeh fn.
+    water_fn = (calc_equilibrium_water_h2so4
+                if water_scheme == 'h2so4_tabazadeh' else None)
 
     valid = {'so2_chemistry', 'nucleation', 'coagulation', 'condensation', 'dilution'}
     for p in processes:
@@ -895,7 +916,7 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
             elif process == 'condensation':
                 Nk, Mk, Gc = _condensation_step_core(
                     Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
-                    ezcond_fn=ezcond_fn,
+                    ezcond_fn=ezcond_fn, water_fn=water_fn,
                 )
             elif process == 'dilution':
                 kdil = kwargs.get('kdil', 0.0)
