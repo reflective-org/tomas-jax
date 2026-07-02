@@ -139,6 +139,44 @@ _DATA3 = np.array([
     [1.000,   0   ],
 ])
 
+# Distribution 4 — Marianna observed size distribution, red OPEN DIAMONDS
+# "observation, 310-320 ppbv" from the same Fig. S4 (dN/dlogDp in cm^-3 STP).
+# Younger air than the red circles: a small-particle plateau (~50-70 cm^-3 STP,
+# 5-30 nm) plus a mode peaking ~320 cm^-3 STP near Dp ~0.065-0.07 um.
+# NOTE: eyeball digitization (same caveat as _DATA3) — verify with the CLI plot.
+_DATA4 = np.array([
+    [0.003,   20  ],
+    [0.004,   32  ],
+    [0.005,   42  ],
+    [0.006,   48  ],
+    [0.008,   55  ],
+    [0.010,   58  ],
+    [0.013,   60  ],
+    [0.016,   62  ],
+    [0.020,   65  ],
+    [0.025,   68  ],
+    [0.030,   72  ],
+    [0.035,   85  ],
+    [0.040,   105 ],
+    [0.050,   180 ],
+    [0.060,   290 ],
+    [0.068,   320 ],   # peak
+    [0.080,   285 ],
+    [0.090,   245 ],
+    [0.100,   205 ],
+    [0.120,   150 ],
+    [0.150,   105 ],
+    [0.180,   80  ],
+    [0.200,   65  ],
+    [0.250,   40  ],
+    [0.300,   25  ],
+    [0.400,   11  ],
+    [0.500,   5   ],
+    [0.600,   2   ],
+    [0.800,   0.5 ],
+    [1.000,   0   ],
+])
+
 _DIST_META = {
     'tabulated':  {'data': _DATA1, 'label': 'Dist 1 (nucleation-mode, peak 45 nm)',
                    'color1': '#1E88E5', 'color2': '#E53935'},
@@ -146,6 +184,8 @@ _DIST_META = {
                    'color1': '#43A047', 'color2': '#FB8C00'},
     'redcircles': {'data': _DATA3, 'label': 'Marianna obs (red circles, 220-230 ppbv)',
                    'color1': '#E53935', 'color2': '#1565C0'},
+    'reddiamonds': {'data': _DATA4, 'label': 'Marianna obs (red diamonds, 310-320 ppbv)',
+                    'color1': '#8E24AA', 'color2': '#00897B'},
 }
 
 # =========================================================================
