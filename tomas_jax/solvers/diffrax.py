@@ -146,6 +146,7 @@ def coag_euler_step(
     icomp_nodiag: int = ICOMP_NODIAG,
     n_substeps: int = 3,
     return_overflow: bool = False,
+    coag_kernel_scale: float = 1.0,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Fixed-step forward Euler coagulation solver (scan-fusable).
 
@@ -159,9 +160,10 @@ def coag_euler_step(
             is the total mass [kg/cell] that overflowed the top bin during
             this timestep, shape (icomp,).
     """
-    # Pre-compute coagulation kernel (once per timestep)
+    # Pre-compute coagulation kernel (once per timestep). ``coag_kernel_scale`` (default 1.0) is a
+    # free multiplier on the whole kernel -- a sensitivity knob (AD-7.2) threaded from the scenario.
     Dpk, Dk, ck = calc_particle_properties(Nk, Mk, temp, pres)
-    kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol)
+    kij = calc_coagulation_kernel(Dpk, Dk, ck, boxvol) * coag_kernel_scale
 
     dt_sub = dt / n_substeps
 
