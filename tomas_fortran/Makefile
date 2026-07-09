@@ -26,12 +26,13 @@ TOMAS_SRCS = $(SRC)/multicoag.f \
              $(SRC)/eznh3eqm.f \
              $(SRC)/ezwatereqm.f \
              $(SRC)/waterso4.f \
-             $(SRC)/waternacl.f
+             $(SRC)/waternacl.f \
+             $(SRC)/soacond.f
 
 # Object files (built in current directory)
 TOMAS_OBJS = multicoag.o initbounds.o mnfix.o aerodens.o loginit.o \
              ezcond.o tmcond.o dmdt_int.o getCondSink.o gasdiff.o \
-             eznh3eqm.o ezwatereqm.o waterso4.o waternacl.o
+             eznh3eqm.o ezwatereqm.o waterso4.o waternacl.o soacond.o
 
 # PPM source files (new)
 PPM_SRCS = $(SRC_PPM)/tmcond_ppm.f \
@@ -59,6 +60,7 @@ TARGET_24H_PPM = benchmark_24h_ppm.exe
 TARGET_24H_PPM_ATMOS = benchmark_24h_ppm_atmos.exe
 TARGET_NUC = benchmark_nucleation.exe
 TARGET_CONSTGC = benchmark_constgc.exe
+TARGET_SOA = benchmark_soa.exe
 
 # Default target
 all: setup $(TARGET)
@@ -75,6 +77,9 @@ benchmark_24h_ppm_atmos: setup_atmos $(TARGET_24H_PPM_ATMOS)
 # Build nucleation benchmark (standalone, no sizecode.COM)
 benchmark_nucleation: setup $(TARGET_NUC)
 
+# Build SOA benchmark
+benchmark_soa: setup_soa $(TARGET_SOA)
+
 # Build constant-gas benchmark
 benchmark_constgc: setup_constgc $(TARGET_CONSTGC)
 
@@ -90,6 +95,9 @@ setup_24h:
 
 setup_atmos:
 	mkdir -p output/atmos
+
+setup_soa:
+	mkdir -p output/soa
 
 setup_constgc:
 	mkdir -p output/constgc
@@ -110,6 +118,9 @@ $(TARGET_24H_PPM_ATMOS): benchmark_24h_ppm_atmos.o $(PPM_OBJS) $(SHARED_OBJS)
 $(TARGET_NUC): benchmark_nucleation.o $(NUC_OBJS)
 	$(FC) $(FFLAGS) -o $@ $^
 
+$(TARGET_SOA): benchmark_soa.o $(TOMAS_OBJS)
+	$(FC) $(FFLAGS) -o $@ $^
+
 $(TARGET_CONSTGC): benchmark_constgc.o $(TOMAS_OBJS) $(NUC_OBJS) nucleation_driver.o
 	$(FC) $(FFLAGS) -o $@ $^
 
@@ -127,6 +138,9 @@ benchmark_24h_ppm_atmos.o: $(HARNESS)/benchmark_24h_ppm_atmos.f $(INC)/sizecode.
 	$(FC) $(FFLAGS) -c $<
 
 benchmark_nucleation.o: $(HARNESS)/benchmark_nucleation.f
+	$(FC) $(FFLAGS) -c $<
+
+benchmark_soa.o: $(HARNESS)/benchmark_soa.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
 benchmark_constgc.o: $(HARNESS)/benchmark_constgc.f $(INC)/sizecode.COM
@@ -175,6 +189,9 @@ waterso4.o: $(SRC)/waterso4.f $(INC)/sizecode.COM
 waternacl.o: $(SRC)/waternacl.f $(INC)/sizecode.COM
 	$(FC) $(FFLAGS) -c $<
 
+soacond.o: $(SRC)/soacond.f $(INC)/sizecode.COM
+	$(FC) $(FFLAGS) -c $<
+
 # Compile nucleation sources (standalone, no sizecode.COM)
 ricco_nucl.o: $(SRC)/ricco_nucl.f
 	$(FC) $(FFLAGS) -c $<
@@ -208,13 +225,16 @@ run_24h_ppm_atmos: $(TARGET_24H_PPM_ATMOS)
 
 # Clean
 clean:
-	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_24H_PPM_ATMOS) $(TARGET_NUC) $(TARGET_CONSTGC)
+	rm -f *.o $(TARGET) $(TARGET_24H) $(TARGET_24H_PPM) $(TARGET_24H_PPM_ATMOS) $(TARGET_NUC) $(TARGET_CONSTGC) $(TARGET_SOA)
 	rm -rf output
 
 run_constgc: $(TARGET_CONSTGC)
 	./$(TARGET_CONSTGC)
 
-.PHONY: all setup setup_24h setup_atmos setup_constgc run run_24h run_24h_ppm \
-        run_24h_ppm_atmos run_constgc clean \
+run_soa: $(TARGET_SOA)
+	./$(TARGET_SOA)
+
+.PHONY: all setup setup_24h setup_atmos setup_soa setup_constgc run run_24h run_24h_ppm \
+        run_24h_ppm_atmos run_constgc run_soa clean \
         benchmark_24h benchmark_24h_ppm benchmark_24h_ppm_atmos benchmark_both \
-        benchmark_nucleation benchmark_constgc
+        benchmark_nucleation benchmark_constgc benchmark_soa

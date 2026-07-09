@@ -315,7 +315,7 @@ Median wall time per 24h scenario (49 LHC scenarios, 36-bin legacy grid):
 | `pres` | scalar | Pa | Pressure |
 | `boxvol` | scalar | cm³ | Grid cell volume |
 | `rh` | scalar | 0–1 | Relative humidity |
-| `alpha` | scalar | — | Mass accommodation coefficient |
+| `alpha` | scalar | — | H₂SO₄ mass accommodation coefficient (0.65 recommended, Pöschl et al. 1998; Fortran benchmarks use 1.0). Organics use the `alpha_organic` kwarg (default: falls back to `alpha`; 1.0 recommended). `run_box_model.py` defaults to 0.65 via `--alpha`. |
 
 **Species indices (0-based):** 0 = SO₄, 1–41 = organics, 42 = NH₄, 43 = H₂O. Gas array `Gc` has 44 elements: indices 0–42 (aerosol species except water) + index 43 (SO2).
 

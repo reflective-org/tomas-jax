@@ -79,6 +79,25 @@ where σ is surface tension (~0.05 N/m for organics) and v is molar volume.
 
 ---
 
+### 3b. Sub-3 nm Growth: Condensing-Molecule Size (Collision Diameter)
+
+**What:** The standard condensation framework under-predicts growth rates for the smallest particles (Dp < 3 nm), where the radius of the condensing molecule is comparable to the radius of the particle it condenses onto. The fix is to use the effective **collision diameter** in the condensation equation:
+```
+Dp → Dp + d_vapor          (sink term: CS ∝ Σ (Dpk + d_v) × Nk × β)
+Kn = 2 × mfp / (Dp + d_v)  (Fuchs–Sutugin correction)
+```
+optionally with the reduced-mass thermal-speed factor `sqrt(1 + m_v/m_p)` for full kinetic consistency (Lehtinen & Kulmala 2003; Nieminen et al. 2010).
+
+**Why critical:** The default grid starts at 1.7 nm, so the first several bins are squarely in the affected regime. For a ~1.7 nm cluster, neglecting the vapor size (H₂SO₄ d ≈ 0.55 nm, organics d ≈ 1 nm) under-predicts the collision cross-section — and hence early cluster growth and survival to CCN sizes — by tens of percent.
+
+**Current state:** All three sink functions in `condensation_sink.py` (getCondSink.f port, Zaveri two-film organic sink, batch version) use `Dpk` alone; the vapor diameter enters only the diffusivity estimate in `gas_properties.py`. Fortran TOMAS also lacks this correction, so implementing it is an intentional divergence — keep a Fortran-faithful mode reproducible.
+
+**Tracking:** [Issue #20](https://github.com/reflective-org/tomas-jax/issues/20).
+
+**Effort:** 2–3 days (flag-controlled, JIT-safe; validate against Nieminen et al. 2010 correction factor for Dp = 1.7–10 nm).
+
+---
+
 ### 4. Equilibrium Partitioning (Implicit Solver)
 
 **What:** At each timestep, determine how much of each semi-volatile species is in the gas vs. particle phase at thermodynamic equilibrium. This is the core of the VBS scheme (#2) but also applies to HNO₃, NH₃, and other inorganic semi-volatiles.
@@ -353,4 +372,4 @@ Key unported Fortran files in `tomas_fortran/src/` and `TRACER_SOM-TOMAS/src/`:
 
 ---
 
-*Last updated: 2026-03-12*
+*Last updated: 2026-07-08*

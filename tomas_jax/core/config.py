@@ -73,6 +73,13 @@ MW_SO4 = 96.0
 SV_H2SO4 = 42.88               # Sum of atomic diffusion volumes for H2SO4
 SV_SO2 = 41.73                  # Sum of atomic diffusion volumes for SO2
 
+# Mass accommodation coefficients (dimensionless)
+# H2SO4 on aqueous sulfate: 0.65 (Poschl et al. 1998). Note the Fortran
+# benchmark harnesses use alpha=1.0, so Fortran-comparison runs must pass
+# alpha=1.0 explicitly.
+ALPHA_H2SO4 = 0.65
+ALPHA_ORGANIC = 1.0             # Organics: no established value; unity assumed
+
 # Condensation numerical thresholds
 NEPS_COND = 1.0e-5             # Minimum number for condensation
 CS_EPS = 1.0e-20               # Minimum condensation sink
@@ -92,8 +99,9 @@ import numpy as _np
 _DENS_INIT = 1770.0  # kg/m3 (initial particle density)
 XK0 = (_np.pi / 6.0) * (1.7e-9)**3 * _DENS_INIT  # ~4.553e-24 kg
 
-# Legacy 36-bin grid (3.2nm start, for Fortran comparison benchmarks)
-XK0_LEGACY = 1.6033e-23  # Lower boundary of old 36-bin grid [kg]
+# Legacy 36-bin grid (for Fortran comparison benchmarks).
+# Fortran initbounds.f: Mo = 1.0d-21 * 2.d0**(-6) = 1.5625e-23 exactly.
+XK0_LEGACY = 1.0e-21 * 2.0**(-6)  # = 1.5625e-23 kg
 NBINS_LEGACY = 36
 
 

@@ -181,10 +181,10 @@ def run_scenario(case_key, nbins, xk, verbose=True):
 
     Nk, Mk, Gc, so2_init = make_initial_state(nbins, xk)
 
-    # Background: clean air (zeros)
-    Nk_bg = jnp.zeros_like(Nk)
-    Mk_bg = jnp.zeros_like(Mk)
-    Gc_bg = jnp.zeros_like(Gc)
+    # Background concentrations: clean air (zeros)
+    Nk_bg_conc = jnp.zeros_like(Nk)
+    Mk_bg_conc = jnp.zeros_like(Mk)
+    Gc_bg_conc = jnp.zeros_like(Gc)
 
     # Build process list
     processes = ['so2_chemistry', 'nucleation', 'coagulation', 'condensation']
@@ -202,7 +202,8 @@ def run_scenario(case_key, nbins, xk, verbose=True):
     if kdil > 0:
         kw.update(
             kdil=jnp.float64(kdil),
-            Nk_bg=Nk_bg, Mk_bg=Mk_bg, Gc_bg=Gc_bg,
+            Nk_bg_conc=Nk_bg_conc, Mk_bg_conc=Mk_bg_conc,
+            Gc_bg_conc=Gc_bg_conc,
         )
 
     # Warmup JIT
@@ -248,9 +249,9 @@ def run_scenario(case_key, nbins, xk, verbose=True):
             print(f"    t={i//60}h  N={N_tot_every[i]/BOXVOL:.2e}/cm3  "
                   f"SO2={Gc_SO2_every[i]:.2e}  elapsed={elapsed:.1f}s")
 
-        # Step
-        Nk, Mk, Gc = step_fn_jit(Nk, Mk, Gc, xk, temp, pres, boxvol,
-                                   rh, alpha, dt, **kw)
+        # Step (boxvol evolves when dilution is active)
+        Nk, Mk, Gc, boxvol = step_fn_jit(Nk, Mk, Gc, xk, temp, pres, boxvol,
+                                           rh, alpha, dt, **kw)
 
         # Update passive tracer
         if kdil > 0:
