@@ -73,6 +73,13 @@ MW_SO4 = 96.0
 SV_H2SO4 = 42.88               # Sum of atomic diffusion volumes for H2SO4
 SV_SO2 = 41.73                  # Sum of atomic diffusion volumes for SO2
 
+# Mass accommodation coefficients (dimensionless)
+# H2SO4 on aqueous sulfate: 0.65 (Poschl et al. 1998). Note the Fortran
+# benchmark harnesses use alpha=1.0, so Fortran-comparison runs must pass
+# alpha=1.0 explicitly.
+ALPHA_H2SO4 = 0.65
+ALPHA_ORGANIC = 1.0             # Organics: no established value; unity assumed
+
 # Condensation numerical thresholds
 NEPS_COND = 1.0e-5             # Minimum number for condensation
 CS_EPS = 1.0e-20               # Minimum condensation sink

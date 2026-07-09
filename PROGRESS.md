@@ -4,6 +4,46 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-07-09 (Thu) — Per-species accommodation coefficients (H2SO4 = 0.65, organics = 1.0)
+
+**Time**: afternoon PST
+**Branch**: `feat/vbs-soa-updated`
+
+### Summary
+The mass accommodation coefficient was a single scalar (1.0) applied to both
+H2SO4 and organic condensation. Split it per-species:
+
+- `core/config.py`: new constants `ALPHA_H2SO4 = 0.65` (Pöschl et al. 1998,
+  H2SO4 on aqueous sulfate) and `ALPHA_ORGANIC = 1.0`.
+- `solvers/condensation.py` `make_step()`: new `alpha_organic` kwarg (added
+  to `_VALID_MAKE_STEP_KWARGS`). The `soa_condensation` process uses it when
+  provided; falls back to the positional `alpha` otherwise (backward
+  compatible). The positional `alpha` is now documented as the H2SO4
+  accommodation coefficient.
+- `run_box_model.py`: new `--alpha` CLI flag, **default 0.65** (was
+  hard-coded 1.0). Header printout shows the value. Use `--alpha 1.0` to
+  reproduce Fortran benchmark behavior.
+- `core/state.py`: `TomasState.alpha` documented as H2SO4-specific;
+  default stays 1.0 (Fortran-faithful).
+
+### Validation
+- Full test suite: 496 passed, 650 skipped.
+- Verified `alpha_organic` affects only the SOA path: with
+  `alpha=0.65, alpha_organic=1.0` vs `alpha_organic=0.65`, organic aerosol
+  mass differs, H2SO4 gas is bit-identical, total SO4 differs by 1 ULP
+  (remapping roundoff only). Omitting `alpha_organic` reproduces old
+  single-alpha behavior exactly.
+- 24h default box-model run completes with alpha=0.65.
+
+### Notes / gotchas
+- Fortran harnesses (`benchmark_24h.f` line 241 etc.) set `alpha = 1.0d0`;
+  the commented-out `data alpha/0.65,.../` in `getCondSink.f` was never
+  active. Any JAX-vs-Fortran comparison must pass `alpha=1.0` explicitly.
+- Benchmark scripts under `benchmarks/python/` are unchanged (they set
+  their own alpha).
+
+---
+
 ## 2026-06-13 (Sat) — Refresh VBS/SOA branch onto dev + validate vs Fortran
 
 **Time**: afternoon PST

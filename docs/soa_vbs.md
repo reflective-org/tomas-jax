@@ -193,6 +193,21 @@ Nk, Mk, Gc, bv = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
                         oh_conc=1e6, kdil=1e-5)
 ```
 
+### Per-species accommodation coefficient
+
+The positional `alpha` is the H2SO4 accommodation coefficient. SOA
+condensation uses the `alpha_organic` kwarg if provided, otherwise it falls
+back to `alpha`. Recommended values: `ALPHA_H2SO4 = 0.65` (Pöschl et al.
+1998) for H2SO4 and `ALPHA_ORGANIC = 1.0` for organics (both in
+`core/config.py`). Fortran benchmark harnesses use alpha = 1.0 for
+everything, so Fortran-comparison runs must pass `alpha=1.0`.
+
+```python
+step = make_step(['condensation', 'soa_condensation'])
+Nk, Mk, Gc, bv = step(Nk, Mk, Gc, xk, temp, pres, boxvol, rh,
+                      ALPHA_H2SO4, dt, alpha_organic=ALPHA_ORGANIC)
+```
+
 ### Custom VBS configuration
 
 ```python

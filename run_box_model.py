@@ -23,6 +23,7 @@ from tomas_jax.core.config import (
     NBINS, ICOMP, ICOMP_NODIAG, N_GAS_SPECIES,
     SRTSO4, SRTSO2, SRTH2O, SRTNH4,
     MW_H2SO4, MW_SO2, AVOGADRO,
+    ALPHA_H2SO4,
 )
 from tomas_jax.physics.so2_chemistry import (
     so2_oxidation_step, calc_k1_so2_oh,
@@ -114,7 +115,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
                    so2_init: float = 0.0, so2_emission: float = 0.0,
                    oh_conc: float = 0.0, oh_diurnal: bool = False,
                    lat: float = 45.0, lon: float = 0.0, day_of_year: int = 172,
-                   dilution_rate: float = 0.0, dilution_bg: str = 'clean'):
+                   dilution_rate: float = 0.0, dilution_bg: str = 'clean',
+                   alpha: float = ALPHA_H2SO4):
     enable_so2 = so2_init > 0 or so2_emission > 0 or oh_conc > 0
     enable_dilution = dilution_rate > 0
     print("="*60)
@@ -128,6 +130,8 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     print(f"   Dilution:     {'ON' if enable_dilution else 'OFF'}"
           + (f" (kdil={dilution_rate:.1e}, bg={dilution_bg})" if enable_dilution else ""))
     print(f"   Cond. Method: {method.upper()}")
+    print(f"   H2SO4 accom. coeff: {alpha}"
+          + (" (Poschl et al. 1998)" if alpha == ALPHA_H2SO4 else ""))
     print(f"   Precision: {'float64' if jax.config.jax_enable_x64 else 'float32'}")
     print("="*60)
 
@@ -136,7 +140,9 @@ def run_box_model(enable_condensation: bool = True, method: str = 'ppm_jit',
     temp = 298.0    # Kelvin
     pres = 101325.0 # Pascals
     rh = 0.5        # 50% relative humidity
-    alpha = 1.0     # Accommodation coefficient
+    # alpha: H2SO4 mass accommodation coefficient (function arg).
+    # Default ALPHA_H2SO4=0.65 (Poschl et al. 1998); use --alpha 1.0 to
+    # reproduce Fortran benchmark behavior.
 
     # --- B. Initialize Particles ---
     Nk_init, Mk_init, xk = create_lognormal_dist(
@@ -560,6 +566,11 @@ if __name__ == "__main__":
                         help='Dilution rate [s^-1] (e.g. 1e-4 for BL growth)')
     parser.add_argument('--dilution-bg', choices=['clean', 'ambient'], default='clean',
                         help='Dilution background: clean (zeros) or ambient (initial state)')
+    # Condensation
+    parser.add_argument('--alpha', type=float, default=ALPHA_H2SO4,
+                        help='H2SO4 mass accommodation coefficient '
+                             f'(default: {ALPHA_H2SO4}, Poschl et al. 1998; '
+                             'use 1.0 to match Fortran benchmarks)')
     args = parser.parse_args()
     results = run_box_model(
         enable_condensation=not args.no_condensation,
@@ -576,4 +587,5 @@ if __name__ == "__main__":
         day_of_year=args.day_of_year,
         dilution_rate=args.dilution_rate,
         dilution_bg=args.dilution_bg,
+        alpha=args.alpha,
     )

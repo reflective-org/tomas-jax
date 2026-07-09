@@ -92,7 +92,7 @@ _VALID_MAKE_STEP_KWARGS = {
     # coagulation
     'icomp_nodiag',
     # soa_condensation
-    'vbs_config', 'soa_redistribution', 'soa_use_ppm',
+    'vbs_config', 'soa_redistribution', 'soa_use_ppm', 'alpha_organic',
     # dilution (volume-expansion; background in [per cm^3] units)
     'kdil', 'Nk_bg_conc', 'Mk_bg_conc', 'Gc_bg_conc',
 }
@@ -757,6 +757,11 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
         step_fn(Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt, **kwargs)
     and returns (Nk, Mk, Gc, boxvol).
 
+    The positional ``alpha`` is the H2SO4 mass accommodation coefficient
+    (recommended: ALPHA_H2SO4 = 0.65, Poschl et al. 1998; Fortran benchmarks
+    use 1.0). SOA condensation uses the ``alpha_organic`` kwarg if provided
+    (recommended: ALPHA_ORGANIC = 1.0), otherwise falls back to ``alpha``.
+
     When dilution is active, boxvol is updated (expanded) each timestep.
     When dilution is not in the process list, boxvol is returned unchanged.
 
@@ -922,8 +927,12 @@ def make_step(processes, cond_method='ppm_jit', nucl_scheme='ricco_dunne',
                 # Backward compat: old soa_use_ppm kwarg
                 if 'soa_use_ppm' in kwargs:
                     redist = 'tfl' if kwargs['soa_use_ppm'] else 'direct'
+                # Organics may use a different accommodation coefficient than
+                # H2SO4 (e.g. alpha=0.65 for H2SO4, alpha_organic=1.0).
+                # Falls back to the positional alpha if not provided.
+                alpha_org = kwargs.get('alpha_organic', alpha)
                 Nk, Mk, Gc = soa_condensation_step(
-                    Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha, dt,
+                    Nk, Mk, Gc, xk, temp, pres, boxvol, rh, alpha_org, dt,
                     vbs_config=vbs_cfg, redistribution=redist,
                     solver=soa_solver,
                 )

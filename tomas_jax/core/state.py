@@ -29,7 +29,10 @@ class TomasState(NamedTuple):
     boxvol: jnp.ndarray  # Scalar array
     Gc: jnp.ndarray    # Gas-phase concentrations [kg/grid cell], shape (N_GAS_SPECIES,)
     rh: jnp.ndarray    # Relative humidity [fraction 0-1]
-    alpha: jnp.ndarray # Accommodation coefficient (scalar)
+    alpha: jnp.ndarray # H2SO4 accommodation coefficient (scalar). Default 1.0
+                       # matches Fortran benchmarks; 0.65 (ALPHA_H2SO4,
+                       # Poschl et al. 1998) is recommended for realistic
+                       # sulfuric-acid simulations.
 
     @classmethod
     def create(
