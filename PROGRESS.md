@@ -4,6 +4,69 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-07-23 (Thu) — GPU-fast reduced model (`tomas_jax.fast`)
+
+**Time**: evening PST
+**Branch**: `gpu-fast` (based on dev)
+
+### Summary
+New `tomas_jax/fast/` subpackage: a natively-batched (leading cell axis)
+recomposition of the microphysics for global-model coupling, targeting
+1M cells × 6 simulated hours in <10 s on an A100/H100 at float64.
+Reduced physics: 40 bins, aerosol SO4+H2O only (ICOMP=2), gases
+H2SO4+SO2 only, SO2+OH chemistry, Dunne 2016 neutral-binary nucleation
+(Jbn, analytic integration), coagulation, PPM condensation, Tabazadeh
+1997 water equilibrium. The full 44-species model is untouched; all
+existing tests remain green. See docs/gpu_fast.md for architecture,
+deviations, and calibration data.
+
+### Changes
+- `tomas_jax/fast/` — config, FastState, vectorized MNFIX (O(1) depth,
+  exact conservation), binary Tang density, pure-JAX Tabazadeh water,
+  analytic Jbn nucleation, adaptive-capped Euler coagulation
+  (loss-frequency criterion, c_max=0.05), batched PPM condensation
+  (global-max capped CFL substeps, masks instead of lax.cond),
+  step composer, jit(scan) driver with donation / cell chunking /
+  stiffness-sorted chunking.
+- `benchmarks/python/bench_fast_1m.py` — GPU benchmark + CPU smoke, with
+  sulfur-budget and cap-hit validation (fails loudly).
+- `tests/test_fast_{mnfix,water,nucleation,step,vs_full}.py` — 43 tests:
+  MNFIX equivalence vs sequential, Tabazadeh vs numpy reference, Jbn
+  channel pinning, exact S conservation (clamped + unclamped), batch
+  semantics (identical-cells, permutation, chunking), stratospheric
+  regime, and full-model comparison (dry mass ≤1.5e-4, number ≤1.9%).
+
+### Bugs found & fixed along the way
+- Fixed coarse coagulation substeps lose >10% of mass through the
+  positivity clamp in high-N states → adaptive loss-frequency criterion.
+- Fixed 4-substep nucleation over-nucleates ~50% in burst scenarios →
+  exact closed-form gas ODE integration.
+- Condensed mass deposited into bins whose population advected away
+  within the step was destroyed by the next MNFIX phase-1 reset (up to
+  ~2%/step of a cell's mass at dt=360 s; the full model shares this leak
+  at smaller dt) → deposit redistributed to surviving bins.
+- Condensation/nucleation gas↔aerosol kg-1:1 conventions create sulfur
+  at the 2% level of the flux → S-conserving 98/96 conversions
+  (flag-gated for full-model comparison).
+
+### Known issues / limitations
+- No GPU measurements yet (developed on CPU; M-series: ~7,200
+  cell-steps/s at 10k cells). Run bench_fast_1m.py on the target GPU;
+  if the 10 s target is missed, the documented next lever is a Pallas
+  fused coagulation kernel (kij computed in SMEM instead of 12.8 GB in
+  HBM at 1M cells).
+- Coagulation stiffness is heavy-tailed across cells (p99 needs ~200+
+  substeps at dt=360 s in humid high-N cells); use n_cell_chunks +
+  sort_by_coag_cost, and monitor coag_cap_hit.
+- MNFIX empty-bin NEPS seeding (Fortran-faithful) sets a ~1e-8..1e-7
+  sulfur-budget floor in very clean cells.
+
+### Next steps
+- GPU benchmark on A100/H100; Pallas coag kernel if needed.
+- GCM coupling driver (per-transport-step fast_step calls).
+
+---
+
 ## 2026-05-07 (Wed) — Nucleation rate helpers refactored
 
 **Time**: evening PST

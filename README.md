@@ -301,6 +301,23 @@ Median wall time per 24h scenario (49 LHC scenarios, 36-bin legacy grid):
 | Combined (coag+cond) | 0.33 s | 0.41 s (PPM_JIT) | 1.27x |
 | Full (nucl+coag+cond) | 0.33 s | 5–13 s (scan-fused) | — |
 
+### GPU-fast reduced model (this branch)
+
+`tomas_jax.fast` is a natively-batched reduced model (SO4+H2O aerosol,
+H2SO4+SO2 gases, Dunne neutral-binary nucleation, PPM condensation,
+coagulation, Tabazadeh 1997 water) for running ~10⁶ independent cells per
+call on a datacenter GPU — built for global-model coupling. See
+`docs/gpu_fast.md` and:
+
+```bash
+# GPU target: 1M cells x 6 simulated hours in < 10 s
+python -m benchmarks.python.bench_fast_1m --cells 1000000 --hours 6 \
+    --n-cell-chunks 8 --sort-by-coag-cost
+
+# CPU validation (no GPU required)
+python -m benchmarks.python.bench_fast_1m --cells 1000 --hours 1 --cpu-smoke
+```
+
 ---
 
 ## State Variables

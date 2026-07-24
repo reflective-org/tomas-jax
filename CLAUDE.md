@@ -46,6 +46,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **GPU deployment:** See `docs/gpu_deployment.md`. Use only `*_jit` methods and `make_step()`. Legacy numpy paths (`method='tfl'`, `method='ppm'`) emit `DeprecationWarning` and are not GPU-compatible. `make_step()` returns a JIT-compiled function by default (`jit=True`). For batch/ensemble runs, use `jax.vmap(step_fn)`.
 - **Centralized float64 config:** Only `core/config.py` calls `jax.config.update("jax_enable_x64", True)`. All other library modules reference it via comment. Do not add redundant x64 config calls.
 - **dilution_step requires explicit background arrays** (no `None` defaults). Pass `jnp.zeros_like(Nk)` etc. for clean-air dilution. This ensures JIT safety.
+- **`tomas_jax/fast/` is the GPU-fast reduced model** (this branch): natively batched over a leading cell axis, aerosol SO4+H2O only (ICOMP=2: SRTSO4=0, SRTH2O=1), gases H2SO4+SO2 only (Gc 2-wide: GH2SO4=0, GSO2=1). Do NOT edit `core/config.py` to ICOMP=2 — species indices are imported module-level across the full model and JAX silently clamps out-of-range indices. The fast package has its own config/state/mnfix/density/water and reuses the shape-agnostic full-model kernels via vmap. Rules: loop trip counts are global batch reductions with static caps (never per-cell traced loops); MNFIX is the vectorized `fast/mnfix.py` (exact-conservation one-hot scatter, 2 sweeps); nucleation is analytic (closed-form gas ODE); gas↔aerosol transfers use S-conserving 98/96 MW conversions. See docs/gpu_fast.md for deviations and calibration. Benchmark: `python -m benchmarks.python.bench_fast_1m --cells 1000 --hours 1 --cpu-smoke`.
 
 ## File Layout
 
@@ -71,6 +72,16 @@ tomas_jax/
   physics/dilution.py         — Dilution/entrainment: first-order relaxation toward background (JIT-compilable)
   solvers/diffrax.py          — Coagulation solvers: Tsit5 adaptive (diffrax_step), forward Euler (coag_euler_step)
   solvers/condensation.py     — Process orchestrator: core helpers + thin wrappers + make_step() composable API + scan-fused loops
+  fast/config.py              — GPU-fast reduced model: dims (ICOMP=2), compact species/gas indices
+  fast/state.py               — FastState: batched NamedTuple (leading cell axis C)
+  fast/mnfix.py               — Vectorized MNFIX (O(1) depth, exact-conservation scatter)
+  fast/density.py             — Binary H2SO4/H2O Tang density
+  fast/water.py               — Tabazadeh 1997 water equilibrium (pure JAX)
+  fast/nucleation.py          — Dunne Jbn neutral-binary, analytic gas-ODE integration
+  fast/coagulation.py         — Adaptive-capped Euler coagulation (loss-frequency criterion)
+  fast/condensation.py        — Batched PPM driver, global-max capped CFL substeps
+  fast/step.py                — Process composition (chem→nucl→mnfix→water→coag→cond→water→mnfix)
+  fast/run.py                 — jit(scan) driver: donation, cell chunking, stiffness sorting
 
 benchmarks/
   fortran/benchmark_24h.f     — Fortran 24h benchmark harness
@@ -88,6 +99,7 @@ benchmarks/
   python/validate_so2_chemistry.py — SO2 chemistry validation (7 figures vs Sun et al. 2022, incl. stratospheric lifetime heatmaps)
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
   python/benchmark_dilution.py — Dilution benchmark (3 cases × 24h, all processes + SO2 + dilution, 6 figures)
+  python/bench_fast_1m.py     — GPU-fast reduced model benchmark (1M cells × 6h target <10s; --cpu-smoke mode)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -114,6 +126,7 @@ docs/
   zhao2024_nucleation.md      — Zhao 2024 11-mechanism NPF scheme documentation
   so2_chemistry.md            — SO2+OH chemistry (Sun et al. 2022), validation, usage
   dilution.md                 — Dilution/entrainment algorithm, parameters, usage
+  gpu_fast.md                 — GPU-fast reduced model: architecture, physics deviations, calibration, usage
   missing_physics.md          — Gap analysis of unimplemented physics
   future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```
