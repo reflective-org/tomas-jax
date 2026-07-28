@@ -4,6 +4,34 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-07-24 (Fri) — Time-varying forcing profiles in `run_fast`
+
+**Time**: morning PST
+**Branch**: `gpu-fast`
+
+### Summary
+`run_fast` forcings (`oh_conc`, `h2so4_prod`, `so2_prod`) now accept a
+leading time axis — `(n_steps, 1)` for a cell-uniform profile (e.g.
+diurnal OH) or `(n_steps, C)` per-cell — in addition to the existing
+scalar / `(C,)` forms. Row `t` applies to outer step `t`. `fast_step`
+already took per-call OH (the GCM path); this brings the scan driver to
+parity so standalone multi-hour runs can use realistic OH profiles.
+
+### Changes
+- `tomas_jax/fast/run.py`: time-varying forcings threaded through the
+  `lax.scan` as xs (constants stay closed over — nothing materialized at
+  `(n_steps, C)` unless the caller provides it); chunked and
+  stiffness-sorted paths slice/permute the cell axis of 2D forcings;
+  time-axis mismatches raise `ValueError`.
+- `tests/test_fast_step.py`: profile == manual per-step loop (1e-10),
+  `(n_steps, 1)` broadcast, shape validation, profile + sorted chunking.
+- `docs/gpu_fast.md`: forcing-shape table, diurnal-OH helper pointer.
+
+### Known issues / limitations
+- None new. GPU benchmark still pending (see 2026-07-23 entry).
+
+---
+
 ## 2026-07-23 (Thu) — GPU-fast reduced model (`tomas_jax.fast`)
 
 **Time**: evening PST
