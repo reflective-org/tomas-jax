@@ -214,6 +214,65 @@ class TestBatchSemantics:
         )
 
 
+class TestTimeVaryingForcing:
+    def test_oh_profile_equals_manual_loop(self):
+        """(n_steps, 1) and (n_steps, C) OH profiles match stepping
+        fast_step by hand with the same per-step values."""
+        state = _lognormal_cells(3, seed=10)
+        n_steps = 5
+        rng = np.random.default_rng(0)
+        oh_profile = jnp.asarray(rng.uniform(5e5, 5e6, (n_steps, 3)))
+
+        out, _ = run_fast(state, n_steps=n_steps, dt=360.0, oh_conc=oh_profile)
+
+        manual = state
+        for t in range(n_steps):
+            manual, _ = fast_step(manual, 360.0, oh_conc=oh_profile[t])
+        np.testing.assert_allclose(
+            np.asarray(out.Nk), np.asarray(manual.Nk), rtol=1e-10
+        )
+        np.testing.assert_allclose(
+            np.asarray(out.Gc), np.asarray(manual.Gc), rtol=1e-10
+        )
+
+        # cell-uniform profile: (n_steps, 1) broadcast
+        uniform = oh_profile[:, :1]
+        out_u, _ = run_fast(state, n_steps=n_steps, dt=360.0, oh_conc=uniform)
+        manual_u = state
+        for t in range(n_steps):
+            manual_u, _ = fast_step(manual_u, 360.0, oh_conc=uniform[t, 0])
+        np.testing.assert_allclose(
+            np.asarray(out_u.Gc), np.asarray(manual_u.Gc), rtol=1e-10
+        )
+
+    def test_profile_shape_validation(self):
+        state = _lognormal_cells(3, seed=10)
+        with pytest.raises(ValueError, match="n_steps"):
+            run_fast(state, n_steps=5, dt=360.0,
+                     oh_conc=jnp.ones((4, 3)) * 1e6)
+
+    def test_profile_with_chunking(self):
+        """Time profiles slice correctly across sorted cell chunks
+        (identical cells so chunk substep counts match)."""
+        one = _lognormal_cells(1, seed=12)
+        C = 4
+        state = FastState(
+            Nk=jnp.tile(one.Nk, (C, 1)), Mk=jnp.tile(one.Mk, (C, 1, 1)),
+            Gc=jnp.tile(one.Gc, (C, 1)), xk=one.xk,
+            temp=jnp.tile(one.temp, C), pres=jnp.tile(one.pres, C),
+            boxvol=jnp.tile(one.boxvol, C), rh=jnp.tile(one.rh, C),
+        )
+        profile = jnp.linspace(1e6, 3e6, 3)[:, None]  # (n_steps, 1)
+        out1, _ = run_fast(state, n_steps=3, dt=360.0, oh_conc=profile)
+        out2, _ = run_fast(
+            state, n_steps=3, dt=360.0, oh_conc=profile,
+            n_cell_chunks=2, sort_by_coag_cost=True,
+        )
+        np.testing.assert_allclose(
+            np.asarray(out2.Nk), np.asarray(out1.Nk), rtol=1e-10
+        )
+
+
 class TestRegimes:
     def test_stratospheric_endtoend(self):
         """SAI regime: 220 K, 5 kPa, RH 3%, SO2-rich — finite and conserving."""

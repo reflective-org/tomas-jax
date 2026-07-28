@@ -30,17 +30,32 @@ state = FastState.create(
 
 out, diags = run_fast(
     state, n_steps=60, dt=360.0,          # 6 h
-    oh_conc=oh_C,                          # (C,) [molec/cm^3]
-    so2_prod=so2_src_C,                    # (C,) [kg/cell/s], optional
+    oh_conc=oh_profile,                    # see forcing shapes below
+    so2_prod=so2_src_C,                    # [kg/cell/s], optional
     n_cell_chunks=8,                       # REQUIRED at C ~ 1M (memory)
     sort_by_coag_cost=True,                # see Performance
 )
 ```
 
+Forcings (`oh_conc`, `h2so4_prod`, `so2_prod`) each accept:
+
+| shape | meaning |
+|---|---|
+| scalar | constant in time, uniform over cells |
+| `(C,)` | constant in time, per cell |
+| `(n_steps, 1)` | time profile (e.g. diurnal OH), uniform over cells |
+| `(n_steps, C)` | time profile, per cell — row `t` applies to step `t` |
+
+Time-varying forcings are fed through the scan. To build a diurnal OH
+profile, `physics/so2_chemistry.calc_solar_zenith_angle` +
+`calc_oh_concentration` are reusable (pure JAX).
+
 `diags` holds per-step totals (N_tot, dry SO4 mass, gas totals), the
 coagulation top-bin overflow (for mass-budget closure), and the substep
 cap-hit flags. For single steps (e.g. called from a GCM driver each
-transport step) use `fast_step(state, dt, ...)` / `make_fast_step()`.
+transport step) use `fast_step(state, dt, oh_conc=...)` /
+`make_fast_step()` — OH is a per-call argument there, so the host model
+supplies fresh per-cell OH every step.
 
 Benchmark harness:
 

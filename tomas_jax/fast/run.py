@@ -5,6 +5,14 @@ per segment) with the state buffer donated between segments, so a 6-hour
 run at dt=360 s is 6 XLA program invocations with no host round-trips
 inside a segment. Cells are independent, so optional chunking over the
 cell axis is exact and cuts peak memory proportionally.
+
+Forcings (oh_conc, h2so4_prod, so2_prod) accept, independently of each
+other:
+    scalar          — constant in time, uniform over cells
+    (C,)            — constant in time, per cell
+    (n_steps, 1)    — time profile, uniform over cells
+    (n_steps, C)    — time profile, per cell
+Time-varying forcings are fed through the scan (one row per outer step).
 """
 from functools import partial
 
@@ -14,6 +22,23 @@ import jax.numpy as jnp
 from .config import GH2SO4, GSO2, SRTSO4
 from .state import FastState
 from .step import fast_step
+
+_FORCING_NAMES = ("oh_conc", "h2so4_prod", "so2_prod")
+
+
+def _normalize_forcing(name, v, n_steps, ncells):
+    """Return ((C,) array, time_varying=False) or ((n_steps, C), True)."""
+    arr = jnp.asarray(v, dtype=jnp.float64)
+    if arr.ndim <= 1:
+        return jnp.broadcast_to(arr, (ncells,)), False
+    if arr.ndim == 2:
+        if arr.shape[0] != n_steps:
+            raise ValueError(
+                f"{name}: time-varying forcing must have shape "
+                f"(n_steps={n_steps}, C or 1), got {arr.shape}"
+            )
+        return jnp.broadcast_to(arr, (n_steps, ncells)), True
+    raise ValueError(f"{name}: expected ndim <= 2, got shape {arr.shape}")
 
 
 def run_fast(
@@ -34,7 +59,8 @@ def run_fast(
         state: FastState with leading cell axis C.
         n_steps: Total outer steps (e.g. 60 for 6 h at dt=360 s).
         dt: Outer timestep [s].
-        oh_conc / h2so4_prod / so2_prod: scalars or (C,) arrays.
+        oh_conc / h2so4_prod / so2_prod: scalar, (C,), (n_steps, 1), or
+            (n_steps, C) — see module docstring. Row t applies to step t.
         steps_per_segment: outer steps fused per jit(scan) segment.
         n_cell_chunks: split the cell axis into this many sequential
             chunks (exact — cells are independent). REQUIRED at large C:
@@ -56,14 +82,14 @@ def run_fast(
           overflow_so4 (n_steps,): coag top-bin SO4 mass lost this step [kg]
           cond_cap_hit / coag_cap_hit (n_steps,): bool substep-cap flags
     """
+    forcings = {
+        "oh_conc": oh_conc, "h2so4_prod": h2so4_prod, "so2_prod": so2_prod
+    }
+
     if n_cell_chunks > 1:
-        if sort_by_coag_cost:
-            return _run_sorted(
-                state, n_steps, dt, oh_conc, h2so4_prod, so2_prod,
-                steps_per_segment, n_cell_chunks, **step_kwargs,
-            )
-        return _run_chunked(
-            state, n_steps, dt, oh_conc, h2so4_prod, so2_prod,
+        runner = _run_sorted if sort_by_coag_cost else _run_chunked
+        return runner(
+            state, n_steps, dt, forcings,
             steps_per_segment, n_cell_chunks, **step_kwargs,
         )
 
@@ -72,22 +98,16 @@ def run_fast(
     # first segment call.
     state = jax.tree_util.tree_map(jnp.array, state)
 
-    def _percell(v):
-        return jnp.broadcast_to(
-            jnp.asarray(v, dtype=jnp.float64), (state.ncells,)
+    const = {}
+    varying = {}
+    for name in _FORCING_NAMES:
+        arr, is_varying = _normalize_forcing(
+            name, forcings[name], n_steps, state.ncells
         )
+        (varying if is_varying else const)[name] = arr
 
-    oh_conc = _percell(oh_conc)
-    h2so4_prod = _percell(h2so4_prod)
-    so2_prod = _percell(so2_prod)
-
-    def scan_body(carry, _):
-        st, ys = carry  # ys unused; scan carries only the state
-        st, diag = fast_step(
-            st, dt,
-            oh_conc=oh_conc, h2so4_prod=h2so4_prod, so2_prod=so2_prod,
-            **step_kwargs,
-        )
+    def scan_body(st, xs):
+        st, diag = fast_step(st, dt, **const, **xs, **step_kwargs)
         out = {
             "N_tot": jnp.sum(st.Nk),
             "M_dry": jnp.sum(st.Mk[..., SRTSO4]),
@@ -97,22 +117,20 @@ def run_fast(
             "cond_cap_hit": diag["cond_cap_hit"],
             "coag_cap_hit": diag["coag_cap_hit"],
         }
-        return (st, ys), out
+        return st, out
 
-    @partial(jax.jit, donate_argnums=(0,), static_argnums=(1,))
-    def run_segment(st, length):
-        (st, _), ys = jax.lax.scan(
-            scan_body, (st, None), None, length=length
-        )
-        return st, ys
+    @partial(jax.jit, donate_argnums=(0,), static_argnums=(2,))
+    def run_segment(st, xs, length):
+        return jax.lax.scan(scan_body, st, xs, length=length)
 
     diags_list = []
-    remaining = n_steps
-    while remaining > 0:
-        length = min(steps_per_segment, remaining)
-        state, ys = run_segment(state, length)
+    done = 0
+    while done < n_steps:
+        length = min(steps_per_segment, n_steps - done)
+        xs = {k: v[done:done + length] for k, v in varying.items()}
+        state, ys = run_segment(state, xs, length)
         diags_list.append(jax.device_get(ys))
-        remaining -= length
+        done += length
 
     import numpy as np
     diags = {
@@ -130,14 +148,22 @@ def _permute_state(state, idx):
     )
 
 
+def _index_forcing_cells(v, idx, n_steps, ncells):
+    """Apply a cell-axis index/slice to a forcing of any accepted shape."""
+    arr = jnp.asarray(v, dtype=jnp.float64)
+    if arr.ndim == 2:
+        return jnp.broadcast_to(arr, (n_steps, ncells))[:, idx]
+    if arr.ndim == 1:
+        return arr[idx]
+    return arr
+
+
 def _run_sorted(
-    state, n_steps, dt, oh_conc, h2so4_prod, so2_prod,
+    state, n_steps, dt, forcings,
     steps_per_segment, n_cell_chunks, **step_kwargs,
 ):
     """Sort cells by initial coagulation loss frequency, run chunked,
     restore the original cell order."""
-    import numpy as np
-
     from .coagulation import _kernel_cell, _loss_frequency_cell
 
     @jax.jit
@@ -148,34 +174,28 @@ def _run_sorted(
         )
         return jnp.max(lam, axis=-1)
 
-    def _maybe_permute(v, idx):
-        arr = jnp.asarray(v, dtype=jnp.float64)
-        return arr[idx] if arr.ndim > 0 else arr
-
     order = jnp.argsort(_lam(state))
     inverse = jnp.argsort(order)
+    C = state.ncells
+    forcings = {
+        k: _index_forcing_cells(v, order, n_steps, C)
+        for k, v in forcings.items()
+    }
     out, diags = _run_chunked(
-        _permute_state(state, order), n_steps, dt,
-        _maybe_permute(oh_conc, order),
-        _maybe_permute(h2so4_prod, order),
-        _maybe_permute(so2_prod, order),
+        _permute_state(state, order), n_steps, dt, forcings,
         steps_per_segment, n_cell_chunks, **step_kwargs,
     )
     return _permute_state(out, inverse), diags
 
 
 def _run_chunked(
-    state, n_steps, dt, oh_conc, h2so4_prod, so2_prod,
+    state, n_steps, dt, forcings,
     steps_per_segment, n_cell_chunks, **step_kwargs,
 ):
     import numpy as np
 
     C = state.ncells
     bounds = np.linspace(0, C, n_cell_chunks + 1).astype(int)
-
-    def _slice_forcing(v, lo, hi):
-        arr = jnp.asarray(v, dtype=jnp.float64)
-        return arr[lo:hi] if arr.ndim > 0 else arr
 
     out_states = []
     diags_acc = None
@@ -185,13 +205,15 @@ def _run_chunked(
             xk=state.xk, temp=state.temp[lo:hi], pres=state.pres[lo:hi],
             boxvol=state.boxvol[lo:hi], rh=state.rh[lo:hi],
         )
+        chunk_forcings = {
+            k: _index_forcing_cells(v, slice(lo, hi), n_steps, C)
+            for k, v in forcings.items()
+        }
         chunk, diags = run_fast(
             chunk, n_steps, dt,
-            oh_conc=_slice_forcing(oh_conc, lo, hi),
-            h2so4_prod=_slice_forcing(h2so4_prod, lo, hi),
-            so2_prod=_slice_forcing(so2_prod, lo, hi),
             steps_per_segment=steps_per_segment,
             n_cell_chunks=1,
+            **chunk_forcings,
             **step_kwargs,
         )
         out_states.append(jax.device_get(chunk))
@@ -203,7 +225,6 @@ def _run_chunked(
             for k in ("cond_cap_hit", "coag_cap_hit"):
                 diags_acc[k] = diags_acc[k] | diags[k]
 
-    import numpy as np
     merged = FastState(
         Nk=jnp.concatenate([s.Nk for s in out_states]),
         Mk=jnp.concatenate([s.Mk for s in out_states]),
