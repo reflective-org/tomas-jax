@@ -8,8 +8,8 @@ Phase semantics are identical to the sequential version:
   Phase 1  — empty-bin reset (per-bin, no cross-bin writes → exact).
   Phase 2  — extreme out-of-range trim (per-bin → exact).
   Phase 3  — partial transfer to a computed target bin. All shifts are
-             computed from the pre-sweep state and applied as a one-hot
-             scatter; number and mass are conserved by construction
+             computed from the pre-sweep state and applied as a
+             conservative scatter-add; number and mass are conserved by construction
              (identical algebra to the sequential pass). Where the
              sequential ascending-k pass would cascade (a shifting bin
              that also receives a deposit in the same pass), a second
@@ -120,11 +120,27 @@ def _drift_sweep(Nk, Mk, xk, icomp_nodiag):
         shifted[..., None], (xold * n_remain)[..., None] * fj, Mk
     )
 
-    # Deposits: one-hot conservative scatter (B x B contraction, negligible)
-    onehot = (
-        (kk[..., None] == jnp.arange(nbins)) & shifted[..., None]
-    ).astype(Mk.dtype)                                        # (..., B_src, B_dst)
-    recv_N = jnp.einsum('...bd,...b->...d', onehot, nshift)
-    recv_M = jnp.einsum('...bd,...bi->...di', onehot, mshift[..., None] * fj)
+    # Deposits: conservative scatter-add along the bin axis. nshift/mshift
+    # are already zeroed on non-shifting bins, so scattering them to kk=k
+    # is a no-op there. (A one-hot einsum here materializes a
+    # (..., B, B) f64 tensor — 1.6 GB at 125k cells — and dominates the
+    # coagulation substep loop; the scatter moves only (..., B) data.)
+    lead = number.shape[:-1]
+    icomp = Mk.shape[-1]
+    P = 1
+    for d in lead:
+        P *= d
+    rows = jnp.arange(P)[:, None]                             # (P, 1)
+    kk_flat = kk.reshape(P, nbins)
+    recv_N = (
+        jnp.zeros((P, nbins), Nk.dtype)
+        .at[rows, kk_flat].add(nshift.reshape(P, nbins))
+        .reshape(number.shape)
+    )
+    recv_M = (
+        jnp.zeros((P, nbins, icomp), Mk.dtype)
+        .at[rows, kk_flat].add((mshift[..., None] * fj).reshape(P, nbins, icomp))
+        .reshape(Mk.shape)
+    )
 
     return Nk_base + recv_N, Mk_base + recv_M
