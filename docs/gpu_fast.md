@@ -90,11 +90,16 @@ over the cell axis is exact.
    call and is called ~6+ times per step — at 1M cells that alone would
    cost seconds per step. The fast version runs phases 1-2 (empty-bin
    reset, extreme trim) as exact boolean-mask updates and phase 3
-   (partial transfer) as an elementwise shift computation + one-hot
-   conservative scatter, swept a fixed 2×. Number and mass conservation
-   are exact by construction; on isolated drifted bins it is bit-equal to
-   the sequential version (tests/test_fast_mnfix.py). Depth: ~6 fused
-   kernels total.
+   (partial transfer) as an elementwise shift computation + a
+   conservative scatter-add along the bin axis, swept a fixed 2×.
+   Number and mass conservation are exact by construction; on isolated
+   drifted bins it is bit-equal to the sequential version
+   (tests/test_fast_mnfix.py). Depth: ~6 fused kernels total. Note:
+   colliding destination bins make the GPU scatter-add accumulation
+   order unspecified, so runs are NOT bitwise-reproducible run-to-run
+   on GPU (ULP-level differences that grow through the nonlinear
+   cascade); use XLA deterministic-ops flags if bit-exact repeatability
+   matters more than speed.
 
 2. **Shared adaptive substep counts.** Per-cell adaptive loops are
    replaced by one shared count = min(batch-max requirement, static cap):
@@ -165,8 +170,16 @@ criteria miss gain-dominated stiffness entirely.
 
 Measured (Apple M-series CPU, float64): ~7,200 cell-steps/s at 10k cells —
 e.g. 10k cells × 6 h in 84 s, with zero cap hits on realistic heterogeneous
-scenarios. No GPU measurements exist yet; run `bench_fast_1m.py` on the
-target GPU.
+scenarios.
+
+Measured (H100 80GB, float64, jax 0.6.2, 2026-08-13, after the Phase 1
+optimizations of `docs/gpu_fast_optimization.md`): **1M cells × 6 h in
+121.5 s** (4.9e5 cell-steps/s, 8.7 GiB peak) with
+`--n-cell-chunks 8 --sort-by-coag-cost`. The 10 s target needs the
+Phase 2 levers below. `sort_by_coag_cost` re-sorts by current stiffness
+before every scan segment (stiffness evolves; a t=0-only sort measured
+~2.7× slower), and `diags["coag_n_sub"]` exposes the per-step shared
+substep count for tuning.
 
 Cost anatomy at large C (per 360 s outer step): the coagulation rate
 evaluation reads the per-cell kernel `kij (C,40,40)` (12.8 GB at C=1M) and
@@ -176,11 +189,19 @@ is (C,40) elementwise. The λ distribution over cells is heavy-tailed
 
 - **`n_cell_chunks` ≥ 4-8 is required at C=1M** (kij + its triangular
   copies exceed 40 GB unchunked), and
-- **`sort_by_coag_cost=True`** orders cells by initial stiffness before
-  chunking so the batch-max substep count of each chunk matches its own
-  cells — otherwise one stiff cell makes all 1M cells run ~200 substeps.
+- **`sort_by_coag_cost=True`** re-orders cells by their current
+  stiffness before every scan segment so the batch-max substep count of
+  each chunk matches its own cells — otherwise one stiff cell makes all
+  1M cells run ~200 substeps (and a t=0-only sort decays as stiffness
+  evolves; measured ~2.7× slower at 1M cells).
 
-If the first GPU run misses the 10 s target, the next levers in order:
+Done (Phase 1, see docs/gpu_fast_optimization.md): mnfix scatter-add
+(no (C,B,B) one-hot), frozen-kernel decomposition hoisted out of the
+substep loop + fused GEMVs, per-segment re-sort, cached jitted segment
+runner (a fresh jax.jit per run_fast call re-compiled ~6-7 s programs
+per chunk×segment — always reuse the runner).
+
+Remaining levers toward the 10 s target, in order:
 1. **Pallas fused coagulation kernel**: kij per cell is 12.8 KB — compute
    it on the fly in SMEM instead of materializing (C,40,40) in HBM;
    removes the dominant memory traffic (~10× coag speedup).

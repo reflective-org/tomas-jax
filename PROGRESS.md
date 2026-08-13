@@ -4,6 +4,54 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-08-13 (Thu) — First H100 benchmark + Phase 1 GPU optimization (4.5×)
+
+**Time**: morning–afternoon PST
+**Branch**: `perf/gpu-fast-h100` (off `gpu-fast`) — issue #21
+
+### Summary
+First-ever GPU run of `tomas_jax.fast` (H100 80GB, float64): baseline
+1M cells × 6 h = **547 s** (target <10 s). Root-caused with per-process
+GPU timings + XLA HLO dumps, then Phase 1 fixes brought it to
+**121.5 s at 8 chunks / 102.5 s at 16 chunks (5.3×, 5.9e5
+cell-steps/s, 6.3 GiB peak)**; 4M cells scale linearly (393.6 s,
+6.1e5 cell-steps/s, 21.3 GiB). Physics unchanged: sulfur budget
+2.0e-9, full CPU suite green. An adversarial code-review pass (10
+findings) was applied on top. Investigation + living checklist:
+`docs/gpu_fast_optimization.md`.
+
+### Changes
+- `fast/mnfix.py`: phase-3 deposit one-hot einsum ((C,40,40) f64,
+  1.6 GB @ C=125k, 16 such buffers in the optimized HLO) → batched
+  scatter-add. mnfix 7.3 → 1.35 ms; runs every coag substep.
+- `physics/coagulation_rates.py`: optional `kij_parts` (precomputed
+  tril/triu/diag) + the three lower-triangular GEMVs fused into one
+  GEMM (kij_lower read once). Full-model results unchanged.
+- `fast/coagulation.py`: kernel decomposition hoisted out of the Euler
+  substep loop (frozen per outer step); returns `n_sub` →
+  `diags["coag_n_sub"]`. Coag substep 10 → 4.2 ms.
+- `fast/run.py`: `sort_by_coag_cost` re-sorts by current λ before
+  every segment (stiffness evolves; t=0-only sort cost ~2.7×); jitted
+  segment runner now `lru_cache`d at module level — a fresh `jax.jit`
+  closure per call meant 48 re-compiles (~6-7 s each) inside the timed
+  1M run, the single largest cost.
+- `tests/test_fast_perf_refactor.py` (new): kij_parts equivalence,
+  scatter ≡ one-hot deposit + exact number conservation, sorted/chunked
+  ≡ unchunked routing.
+
+### Known issues / limitations
+- Coag substep cap (256) still hits every step: 0.39% of benchmark
+  cells demand >256 substeps (p50=2, p99=194, max~708) — those cells
+  run coarser than the c_max target. Phase 2 (Pallas fused coag kernel,
+  mnfix cadence, c_max) tracked in docs/gpu_fast_optimization.md.
+- <10 s target still 12× away; dominant remaining cost is the
+  coagulation substep loop's (C,40,40) kij HBM traffic.
+
+### Next steps
+- Phase 2 levers per docs/gpu_fast_optimization.md; PR to `gpu-fast`.
+
+---
+
 ## 2026-07-24 (Fri) — Time-varying forcing profiles in `run_fast`
 
 **Time**: morning PST
