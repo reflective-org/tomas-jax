@@ -25,8 +25,6 @@ sort_by_coag_cost), not by lowering the cap.
 The per-cell math (particle properties, kernel, TFL rates) is reused from
 the full model via jax.vmap; only the density call is swapped.
 """
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 
@@ -86,8 +84,9 @@ def coagulation_step(
         n_sub_cap: static cap on the shared substep count
 
     Returns:
-        (Nk, Mk, overflow, cap_hit) — overflow is the mass [kg/cell] lost
-        past the top bin this step, shape (C, 2); cap_hit is a bool scalar.
+        (Nk, Mk, overflow, cap_hit, n_sub) — overflow is the mass
+        [kg/cell] lost past the top bin this step, shape (C, 2); cap_hit
+        is a bool scalar; n_sub the shared substep count actually run.
     """
     kij = jax.vmap(_kernel_cell)(Nk, Mk, temp, pres, boxvol)
 
@@ -99,13 +98,24 @@ def coagulation_step(
     cap_hit = n_raw > n_sub_cap
     dt_sub = dt / n_sub
 
+    # The kernel is frozen for the whole outer step: build its triangular
+    # decomposition once so the substep loop only does the batched matvecs
+    # (rebuilding tril/triu masks per substep re-materializes (C, B, B)).
+    kij_parts = (
+        jnp.tril(kij, k=-1),
+        jnp.triu(kij, k=1),
+        jnp.diagonal(kij, axis1=-2, axis2=-1),
+    )
+
     rates = jax.vmap(
-        partial(calc_coagulation_rates, xk=xk, icomp_nodiag=ICOMP_NODIAG)
+        lambda n, m, kl, ku, kd: calc_coagulation_rates(
+            n, m, None, xk, ICOMP_NODIAG, kij_parts=(kl, ku, kd)
+        )
     )
 
     def substep(_, carry):
         Nk_c, Mk_c, ovf = carry
-        dNdt, dMdt, dOvf = rates(Nk_c, Mk_c, kij)
+        dNdt, dMdt, dOvf = rates(Nk_c, Mk_c, *kij_parts)
         Nk_n = jnp.maximum(Nk_c + dt_sub * dNdt, 0.0)
         Mk_n = jnp.maximum(Mk_c + dt_sub * dMdt, 0.0)
         ovf = ovf + dt_sub * dOvf
@@ -116,4 +126,4 @@ def coagulation_step(
     Nk_f, Mk_f, overflow = jax.lax.fori_loop(
         0, n_sub, substep, (Nk, Mk, overflow0)
     )
-    return Nk_f, Mk_f, overflow, cap_hit
+    return Nk_f, Mk_f, overflow, cap_hit, n_sub

@@ -67,7 +67,8 @@ def fast_step(
     Returns:
         (state, diag) — diag dict with per-step diagnostics:
         coag_overflow (C, 2) mass lost past the top bin this step,
-        cond_cap_hit / coag_cap_hit (bool) substep caps exceeded.
+        cond_cap_hit / coag_cap_hit (bool) substep caps exceeded,
+        coag_n_sub (int) the shared coagulation substep count run.
     """
     Nk, Mk, Gc = state.Nk, state.Mk, state.Gc
     xk = state.xk
@@ -88,7 +89,7 @@ def fast_step(
     Mk = equilibrium_water(Mk, temp, rh)
 
     # 4. Coagulation (adaptive-capped Euler substeps + MNFIX)
-    Nk, Mk, coag_overflow, coag_cap_hit = coagulation_step(
+    Nk, Mk, coag_overflow, coag_cap_hit, coag_n_sub = coagulation_step(
         Nk, Mk, xk, temp, pres, boxvol, dt,
         c_max=coag_c_max, n_sub_cap=coag_sub_cap,
     )
@@ -107,6 +108,7 @@ def fast_step(
         "coag_overflow": coag_overflow,
         "cond_cap_hit": cond_cap_hit,
         "coag_cap_hit": coag_cap_hit,
+        "coag_n_sub": coag_n_sub,
     }
     return state.update(Nk=Nk, Mk=Mk, Gc=Gc), diag
 

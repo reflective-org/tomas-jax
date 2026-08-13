@@ -99,7 +99,8 @@ def calc_coagulation_rates(
     Mk: jnp.ndarray,
     kij: jnp.ndarray,
     xk: jnp.ndarray,
-    icomp_nodiag: int = ICOMP_NODIAG
+    icomp_nodiag: int = ICOMP_NODIAG,
+    kij_parts: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate coagulation rates dNdt and dMdt using TFL algorithm.
 
@@ -112,6 +113,10 @@ def calc_coagulation_rates(
         kij: Coagulation kernel [s⁻¹], shape (ibins, ibins)
         xk: Bin boundaries [kg], shape (ibins+1,)
         icomp_nodiag: Number of non-diagnostic species.
+        kij_parts: Optional precomputed (tril(kij,-1), triu(kij,1),
+            diag(kij)). Pass when calling repeatedly with a frozen kernel
+            (e.g. Euler substep loops) so the triangular masks are not
+            rebuilt every call; kij itself is then unused.
 
     Returns:
         dNdt: Rate of change of number, shape (ibins,)
@@ -136,14 +141,26 @@ def calc_coagulation_rates(
 
     # 2. Calculate Summation Terms (The "Loop" replacement)
     # Create triangular masks for the kernel
-    kij_lower = jnp.tril(kij, k=-1) 
-    kij_upper = jnp.triu(kij, k=1)
+    if kij_parts is None:
+        kij_lower = jnp.tril(kij, k=-1)
+        kij_upper = jnp.triu(kij, k=1)
+        kij_diag = jnp.diag(kij)
+    else:
+        kij_lower, kij_upper, kij_diag = kij_parts
 
-    # Calculate "k1" terms (Sum over i < k)
-    # Shapes: (nbins, nbins) @ (nbins, icomp) -> (nbins, icomp)
-    k1m_vec = kij_lower @ Mk_nodiag 
-    k1mx_vec = kij_lower @ (Mk_nodiag * xbar[:, None])
-    k1mx2_vec = kij_lower @ (Mk_nodiag * (xbar[:, None]**2))
+    # Calculate "k1" terms (Sum over i < k), one GEMM instead of three so
+    # kij_lower is read once. Column blocks: [M, M*xbar, M*xbar^2].
+    # Shapes: (nbins, nbins) @ (nbins, 3*icomp) -> (nbins, 3*icomp)
+    nnd = Mk_nodiag.shape[1]
+    k1_all = kij_lower @ jnp.concatenate(
+        [Mk_nodiag,
+         Mk_nodiag * xbar[:, None],
+         Mk_nodiag * (xbar[:, None] ** 2)],
+        axis=1,
+    )
+    k1m_vec = k1_all[:, :nnd]
+    k1mx_vec = k1_all[:, nnd:2 * nnd]
+    k1mx2_vec = k1_all[:, 2 * nnd:]
 
     # Sum over components for the Number equation (dNdt uses totals)
     k1mtot = jnp.sum(k1m_vec, axis=1)    # (nbins,)
@@ -153,8 +170,6 @@ def calc_coagulation_rates(
     in_term = (kij_upper @ Nk_safe) # (nbins,)
 
     # 3. Calculate terms for Current Bin (k)
-    kij_diag = jnp.diag(kij)
-    
     # dNdt parts for current k
     dNdt_curr = (
         -kij_diag * Nk_safe**2
