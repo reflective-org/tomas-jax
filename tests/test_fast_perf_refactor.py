@@ -168,3 +168,18 @@ def test_sorted_chunked_run_routes_cells_and_forcings():
     # Global diagnostics match the unchunked reference.
     np.testing.assert_allclose(dout["N_tot"], dref["N_tot"], rtol=1e-10)
     np.testing.assert_allclose(dout["M_dry"], dref["M_dry"], rtol=1e-10)
+
+
+def test_run_fast_zero_steps_is_noop():
+    rng = np.random.default_rng(3)
+    xk = jnp.asarray(xk_boundaries())
+    xmid = _xmid(xk)
+    C = 4
+    Nk = np.full((C, NBINS), 1.0)
+    Mk = np.zeros((C, NBINS, 2))
+    Mk[..., 0] = Nk * xmid[None, :]
+    state = FastState.create(Nk, Mk, temp=rng.uniform(230, 300, C))
+
+    out, diags = run_fast(state, n_steps=0, dt=360.0)
+    np.testing.assert_array_equal(np.asarray(out.Nk), np.asarray(state.Nk))
+    assert all(v.shape == (0,) for v in diags.values())

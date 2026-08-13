@@ -10,7 +10,7 @@ References:
 import jax
 # float64 enforced by core/config.py
 import jax.numpy as jnp
-from typing import Tuple
+from typing import Optional, Tuple
 
 from ..core.config import ICOMP_NODIAG
 
@@ -97,10 +97,10 @@ def calc_xbar_phi_eff(
 def calc_coagulation_rates(
     Nk: jnp.ndarray,
     Mk: jnp.ndarray,
-    kij: jnp.ndarray,
+    kij: Optional[jnp.ndarray],
     xk: jnp.ndarray,
     icomp_nodiag: int = ICOMP_NODIAG,
-    kij_parts: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray] = None,
+    kij_parts: Optional[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Calculate coagulation rates dNdt and dMdt using TFL algorithm.
 
@@ -110,13 +110,15 @@ def calc_coagulation_rates(
     Args:
         Nk: Number concentration [#/grid cell], shape (ibins,)
         Mk: Mass concentration [kg/grid cell], shape (ibins, icomp)
-        kij: Coagulation kernel [s⁻¹], shape (ibins, ibins)
+        kij: Coagulation kernel [s⁻¹], shape (ibins, ibins). May be None
+            when kij_parts is given.
         xk: Bin boundaries [kg], shape (ibins+1,)
         icomp_nodiag: Number of non-diagnostic species.
         kij_parts: Optional precomputed (tril(kij,-1), triu(kij,1),
             diag(kij)). Pass when calling repeatedly with a frozen kernel
             (e.g. Euler substep loops) so the triangular masks are not
-            rebuilt every call; kij itself is then unused.
+            rebuilt every call. When given, kij itself is IGNORED — do
+            not pass parts from a stale kernel alongside a fresh kij.
 
     Returns:
         dNdt: Rate of change of number, shape (ibins,)
@@ -142,6 +144,8 @@ def calc_coagulation_rates(
     # 2. Calculate Summation Terms (The "Loop" replacement)
     # Create triangular masks for the kernel
     if kij_parts is None:
+        if kij is None:
+            raise ValueError("Provide either kij or kij_parts")
         kij_lower = jnp.tril(kij, k=-1)
         kij_upper = jnp.triu(kij, k=1)
         kij_diag = jnp.diag(kij)
