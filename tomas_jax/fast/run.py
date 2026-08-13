@@ -66,11 +66,13 @@ def run_fast(
             chunks (exact — cells are independent). REQUIRED at large C:
             the per-cell coagulation kernel (C, 40, 40) and its triangular
             copies exceed GPU memory near C=1M; use 4-8 chunks there.
-        sort_by_coag_cost: with chunking, order cells by their initial
-            coagulation loss frequency first (and restore order at the
-            end). The adaptive substep count is a batch-max per chunk, so
-            sorting confines expensive counts to the chunks that need
-            them instead of letting one violent cell slow every chunk.
+        sort_by_coag_cost: with chunking, re-order cells by their current
+            coagulation loss frequency before every segment (and restore
+            order at the end). The adaptive substep count is a batch-max
+            per chunk, so sorting confines expensive counts to the chunks
+            that need them instead of letting one violent cell slow every
+            chunk; re-sorting each segment tracks stiffness as it evolves
+            (nucleation bursts).
         step_kwargs: forwarded to fast_step (alpha, fn_scale, caps, ...).
 
     Returns:
@@ -116,6 +118,7 @@ def run_fast(
             "overflow_so4": jnp.sum(diag["coag_overflow"][..., SRTSO4]),
             "cond_cap_hit": diag["cond_cap_hit"],
             "coag_cap_hit": diag["coag_cap_hit"],
+            "coag_n_sub": diag["coag_n_sub"],
         }
         return st, out
 
@@ -162,30 +165,101 @@ def _run_sorted(
     state, n_steps, dt, forcings,
     steps_per_segment, n_cell_chunks, **step_kwargs,
 ):
-    """Sort cells by initial coagulation loss frequency, run chunked,
-    restore the original cell order."""
+    """Re-sort cells by current coagulation loss frequency before every
+    segment, run each segment chunked, restore original cell order.
+
+    Stiffness evolves during the run (nucleation bursts), so a single
+    t=0 sort stops confining the expensive substep counts to the stiff
+    chunks after a few segments — measured 2.7x slowdown at 1M cells.
+    The state stays in sorted order between segments; `perm` tracks the
+    composite permutation (current position -> original cell index).
+    """
+    import numpy as np
+
     from .coagulation import _kernel_cell, _loss_frequency_cell
 
+    C = state.ncells
+    bounds = np.linspace(0, C, n_cell_chunks + 1).astype(int)
+
     @jax.jit
-    def _lam(st):
-        kij = jax.vmap(_kernel_cell)(st.Nk, st.Mk, st.temp, st.pres, st.boxvol)
+    def _lam_chunk(Nk, Mk, temp, pres, boxvol, xk):
+        kij = jax.vmap(_kernel_cell)(Nk, Mk, temp, pres, boxvol)
         lam = jax.vmap(_loss_frequency_cell, in_axes=(0, 0, 0, None))(
-            st.Nk, st.Mk, kij, st.xk
+            Nk, Mk, kij, xk
         )
         return jnp.max(lam, axis=-1)
 
-    order = jnp.argsort(_lam(state))
-    inverse = jnp.argsort(order)
-    C = state.ncells
-    forcings = {
-        k: _index_forcing_cells(v, order, n_steps, C)
-        for k, v in forcings.items()
+    def _lam(st):
+        # chunked so the (C, B, B) kernel stays within the chunk budget
+        return jnp.concatenate([
+            _lam_chunk(st.Nk[lo:hi], st.Mk[lo:hi], st.temp[lo:hi],
+                       st.pres[lo:hi], st.boxvol[lo:hi], st.xk)
+            for lo, hi in zip(bounds[:-1], bounds[1:])
+        ])
+
+    perm = jnp.arange(C)
+    diags_segments = []
+    done = 0
+    while done < n_steps:
+        length = min(steps_per_segment, n_steps - done)
+
+        order = jnp.argsort(_lam(state))
+        state = _permute_state(state, order)
+        perm = perm[order]
+
+        seg_states = []
+        diags_acc = None
+        for lo, hi in zip(bounds[:-1], bounds[1:]):
+            chunk = FastState(
+                Nk=state.Nk[lo:hi], Mk=state.Mk[lo:hi], Gc=state.Gc[lo:hi],
+                xk=state.xk, temp=state.temp[lo:hi], pres=state.pres[lo:hi],
+                boxvol=state.boxvol[lo:hi], rh=state.rh[lo:hi],
+            )
+            # forcings are stored in ORIGINAL cell order: pick this
+            # chunk's original indices, then this segment's time rows
+            chunk_forcings = {}
+            for k, v in forcings.items():
+                arr = _index_forcing_cells(v, perm[lo:hi], n_steps, C)
+                if arr.ndim == 2:
+                    arr = arr[done:done + length]
+                chunk_forcings[k] = arr
+            chunk, diags = run_fast(
+                chunk, length, dt,
+                steps_per_segment=steps_per_segment,
+                n_cell_chunks=1,
+                **chunk_forcings,
+                **step_kwargs,
+            )
+            seg_states.append(chunk)
+            if diags_acc is None:
+                diags_acc = diags
+            else:
+                for k in ("N_tot", "M_dry", "Gc_h2so4", "Gc_so2",
+                          "overflow_so4"):
+                    diags_acc[k] = diags_acc[k] + diags[k]
+                for k in ("cond_cap_hit", "coag_cap_hit"):
+                    diags_acc[k] = diags_acc[k] | diags[k]
+                diags_acc["coag_n_sub"] = np.maximum(
+                    diags_acc["coag_n_sub"], diags["coag_n_sub"]
+                )
+        diags_segments.append(diags_acc)
+
+        state = FastState(
+            Nk=jnp.concatenate([s.Nk for s in seg_states]),
+            Mk=jnp.concatenate([s.Mk for s in seg_states]),
+            Gc=jnp.concatenate([s.Gc for s in seg_states]),
+            xk=state.xk,
+            temp=state.temp, pres=state.pres,
+            boxvol=state.boxvol, rh=state.rh,
+        )
+        done += length
+
+    diags = {
+        k: np.concatenate([d[k] for d in diags_segments])
+        for k in diags_segments[0]
     }
-    out, diags = _run_chunked(
-        _permute_state(state, order), n_steps, dt, forcings,
-        steps_per_segment, n_cell_chunks, **step_kwargs,
-    )
-    return _permute_state(out, inverse), diags
+    inverse = jnp.argsort(perm)
+    return _permute_state(state, inverse), diags
 
 
 def _run_chunked(
@@ -224,6 +298,9 @@ def _run_chunked(
                 diags_acc[k] = diags_acc[k] + diags[k]
             for k in ("cond_cap_hit", "coag_cap_hit"):
                 diags_acc[k] = diags_acc[k] | diags[k]
+            diags_acc["coag_n_sub"] = np.maximum(
+                diags_acc["coag_n_sub"], diags["coag_n_sub"]
+            )
 
     merged = FastState(
         Nk=jnp.concatenate([s.Nk for s in out_states]),
