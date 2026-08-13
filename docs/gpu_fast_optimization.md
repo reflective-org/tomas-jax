@@ -92,8 +92,41 @@ memory-limited (65 GiB headroom).
 - [ ] MNFIX cadence inside coag substeps (positivity clamp per substep,
   full mnfix every K) — physics-affecting, needs recalibration against
   the adversarial cases in docs/gpu_fast.md.
-- [ ] `c_max` 0.05 → 0.1 experiment (halves substeps, ~2× coarser in
-  stiffest bins only).
+- [x] `c_max` 0.05 → 0.1 — DONE (`afe1343`), now the default: measured
+  identical sig-bin errors at both settings (the 256-substep cap, not
+  c_max, limits the stiffest cells); 1M×6h went 102.5 → 71.1 s.
+- [~] Substep-cap reduction 256 → 64: error study done (below), default
+  change pending sign-off; end-to-end timing with Pallas in progress.
+
+### Error metric: population-weighted, not raw per-bin (2026-08-13)
+
+Raw per-bin relative error wildly overstates degradation: the worst
+"errors" (up to 38×) sit in bins holding ~1e-11 particles/cm³ — MNFIX
+NEPS seeds, not physical populations (e.g. bins 0-7, 1.9-9.6 nm, whose
+share of the cell's N is 1e-13..1e-16). The canonical accuracy metric
+for substep policies is therefore **population-weighted relative
+error** = |ΔN_k|/N_k,ref × (N_k,ref/ΣN_ref), plus the per-cell
+total-number error. Bin-resolved study (stiffest 2000 cells, 1 h,
+default policy vs converged 0.0125/cap-4096 reference): mode bins
+(97-390 nm, 7-14% of N each) err at 1e-4 worst; weighted max 1e-5;
+per-cell total-N max 5.3e-5.
+
+### Substep-cap study (2026-08-13, weighted metric)
+
+Stiffest 2000 cells, 1 h, c_max=0.1, vs converged reference. Error is
+first-order in 1/cap, as expected for Euler:
+
+| cap | weighted p50 | weighted p99 | weighted max | total-N max |
+|---|---|---|---|---|
+| 256 (default) | 1.6e-10 | 4.9e-6 | 1.0e-5 | 5.3e-5 |
+| 128 | 3.3e-10 | 1.0e-5 | 2.1e-5 | 1.1e-4 |
+| 64 | 6.6e-10 | 2.1e-5 | 4.3e-5 | 2.2e-4 |
+| 32 | 1.3e-9 | 4.2e-5 | 8.6e-5 | 4.5e-4 |
+
+Stiff-chunk cost is proportional to the cap, and stiff chunks dominate
+wall time, so cap 64 ≈ another ~2-3× on the pre-Pallas headline for a
+weighted error still ≤ 4.3e-5. Only the stiffest ~0.2-3% of cells are
+capped at all.
 
 ### Pallas kernel (2026-08-13)
 
@@ -202,6 +235,9 @@ so the headline gain should approach the coag share of wall time).
 | 2026-08-13 | + mnfix scatter, kij hoist/fusion, per-segment re-sort | 420 s | recompiles ballooned to 48 (re-sort restructure) and masked the kernel gains |
 | 2026-08-13 | + cached segment runner | **121.5 s** | 2.02 s/step, 4.9e5 cell-steps/s, 8.7 GiB peak |
 | 2026-08-13 | + review fixes, 16 chunks | **102.5 s** | finer stiffness bucketing buys ~15%; 6.3 GiB peak |
+| 2026-08-13 | + c_max 0.1 default | **71.1 s** | identical weighted errors (cap-limited cells unaffected) |
+| 2026-08-13 | + Pallas coag kernel (opt-in `coag_pallas=True`) | **31.1 s** | 2.3× end-to-end; 17.6× vs baseline |
+| 2026-08-13 | + cap 64 (experiment, pending sign-off) | **23.2 s** | 23.6× vs baseline; weighted err ≤ 4.3e-5 |
 
 Scaling sweep (post-Phase 1, sorted chunks sized ~62-125k cells):
 
