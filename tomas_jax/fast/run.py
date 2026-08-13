@@ -14,7 +14,7 @@ other:
     (n_steps, C)    — time profile, per cell
 Time-varying forcings are fed through the scan (one row per outer step).
 """
-from functools import partial
+from functools import lru_cache, partial
 
 import jax
 import jax.numpy as jnp
@@ -24,6 +24,43 @@ from .state import FastState
 from .step import fast_step
 
 _FORCING_NAMES = ("oh_conc", "h2so4_prod", "so2_prod")
+
+
+@lru_cache(maxsize=None)
+def _segment_runner(dt, step_kwargs_items):
+    """Build (once per (dt, step_kwargs)) the jitted segment program.
+
+    Module-level cache so every chunk, segment, and run_fast call reuses
+    the same compiled executable — a fresh jax.jit closure per call
+    means re-tracing AND re-compiling (~seconds each on GPU), which
+    dominated chunked runs (8 chunks x 6 segments = 48 recompiles of an
+    identical program at 1M cells).
+
+    All forcings are passed as per-step scan rows (length, C) for a
+    fixed signature; `length` is static (one compile per distinct
+    segment length — the final short segment at most).
+    """
+    step_kwargs = dict(step_kwargs_items)
+
+    def scan_body(st, xs):
+        st, diag = fast_step(st, dt, **xs, **step_kwargs)
+        out = {
+            "N_tot": jnp.sum(st.Nk),
+            "M_dry": jnp.sum(st.Mk[..., SRTSO4]),
+            "Gc_h2so4": jnp.sum(st.Gc[..., GH2SO4]),
+            "Gc_so2": jnp.sum(st.Gc[..., GSO2]),
+            "overflow_so4": jnp.sum(diag["coag_overflow"][..., SRTSO4]),
+            "cond_cap_hit": diag["cond_cap_hit"],
+            "coag_cap_hit": diag["coag_cap_hit"],
+            "coag_n_sub": diag["coag_n_sub"],
+        }
+        return st, out
+
+    @partial(jax.jit, donate_argnums=(0,), static_argnums=(2,))
+    def run_segment(st, xs, length):
+        return jax.lax.scan(scan_body, st, xs, length=length)
+
+    return run_segment
 
 
 def _normalize_forcing(name, v, n_steps, ncells):
@@ -100,31 +137,30 @@ def run_fast(
     # first segment call.
     state = jax.tree_util.tree_map(jnp.array, state)
 
-    const = {}
+    # Normalize every forcing to per-step scan rows (n_steps, C): the
+    # cached segment runner has one fixed signature, so constant
+    # forcings ride the scan as repeated rows (steps_per_segment x C
+    # per segment — negligible next to the state itself).
+    C = state.ncells
     varying = {}
     for name in _FORCING_NAMES:
         arr, is_varying = _normalize_forcing(
-            name, forcings[name], n_steps, state.ncells
+            name, forcings[name], n_steps, C
         )
-        (varying if is_varying else const)[name] = arr
+        if not is_varying:
+            arr = jnp.broadcast_to(arr, (n_steps, C))
+        varying[name] = arr
 
-    def scan_body(st, xs):
-        st, diag = fast_step(st, dt, **const, **xs, **step_kwargs)
-        out = {
-            "N_tot": jnp.sum(st.Nk),
-            "M_dry": jnp.sum(st.Mk[..., SRTSO4]),
-            "Gc_h2so4": jnp.sum(st.Gc[..., GH2SO4]),
-            "Gc_so2": jnp.sum(st.Gc[..., GSO2]),
-            "overflow_so4": jnp.sum(diag["coag_overflow"][..., SRTSO4]),
-            "cond_cap_hit": diag["cond_cap_hit"],
-            "coag_cap_hit": diag["coag_cap_hit"],
-            "coag_n_sub": diag["coag_n_sub"],
-        }
-        return st, out
-
-    @partial(jax.jit, donate_argnums=(0,), static_argnums=(2,))
-    def run_segment(st, xs, length):
-        return jax.lax.scan(scan_body, st, xs, length=length)
+    try:
+        run_segment = _segment_runner(
+            float(dt), tuple(sorted(step_kwargs.items()))
+        )
+    except TypeError:
+        # Unhashable step kwarg (e.g. an array): fall back to an
+        # uncached runner; recompiles per run_fast call.
+        run_segment = _segment_runner.__wrapped__(
+            float(dt), tuple(step_kwargs.items())
+        )
 
     diags_list = []
     done = 0
