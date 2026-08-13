@@ -110,7 +110,12 @@ over the cell axis is exact.
      accurate for `dt_sub * lambda << 1`, where `lambda` is the per-bin
      loss frequency `kij_kk*N_k + sum_{j>k} kij_kj*N_j + 2*K1M_k/xk_k`
      (self-coagulation + scavenging by larger + TFL promotion by the mass
-     flux from below). `n_sub = clip(ceil(dt*max(lambda)/c_max), 1, 256)`
+     flux from below). `n_sub = clip(ceil(dt*max(lambda)/c_max), 1, cap)` with default
+     cap=64 — population-weighted error of the capped (stiffest
+     ~0.2-3%) cells ≤ 4.3e-5 vs a converged reference; `coag_sub_cap=256`
+     lowers that to 1.0e-5 at ~35% more wall time on stiff workloads
+     (1M×6h: 23.2 s vs 31.1 s with the Pallas kernel; study in
+     docs/gpu_fast_optimization.md)
      with `c_max = 0.1` (default; was 0.05 — measured identical sig-bin
      errors at half the substep demand, see
      docs/gpu_fast_optimization.md). Calibration (see below) shows fixed coarse
@@ -174,14 +179,17 @@ Measured (Apple M-series CPU, float64): ~7,200 cell-steps/s at 10k cells —
 e.g. 10k cells × 6 h in 84 s, with zero cap hits on realistic heterogeneous
 scenarios.
 
-Measured (H100 80GB, float64, jax 0.6.2, 2026-08-13, after the Phase 1
-optimizations of `docs/gpu_fast_optimization.md`): **1M cells × 6 h in
-121.5 s** (4.9e5 cell-steps/s, 8.7 GiB peak) with
-`--n-cell-chunks 8 --sort-by-coag-cost`. The 10 s target needs the
-Phase 2 levers below. `sort_by_coag_cost` re-sorts by current stiffness
-before every scan segment (stiffness evolves; a t=0-only sort measured
-~2.7× slower), and `diags["coag_n_sub"]` exposes the per-step shared
-substep count for tuning.
+Measured (H100 80GB, float64, jax 0.6.2, 2026-08-13, after Phases 1-2
+of `docs/gpu_fast_optimization.md`, current defaults — auto Pallas coag
+kernel on GPU, coag_sub_cap=64, c_max=0.1): **1M cells × 6 h in
+23.1 s** (2.6e6 cell-steps/s, 5.6 GiB peak) with
+`--n-cell-chunks 16 --sort-by-coag-cost` — 23.6× over the first
+measurement (547 s). The lower-error cap setting `coag_sub_cap=256`
+runs the same in 31.1 s (weighted cap error 1.0e-5 vs 4.3e-5; see the
+cap study in gpu_fast_optimization.md). `sort_by_coag_cost` re-sorts by
+current stiffness before every scan segment (stiffness evolves; a
+t=0-only sort measured ~2.7× slower), and `diags["coag_n_sub"]`
+exposes the per-step shared substep count for tuning.
 
 Cost anatomy at large C (per 360 s outer step): the coagulation rate
 evaluation reads the per-cell kernel `kij (C,40,40)` (12.8 GB at C=1M) and

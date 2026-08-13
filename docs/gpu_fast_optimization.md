@@ -95,8 +95,13 @@ memory-limited (65 GiB headroom).
 - [x] `c_max` 0.05 → 0.1 — DONE (`afe1343`), now the default: measured
   identical sig-bin errors at both settings (the 256-substep cap, not
   c_max, limits the stiffest cells); 1M×6h went 102.5 → 71.1 s.
-- [~] Substep-cap reduction 256 → 64: error study done (below), default
-  change pending sign-off; end-to-end timing with Pallas in progress.
+- [x] Substep-cap default 256 → 64 (Ali's call, 2026-08-13): 1M×6h
+  drops 31.1 → 23.2 s with the Pallas kernel. **Trade-off, on record:**
+  cap 256 is the lower-error setting — population-weighted max error of
+  the capped (stiffest ~0.2-3%) cells is 1.0e-5 at cap 256 vs 4.3e-5 at
+  cap 64 (study below); pass `coag_sub_cap=256` to get it back.
+- [x] `coag_pallas` default now auto (Ali's call): Pallas kernel on GPU
+  backends, XLA path on CPU (Triton is GPU-only); True/False forces.
 
 ### Error metric: population-weighted, not raw per-bin (2026-08-13)
 
@@ -237,7 +242,7 @@ so the headline gain should approach the coag share of wall time).
 | 2026-08-13 | + review fixes, 16 chunks | **102.5 s** | finer stiffness bucketing buys ~15%; 6.3 GiB peak |
 | 2026-08-13 | + c_max 0.1 default | **71.1 s** | identical weighted errors (cap-limited cells unaffected) |
 | 2026-08-13 | + Pallas coag kernel (opt-in `coag_pallas=True`) | **31.1 s** | 2.3× end-to-end; 17.6× vs baseline |
-| 2026-08-13 | + cap 64 (experiment, pending sign-off) | **23.2 s** | 23.6× vs baseline; weighted err ≤ 4.3e-5 |
+| 2026-08-13 | + cap 64 + auto-Pallas as DEFAULTS | **23.1 s** | 23.6× vs baseline; bench now hits this out of the box (5.6 GiB peak) |
 
 Scaling sweep (post-Phase 1, sorted chunks sized ~62-125k cells):
 

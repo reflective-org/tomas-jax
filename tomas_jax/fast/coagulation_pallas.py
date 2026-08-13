@@ -438,7 +438,7 @@ def _padded_grid_arrays(xk, nbins, bp):
 
 
 def coagulation_step_pallas(
-    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.1, n_sub_cap=256,
+    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.1, n_sub_cap=64,
     num_warps=2, n_persistent=2640, interpret=False,
 ):
     """Drop-in replacement for fast/coagulation.coagulation_step.

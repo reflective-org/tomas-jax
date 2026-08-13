@@ -14,7 +14,7 @@ flux arriving from below (K1M_k = sum_{i<k} kij_ki * M_i; the 2/xk factor
 is the TFL phi/eff scale). Forward Euler is only accurate while
 dt_sub * lambda is small; the default c_max = 0.1 gives sig-bin errors
 indistinguishable from 0.05 (p50 7e-7, p99 1.2e-3 vs a 0.0125/cap-4096
-converged reference on the stiffest 1M-benchmark cells — the 256-substep
+converged reference on the stiffest 1M-benchmark cells — the substep
 cap, not c_max, limits those cells) at ~half the substep demand of
 non-capped chunks. Fixed coarse substeps lose >10% of mass to the
 positivity clamp in burst scenarios, which motivated the adaptive
@@ -75,7 +75,7 @@ def _loss_frequency_cell(Nk, Mk, kij, xk):
 
 
 def coagulation_step(
-    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.1, n_sub_cap=256
+    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.1, n_sub_cap=64
 ):
     """One coagulation step with adaptive-capped shared substeps.
 

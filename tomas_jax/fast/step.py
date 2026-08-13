@@ -48,9 +48,9 @@ def fast_step(
     alpha=1.0,
     fn_scale=1.0,
     cond_sub_cap=40,
-    coag_sub_cap=256,
+    coag_sub_cap=64,
     coag_c_max=0.1,
-    coag_pallas=False,
+    coag_pallas=None,
 ):
     """Advance a FastState by one outer step of dt seconds.
 
@@ -62,11 +62,17 @@ def fast_step(
         alpha: accommodation coefficient (scalar).
         fn_scale: nucleation rate scale.
         cond_sub_cap / coag_sub_cap: static caps for the shared adaptive
-            substep counts (PPM CFL / coagulation stability).
+            substep counts (PPM CFL / coagulation stability). The
+            coagulation default 64 keeps population-weighted errors of
+            the capped (stiffest ~0.2-3%) cells <= 4.3e-5 vs a converged
+            reference; pass 256 for the lower-error setting (1.0e-5) at
+            ~35% more wall time on stiff-cell workloads.
         coag_c_max: coagulation stability Courant factor.
-        coag_pallas: opt-in fused Triton kernel for the coagulation
-            substep loop (GPU only; ~3x faster at high substep counts,
-            reassociation-level differences — see fast/coagulation_pallas).
+        coag_pallas: fused Triton kernel for the coagulation substep
+            loop (~3x faster at high substep counts, reassociation-level
+            differences — see fast/coagulation_pallas). Default None =
+            auto: the Pallas kernel on GPU backends, the XLA path
+            elsewhere (Triton is GPU-only). Pass True/False to force.
 
     Returns:
         (state, diag) — diag dict with per-step diagnostics:
@@ -93,6 +99,8 @@ def fast_step(
     Mk = equilibrium_water(Mk, temp, rh)
 
     # 4. Coagulation (adaptive-capped Euler substeps + MNFIX)
+    if coag_pallas is None:
+        coag_pallas = jax.default_backend() == "gpu"
     if coag_pallas:
         from .coagulation_pallas import coagulation_step_pallas as coag_fn
     else:
