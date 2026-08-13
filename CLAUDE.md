@@ -79,6 +79,7 @@ tomas_jax/
   fast/water.py               — Tabazadeh 1997 water equilibrium (pure JAX)
   fast/nucleation.py          — Dunne Jbn neutral-binary, analytic gas-ODE integration
   fast/coagulation.py         — Adaptive-capped Euler coagulation (loss-frequency criterion)
+  fast/coagulation_pallas.py  — Opt-in fused Triton kernel for the coag substep loop (GPU, ~3x)
   fast/condensation.py        — Batched PPM driver, global-max capped CFL substeps
   fast/step.py                — Process composition (chem→nucl→mnfix→water→coag→cond→water→mnfix)
   fast/run.py                 — jit(scan) driver: donation, cell chunking, stiffness sorting
@@ -100,6 +101,7 @@ benchmarks/
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
   python/benchmark_dilution.py — Dilution benchmark (3 cases × 24h, all processes + SO2 + dilution, 6 figures)
   python/bench_fast_1m.py     — GPU-fast reduced model benchmark (1M cells × 6h target <10s; --cpu-smoke mode)
+  python/bench_coag_pallas.py — XLA vs Pallas coagulation substep timing (stiff sorted chunk)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)

@@ -85,14 +85,114 @@ memory-limited (65 GiB headroom).
 
 ## Phase 2 — bigger levers (pending Phase 1 results)
 
-- [ ] Pallas fused coagulation substep kernel: compute kij on the fly in
-  SMEM (12.8 KB/cell), fuse rates + Euler + clamp; removes all (C,40,40)
-  HBM traffic (docs/gpu_fast.md lever #1, ~10×).
+- [x] Pallas fused coagulation substep kernel — landed as the opt-in
+  `fast/coagulation_pallas.py` (`coagulation_step_pallas`, or
+  `fast_step(..., coag_pallas=True)`). **3.0× on the substep loop**:
+  4.11 → 1.37 ms/substep at C=125k, n_sub=256. Details below.
 - [ ] MNFIX cadence inside coag substeps (positivity clamp per substep,
   full mnfix every K) — physics-affecting, needs recalibration against
   the adversarial cases in docs/gpu_fast.md.
 - [ ] `c_max` 0.05 → 0.1 experiment (halves substeps, ~2× coarser in
   stiffest bins only).
+
+### Pallas kernel (2026-08-13)
+
+Benchmark setup (`benchmarks/python/bench_coag_pallas.py`): the 1M-cell
+seed-0 benchmark ICs, sorted by max loss frequency as `fast/run.py`
+does, stiffest 125k cells, one full `coagulation_step` at dt=360 s. That
+chunk demands the full **n_sub=256** cap (with the current c_max=0.1
+default) — all per-substep numbers below are at that explicit n_sub,
+not "the default demand" (a cap-64 default is under discussion; the
+per-substep advantage is unchanged since kernel cost is linear in
+n_sub).
+
+| path | step (n_sub=256) | ms/substep | speedup |
+|---|---|---|---|
+| XLA (`coagulation_step`) | 1052 ms | 4.11 | 1× |
+| Pallas v1 — (64,64) register tiles | 28.3 s @4 warps / 5.9 s @16 | 110 / 23 | **0.04× / 0.18×** |
+| Pallas v2 — vector lanes, fori j-loop | 417 ms | 1.63 | 2.5× |
+| v2 + persistent CTAs | 427-447 ms | 1.67-1.75 | 2.4× |
+| v2 + unrolled j-loop | 333 ms | 1.30 | 3.2× |
+| v2 + cond-skipped deposit (**landed**) | 350 ms | **1.37** | **3.0×** |
+
+Equivalence (vs the XLA path, same n_sub by construction —
+`tests/test_fast_coag_pallas.py`, CPU interpret + GPU Triton): max rel
+err over a full step on mixed median+stiff states ≤ 5.7e-14 on Nk/Mk,
+≤ 4e-16 on overflow (bar: 1e-10). A full `fast_step` (coag + all other
+processes) differs by ≤ 1.1e-10 relative, worst case an NEPS-scale
+empty bin (2.8e-4 particles in a 1.6e10-particle cell).
+
+**Landed architecture** (the docstring of `fast/coagulation_pallas.py`
+has the full story): persistent grid of ~2.6k CTAs, one cell at a time
+per CTA, 2 warps; all per-bin state in (64,) register vectors (bins
+padded 40→64, Triton pow2; padded lanes kept inert); kij transposed
+once per outer step and its columns streamed from L1/L2 inside a
+**fully unrolled** source-bin loop (4 masked FMA accumulators);
+`shift_right` and the MNFIX deposit via a CTA-private GMEM scratch row
++ CTA barrier (masked gather loads / masked f64 `atomic_add`), the
+deposit wrapped in `lax.cond` on a CTA-uniform "any lane shifted"
+predicate so quiescent substeps skip its 3 barriers entirely; MNFIX
+target bins via exact IEEE-754 exponent-field ceil/floor(log2) (no
+libdevice log); `xnew` gathered from the true xk table because the
+`jnp.power` grid is NOT bit-exact powers of two (1 ulp off at bins
+11/21/29/31/39 — an `xk0*exp2(k)` reconstruction would not be
+bit-identical).
+
+**Dead ends & measured findings:**
+
+1. **(64,64) register-tile kernel (v1) — rejected.** The natural
+   formulation (load kij once into registers; one-hot masks for the
+   tril/triu matvecs, shift_right, xk gathers, and the deposit scatter)
+   is 5-25× *slower* than XLA: ~20 tile-sized f64 temporaries per
+   substep cannot fit the 256 KB/SM register file, so every op
+   round-trips local memory (~4% of peak f64). Component attribution at
+   C=125k, w16 (ms/substep): full 23.0; mnfix alone 28.3; rates alone
+   5.7; mnfix without the two one-hot xk gathers 9.9; mnfix with
+   gather+log+deposit all stubbed 1.5. Data-dependent one-hot
+   contractions are the poison; loop-invariant masks are fine.
+2. **Persistent CTAs bought nothing on their own** (1.63 → 1.73 ms):
+   the kernel is not HBM/L2-capacity-bound on kij re-reads as first
+   modeled — sweeping the grid 1.3k→42k CTAs moves the time < 5%. Kept
+   anyway: scratch shrinks from (C,8,64) to (P,8,64) and large-P
+   results are marginally best. The real bottleneck is **latency**:
+   GMEM stores are write-through (L1-invalidating), so every scratch
+   round-trip costs ~L2 latency, and a `fori_loop` j-loop serializes
+   ~120 such scalar loads per substep.
+3. **Unrolling the 40-iteration j-loop** (Python loop → one basic
+   block) was the single biggest v2 win (1.73 → 1.30 ms): all 40 column
+   loads + 120 scalar loads issue independently and memory-level
+   parallelism covers the latency.
+4. **The cond-skipped deposit is ~5% slower on the all-stiff chunk**
+   (1.30 → 1.37 ms; shifts are frequent there) but skips 3 barriers +
+   6 row ops per sweep on quiescent cells — the common case in median
+   chunks; kept.
+5. `num_warps=2` (one thread per padded lane) is optimal: 1.37 @w2,
+   1.53 @w1, 2.63 @w4 (the v1 tile kernel instead wanted w16).
+6. **Pallas/Triton f64 support is complete for this kernel**: add/mul/
+   div, sqrt/exp/exp2/log (libdevice), ceil/floor, comparisons, where,
+   full/axis reductions, bitcast to int64 + shifts/masks, masked
+   gather/scatter `pl.load`/`pl.store` with int-vector indices, f64
+   `pl.atomic_add`, `debug_barrier`, dynamic-bound `fori_loop`, nested
+   loops, `lax.cond` — all lower. `tl.dot` was never needed (explicit
+   FMA accumulation instead of f64 MMA).
+7. **API potholes** (jax 0.6.2): `lax.slice` of in-kernel tensors and
+   `reduce_or` (`jnp.any`) don't lower (use iota+where, and an int-sum
+   `> 0` for any()); `compiler_params` must be
+   `pallas.triton.CompilerParams`, not a dict; a `fori_loop` carry must
+   be a traced value, not a Python int (`scf.yield ... is not a
+   Value`); interpret-mode discharge rejects Python-int index
+   components (wrap as `jnp.asarray(i, int64)`), mixed int32/int64
+   index tuples (cast `program_id` up), and masked atomics (mask only
+   in compiled mode — masking only skips 0.0-adds).
+8. The remaining 1.37 ms/substep is barrier/latency-dominated, not
+   bandwidth-bound: a further ~2-3× likely needs SMEM-resident kij +
+   shuffle reductions, i.e. a custom CUDA kernel via `jax.ffi` (or the
+   Mosaic-GPU Pallas backend once its f64 story is clear). Not pursued
+   — 3× met the target and the XLA path remains the default.
+
+Follow-up: wire `coag_pallas=True` through a full `run_fast` 1M×6h
+benchmark (the stiff chunks it accelerates carry ~80% of all substeps,
+so the headline gain should approach the coag share of wall time).
 
 ## Results log
 

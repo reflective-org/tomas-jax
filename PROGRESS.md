@@ -4,6 +4,50 @@ This file tracks all significant changes to the TOMAS-JAX codebase. Entries are 
 
 ---
 
+## 2026-08-13 (Thu) — Pallas fused coagulation substep kernel (3.0× on the substep loop)
+
+**Time**: morning–midday PST
+**Branch**: `perf/gpu-fast-h100` — issue #21, Phase 2 lever #1
+
+### Summary
+New opt-in Triton (Pallas) kernel that runs the ENTIRE coagulation
+Euler substep loop — TFL rates + Euler + positivity clamp + full
+2-sweep MNFIX × n_sub substeps — inside one GPU kernel per cell,
+instead of re-reading the (C,40,40) frozen-kernel decomposition from
+HBM every substep. On the stiff sorted chunk (C=125k, n_sub=256,
+seed-0 1M ICs): **4.11 → 1.37 ms/substep (3.0×)**. Equivalence vs the
+XLA path ≤ 5.7e-14 max rel err on Nk/Mk over a full step (bar 1e-10);
+sub-ulp on overflow; identical n_sub/cap_hit. Full fast CPU suite
+green (50 passed) + 6 new tests (interpret-mode on CPU, Triton on GPU).
+
+### Changes
+- `tomas_jax/fast/coagulation_pallas.py` (new): `coagulation_step_pallas`,
+  drop-in signature/returns. Persistent-CTA grid, (64,)-vector lanes,
+  fully unrolled column-streamed matvecs, scratch+barrier shift/deposit
+  (masked f64 atomics, cond-skipped when no bin shifts), exact
+  exponent-bit log2 for MNFIX targets.
+- `tomas_jax/fast/step.py`: `fast_step(..., coag_pallas=True)` opt-in
+  (default False; XLA path unchanged).
+- `benchmarks/python/bench_coag_pallas.py` (new): XLA-vs-Pallas timing
+  on the stiffest sorted chunk, reports ms/substep.
+- `tests/test_fast_coag_pallas.py` (new): equivalence (rtol 1e-10) on
+  mixed median+stiff states; GPU tests skipif no CUDA.
+- `docs/gpu_fast_optimization.md`: "Pallas kernel" subsection — landed
+  architecture, measured numbers, and dead ends (the (64,64)
+  register-tile v1 was 5-25× SLOWER than XLA; persistent CTAs alone
+  bought nothing; unrolling the j-loop was the biggest single win;
+  jax 0.6.2 Pallas/Triton API potholes).
+
+### Known issues / limitations
+- GPU-only (Triton); `interpret=True` runs on CPU for tests. Default
+  path is still the XLA implementation everywhere.
+- Reassociation-level (≤ ~1e-13) differences vs XLA: serial-FMA matvec
+  order, atomic deposit order, exact log2 vs float log (measure-zero
+  branch windows). Requires the p=2 mass-doubling fast-model grid.
+- Not yet benchmarked end-to-end through `run_fast` (next step).
+
+---
+
 ## 2026-08-13 (Thu) — First H100 benchmark + Phase 1 GPU optimization (4.5×)
 
 **Time**: morning–afternoon PST
