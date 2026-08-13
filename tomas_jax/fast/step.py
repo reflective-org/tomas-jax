@@ -50,6 +50,7 @@ def fast_step(
     cond_sub_cap=40,
     coag_sub_cap=256,
     coag_c_max=0.1,
+    coag_pallas=False,
 ):
     """Advance a FastState by one outer step of dt seconds.
 
@@ -63,6 +64,9 @@ def fast_step(
         cond_sub_cap / coag_sub_cap: static caps for the shared adaptive
             substep counts (PPM CFL / coagulation stability).
         coag_c_max: coagulation stability Courant factor.
+        coag_pallas: opt-in fused Triton kernel for the coagulation
+            substep loop (GPU only; ~3x faster at high substep counts,
+            reassociation-level differences — see fast/coagulation_pallas).
 
     Returns:
         (state, diag) — diag dict with per-step diagnostics:
@@ -89,7 +93,11 @@ def fast_step(
     Mk = equilibrium_water(Mk, temp, rh)
 
     # 4. Coagulation (adaptive-capped Euler substeps + MNFIX)
-    Nk, Mk, coag_overflow, coag_cap_hit, coag_n_sub = coagulation_step(
+    if coag_pallas:
+        from .coagulation_pallas import coagulation_step_pallas as coag_fn
+    else:
+        coag_fn = coagulation_step
+    Nk, Mk, coag_overflow, coag_cap_hit, coag_n_sub = coag_fn(
         Nk, Mk, xk, temp, pres, boxvol, dt,
         c_max=coag_c_max, n_sub_cap=coag_sub_cap,
     )
