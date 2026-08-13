@@ -12,10 +12,13 @@ The three terms are the per-particle loss frequencies of the TFL scheme:
 self-coagulation, collision with larger bins, and promotion by the mass
 flux arriving from below (K1M_k = sum_{i<k} kij_ki * M_i; the 2/xk factor
 is the TFL phi/eff scale). Forward Euler is only accurate while
-dt_sub * lambda is small; c_max = 0.05 keeps content-significant bins
-within ~1% of a fully converged reference (calibration in
-docs/gpu_fast.md — fixed coarse substeps lose >10% of mass to the
-positivity clamp in burst scenarios, which motivated this policy).
+dt_sub * lambda is small; the default c_max = 0.1 gives sig-bin errors
+indistinguishable from 0.05 (p50 7e-7, p99 1.2e-3 vs a 0.0125/cap-4096
+converged reference on the stiffest 1M-benchmark cells — the substep
+cap, not c_max, limits those cells) at ~half the substep demand of
+non-capped chunks. Fixed coarse substeps lose >10% of mass to the
+positivity clamp in burst scenarios, which motivated the adaptive
+policy (original 0.05 calibration in docs/gpu_fast.md).
 Realistic distributions need n_sub ~ 1-15 per 360 s; nucleation-burst
 cells can demand ~100+. The cap bounds wall time; hitting it degrades the
 stiffest cells toward coarser accuracy and is reported via cap_hit.
@@ -25,8 +28,6 @@ sort_by_coag_cost), not by lowering the cap.
 The per-cell math (particle properties, kernel, TFL rates) is reused from
 the full model via jax.vmap; only the density call is swapped.
 """
-from functools import partial
-
 import jax
 import jax.numpy as jnp
 
@@ -74,7 +75,7 @@ def _loss_frequency_cell(Nk, Mk, kij, xk):
 
 
 def coagulation_step(
-    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.05, n_sub_cap=256
+    Nk, Mk, xk, temp, pres, boxvol, dt, c_max=0.1, n_sub_cap=64
 ):
     """One coagulation step with adaptive-capped shared substeps.
 
@@ -86,8 +87,9 @@ def coagulation_step(
         n_sub_cap: static cap on the shared substep count
 
     Returns:
-        (Nk, Mk, overflow, cap_hit) — overflow is the mass [kg/cell] lost
-        past the top bin this step, shape (C, 2); cap_hit is a bool scalar.
+        (Nk, Mk, overflow, cap_hit, n_sub) — overflow is the mass
+        [kg/cell] lost past the top bin this step, shape (C, 2); cap_hit
+        is a bool scalar; n_sub the shared substep count actually run.
     """
     kij = jax.vmap(_kernel_cell)(Nk, Mk, temp, pres, boxvol)
 
@@ -99,13 +101,24 @@ def coagulation_step(
     cap_hit = n_raw > n_sub_cap
     dt_sub = dt / n_sub
 
+    # The kernel is frozen for the whole outer step: build its triangular
+    # decomposition once so the substep loop only does the batched matvecs
+    # (rebuilding tril/triu masks per substep re-materializes (C, B, B)).
+    kij_parts = (
+        jnp.tril(kij, k=-1),
+        jnp.triu(kij, k=1),
+        jnp.diagonal(kij, axis1=-2, axis2=-1),
+    )
+
     rates = jax.vmap(
-        partial(calc_coagulation_rates, xk=xk, icomp_nodiag=ICOMP_NODIAG)
+        lambda n, m, kl, ku, kd: calc_coagulation_rates(
+            n, m, None, xk, ICOMP_NODIAG, kij_parts=(kl, ku, kd)
+        )
     )
 
     def substep(_, carry):
         Nk_c, Mk_c, ovf = carry
-        dNdt, dMdt, dOvf = rates(Nk_c, Mk_c, kij)
+        dNdt, dMdt, dOvf = rates(Nk_c, Mk_c, *kij_parts)
         Nk_n = jnp.maximum(Nk_c + dt_sub * dNdt, 0.0)
         Mk_n = jnp.maximum(Mk_c + dt_sub * dMdt, 0.0)
         ovf = ovf + dt_sub * dOvf
@@ -116,4 +129,4 @@ def coagulation_step(
     Nk_f, Mk_f, overflow = jax.lax.fori_loop(
         0, n_sub, substep, (Nk, Mk, overflow0)
     )
-    return Nk_f, Mk_f, overflow, cap_hit
+    return Nk_f, Mk_f, overflow, cap_hit, n_sub

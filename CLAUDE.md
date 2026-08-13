@@ -46,7 +46,7 @@ python -c "from tomas_jax import TomasState, CoagulationSolver"
 - **GPU deployment:** See `docs/gpu_deployment.md`. Use only `*_jit` methods and `make_step()`. Legacy numpy paths (`method='tfl'`, `method='ppm'`) emit `DeprecationWarning` and are not GPU-compatible. `make_step()` returns a JIT-compiled function by default (`jit=True`). For batch/ensemble runs, use `jax.vmap(step_fn)`.
 - **Centralized float64 config:** Only `core/config.py` calls `jax.config.update("jax_enable_x64", True)`. All other library modules reference it via comment. Do not add redundant x64 config calls.
 - **dilution_step requires explicit background arrays** (no `None` defaults). Pass `jnp.zeros_like(Nk)` etc. for clean-air dilution. This ensures JIT safety.
-- **`tomas_jax/fast/` is the GPU-fast reduced model** (this branch): natively batched over a leading cell axis, aerosol SO4+H2O only (ICOMP=2: SRTSO4=0, SRTH2O=1), gases H2SO4+SO2 only (Gc 2-wide: GH2SO4=0, GSO2=1). Do NOT edit `core/config.py` to ICOMP=2 — species indices are imported module-level across the full model and JAX silently clamps out-of-range indices. The fast package has its own config/state/mnfix/density/water and reuses the shape-agnostic full-model kernels via vmap. Rules: loop trip counts are global batch reductions with static caps (never per-cell traced loops); MNFIX is the vectorized `fast/mnfix.py` (exact-conservation one-hot scatter, 2 sweeps); nucleation is analytic (closed-form gas ODE); gas↔aerosol transfers use S-conserving 98/96 MW conversions. See docs/gpu_fast.md for deviations and calibration. Benchmark: `python -m benchmarks.python.bench_fast_1m --cells 1000 --hours 1 --cpu-smoke`.
+- **`tomas_jax/fast/` is the GPU-fast reduced model** (this branch): natively batched over a leading cell axis, aerosol SO4+H2O only (ICOMP=2: SRTSO4=0, SRTH2O=1), gases H2SO4+SO2 only (Gc 2-wide: GH2SO4=0, GSO2=1). Do NOT edit `core/config.py` to ICOMP=2 — species indices are imported module-level across the full model and JAX silently clamps out-of-range indices. The fast package has its own config/state/mnfix/density/water and reuses the shape-agnostic full-model kernels via vmap. Rules: loop trip counts are global batch reductions with static caps (never per-cell traced loops); MNFIX is the vectorized `fast/mnfix.py` (exact-conservation scatter-add, 2 sweeps — never materialize a (C,B,B) one-hot); nucleation is analytic (closed-form gas ODE); gas↔aerosol transfers use S-conserving 98/96 MW conversions. The jitted segment runner in `fast/run.py` is `lru_cache`d at module level — never create a fresh `jax.jit` closure per call (each recompile of the segment program costs ~6-7 s on GPU). `sort_by_coag_cost=True` re-sorts by current coagulation stiffness before every scan segment; `diags["coag_n_sub"]` reports the shared substep count per step. See docs/gpu_fast.md for deviations and calibration, docs/gpu_fast_optimization.md for the H100 optimization log (Phases 1-2: 547→23.1 s at 1M cells × 6 h; defaults: auto Pallas coag kernel on GPU, coag_sub_cap=64 — pass 256 for the lower-error setting). Benchmark: `python -m benchmarks.python.bench_fast_1m --cells 1000 --hours 1 --cpu-smoke`.
 
 ## File Layout
 
@@ -79,6 +79,7 @@ tomas_jax/
   fast/water.py               — Tabazadeh 1997 water equilibrium (pure JAX)
   fast/nucleation.py          — Dunne Jbn neutral-binary, analytic gas-ODE integration
   fast/coagulation.py         — Adaptive-capped Euler coagulation (loss-frequency criterion)
+  fast/coagulation_pallas.py  — Opt-in fused Triton kernel for the coag substep loop (GPU, ~3x)
   fast/condensation.py        — Batched PPM driver, global-max capped CFL substeps
   fast/step.py                — Process composition (chem→nucl→mnfix→water→coag→cond→water→mnfix)
   fast/run.py                 — jit(scan) driver: donation, cell chunking, stiffness sorting
@@ -100,6 +101,7 @@ benchmarks/
   python/benchmark_so2_sensitivity.py — SO2 sensitivity benchmark (5 SO2 × 4 modes × 3 altitudes × 2 grids, 48h, 12 figures)
   python/benchmark_dilution.py — Dilution benchmark (3 cases × 24h, all processes + SO2 + dilution, 6 figures)
   python/bench_fast_1m.py     — GPU-fast reduced model benchmark (1M cells × 6h target <10s; --cpu-smoke mode)
+  python/bench_coag_pallas.py — XLA vs Pallas coagulation substep timing (stiff sorted chunk)
 
 tomas_fortran/
   src/                        — 14 core TOMAS Fortran source files (TFL condensation)
@@ -127,6 +129,7 @@ docs/
   so2_chemistry.md            — SO2+OH chemistry (Sun et al. 2022), validation, usage
   dilution.md                 — Dilution/entrainment algorithm, parameters, usage
   gpu_fast.md                 — GPU-fast reduced model: architecture, physics deviations, calibration, usage
+  gpu_fast_optimization.md    — H100 optimization log: measured root causes, phase checklist, results, lessons
   missing_physics.md          — Gap analysis of unimplemented physics
   future_features.md          — Planned improvements: AD, GPU, vmap, multi-species, surrogates
 ```

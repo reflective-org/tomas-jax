@@ -90,7 +90,7 @@ class TestProcessProperties:
     def test_coagulation_number_monotone(self):
         state = _lognormal_cells(4, seed=3, n_range=(1e4, 1e5))
         Nk, Mk = state.Nk, state.Mk
-        N1, M1, ovf, cap = coagulation_step(
+        N1, M1, ovf, cap, n_sub = coagulation_step(
             Nk, Mk, XK, state.temp, state.pres, state.boxvol, dt=360.0
         )
         assert float(jnp.sum(N1)) < float(jnp.sum(Nk))

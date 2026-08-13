@@ -48,8 +48,9 @@ def fast_step(
     alpha=1.0,
     fn_scale=1.0,
     cond_sub_cap=40,
-    coag_sub_cap=256,
-    coag_c_max=0.05,
+    coag_sub_cap=64,
+    coag_c_max=0.1,
+    coag_pallas=None,
 ):
     """Advance a FastState by one outer step of dt seconds.
 
@@ -61,13 +62,23 @@ def fast_step(
         alpha: accommodation coefficient (scalar).
         fn_scale: nucleation rate scale.
         cond_sub_cap / coag_sub_cap: static caps for the shared adaptive
-            substep counts (PPM CFL / coagulation stability).
+            substep counts (PPM CFL / coagulation stability). The
+            coagulation default 64 keeps population-weighted errors of
+            the capped (stiffest ~0.2-3%) cells <= 4.3e-5 vs a converged
+            reference; pass 256 for the lower-error setting (1.0e-5) at
+            ~35% more wall time on stiff-cell workloads.
         coag_c_max: coagulation stability Courant factor.
+        coag_pallas: fused Triton kernel for the coagulation substep
+            loop (~3x faster at high substep counts, reassociation-level
+            differences — see fast/coagulation_pallas). Default None =
+            auto: the Pallas kernel on GPU backends, the XLA path
+            elsewhere (Triton is GPU-only). Pass True/False to force.
 
     Returns:
         (state, diag) — diag dict with per-step diagnostics:
         coag_overflow (C, 2) mass lost past the top bin this step,
-        cond_cap_hit / coag_cap_hit (bool) substep caps exceeded.
+        cond_cap_hit / coag_cap_hit (bool) substep caps exceeded,
+        coag_n_sub (int) the shared coagulation substep count run.
     """
     Nk, Mk, Gc = state.Nk, state.Mk, state.Gc
     xk = state.xk
@@ -88,7 +99,13 @@ def fast_step(
     Mk = equilibrium_water(Mk, temp, rh)
 
     # 4. Coagulation (adaptive-capped Euler substeps + MNFIX)
-    Nk, Mk, coag_overflow, coag_cap_hit = coagulation_step(
+    if coag_pallas is None:
+        coag_pallas = jax.default_backend() == "gpu"
+    if coag_pallas:
+        from .coagulation_pallas import coagulation_step_pallas as coag_fn
+    else:
+        coag_fn = coagulation_step
+    Nk, Mk, coag_overflow, coag_cap_hit, coag_n_sub = coag_fn(
         Nk, Mk, xk, temp, pres, boxvol, dt,
         c_max=coag_c_max, n_sub_cap=coag_sub_cap,
     )
@@ -107,6 +124,7 @@ def fast_step(
         "coag_overflow": coag_overflow,
         "cond_cap_hit": cond_cap_hit,
         "coag_cap_hit": coag_cap_hit,
+        "coag_n_sub": coag_n_sub,
     }
     return state.update(Nk=Nk, Mk=Mk, Gc=Gc), diag
 
