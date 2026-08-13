@@ -49,7 +49,7 @@ def fast_step(
     fn_scale=1.0,
     cond_sub_cap=40,
     coag_sub_cap=256,
-    coag_c_max=0.05,
+    coag_c_max=0.1,
 ):
     """Advance a FastState by one outer step of dt seconds.
 

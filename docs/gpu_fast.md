@@ -111,7 +111,9 @@ over the cell axis is exact.
      loss frequency `kij_kk*N_k + sum_{j>k} kij_kj*N_j + 2*K1M_k/xk_k`
      (self-coagulation + scavenging by larger + TFL promotion by the mass
      flux from below). `n_sub = clip(ceil(dt*max(lambda)/c_max), 1, 256)`
-     with `c_max = 0.05`. Calibration (see below) shows fixed coarse
+     with `c_max = 0.1` (default; was 0.05 — measured identical sig-bin
+     errors at half the substep demand, see
+     docs/gpu_fast_optimization.md). Calibration (see below) shows fixed coarse
      substeps are catastrophically wrong; this criterion keeps
      content-significant bins within ~1% of a fully converged reference.
    - Cap hits are surfaced per step (`cond_cap_hit` / `coag_cap_hit`) —
@@ -151,7 +153,7 @@ empty-bin seeding (`NEPS * xk_geo` SO4 whenever coagulation re-empties a
 bin — identical in the full model), which accumulates to ~1e-8..1e-7 in
 very clean cells (~10/cm³); the benchmark gates at 1e-7.
 
-## Coagulation substep calibration (why adaptive, why c_max=0.05)
+## Coagulation substep calibration (why adaptive; original c_max=0.05 study, default now 0.1)
 
 Measured on 360 s steps, closure = |ΔM|/M with overflow accounted:
 
@@ -206,8 +208,9 @@ Remaining levers toward the 10 s target, in order:
    it on the fly in SMEM instead of materializing (C,40,40) in HBM;
    removes the dominant memory traffic (~10× coag speedup).
 2. Finer chunk bucketing (more chunks after sorting).
-3. `c_max` 0.05 → 0.1 (halves coag work; ~2× coarser accuracy in the
-   stiffest bins only).
+3. ~~`c_max` 0.05 → 0.1~~ — DONE, now the default: measured identical
+   sig-bin errors (p99 1.2e-3) because the 256-substep cap, not c_max,
+   limits the stiffest cells.
 4. Smaller outer dt does NOT help coagulation (total substeps are
    dt-invariant) but reduces per-step PPM caps if `cond_cap_hit` fires.
 
